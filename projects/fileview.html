@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>File Viewer</title>
+  </head>
+  <body>
+    <input type="file" id="file-input">
+    <div id="file-viewer"></div>
+    <script>
+      const fileInput = document.getElementById('file-input');
+      const fileViewer = document.getElementById('file-viewer');
+
+      fileInput.addEventListener('change', () => {
+        const file = fileInput.files[0];
+        const reader = new FileReader();
+
+        reader.onload = () => {
+          const content = reader.result;
+          const fileType = file.type;
+
+          if (fileType.includes('text') || fileType.includes('javascript') || fileType.includes('json') || fileType.includes('xml') || fileType.includes('csv') || fileType.includes('plain')) {
+            fileViewer.innerText = content;
+          } else if (fileType.includes('image')) {
+            fileViewer.innerHTML = `<img src="${content}" alt="${file.name}">`;
+          } else if (fileType.includes('video')) {
+            fileViewer.innerHTML = `<video controls><source src="${content}" type="${fileType}"></video>`;
+          } else {
+            fileViewer.innerHTML = `<a href="${content}" download="${file.name}">${file.name}</a>`;
+          }
+        };
+
+        reader.readAsDataURL(file);
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>ScreenRecorder</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        text-align: center;
+      }
+      #video {
+        width: 100%;
+        max-width: 800px;
+        margin: 0 auto;
+        border: 1px solid #ccc;
+      }
+      button {
+        padding: 12px 24px;
+        font-size: 18px;
+        background-color: #4CAF50;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        margin-top: 24px;
+      }
+      button:hover {
+        background-color: #3e8e41;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>ScreenRecorder</h1>
+    <video id="video" autoplay></video>
+    <button id="start">Start Recording</button>
+    <script>
+      const videoElement = document.getElementById('video');
+      const startButton = document.getElementById('start');
+      let mediaRecorder;
+      let recordedChunks = [];
+
+      startButton.addEventListener('click', async () => {
+        try {
+          const stream = await navigator.mediaDevices.getDisplayMedia({ video: { cursor: 'always' }, audio: true });
+          videoElement.srcObject = stream;
+          mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+          mediaRecorder.addEventListener('dataavailable', (event) => {
+            recordedChunks.push(event.data);
+          });
+          mediaRecorder.addEventListener('stop', () => {
+            const blob = new Blob(recordedChunks, { type: 'video/webm' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'screen-recording.webm';
+            a.click();
+            recordedChunks = [];
+          });
+          mediaRecorder.start();
+        } catch (error) {
+          console.error('Error starting screen recording:', error);
+        }
+      });
+      
+      // Stop recording when the user stops screen sharing
+      videoElement.addEventListener('pause', () => {
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+          mediaRecorder.stop();
+        }
+      });
+
+      
+    </script>
+
+    <h2>Instructions</h2>
+    <o>Press the start recording button and choose what to record, once chosen, like a tab, window, or full screen, it will constantly record. In order to save the file, you must return to the ScreenRecorder window before stopping the screen share. Please know that each recording will be downloaded as a webm file so you may have to convert the file!</o>
+    <p>I hope you enjoy this screen recorder!</p>
+
+    <h2>Conversion Instructions</h2>
+    <p>This site downloads recordings as webm files so you may have to use cloudconvert to use change the video to a different format</p>
+    <p> For the mp4 format you can use https://cloudconvert.com/webm-to-mp4 </p>
+    <marquee>By MetaMysteries8</marquee>
+    
+  </body>
+</html>
