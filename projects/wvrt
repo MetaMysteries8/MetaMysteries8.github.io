@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script src="https://aframe.io/releases/1.2.0/aframe.min.js"></script>
+  <script src="https://cdn.rawgit.com/donmccurdy/aframe-extras/v6.1.2/dist/aframe-extras.min.js"></script>
+  <title>Interactive WebVR Scene with Throwable Objects</title>
+</head>
+<body>
+  <!-- A-Frame scene -->
+  <a-scene>
+    <!-- A-Frame environment -->
+    <a-sky color="#ECECEC"></a-sky>
+    
+    <!-- A-Frame hands (left and right) with grab component -->
+    <a-entity id="leftHand" hand-controls="left" grabbable></a-entity>
+    <a-entity id="rightHand" hand-controls="right" grabbable></a-entity>
+
+    <!-- A-Frame respawn table -->
+    <a-cylinder id="respawnTable" position="0 0 -6" radius="2" height="0.2" color="#8B4513"></a-cylinder>
+
+    <!-- A-Frame throwable objects (spheres) -->
+    <a-sphere position="-1 1 -3" radius="0.2" color="#FF0000" grabbable></a-sphere>
+    <a-sphere position="0 1.5 -5" radius="0.2" color="#00FF00" grabbable></a-sphere>
+    <a-sphere position="1 1 -3" radius="0.2" color="#0000FF" grabbable></a-sphere>
+
+    <!-- A-Frame event listener for tracking objects and respawning them -->
+    <a-entity id="scene" respawn-handler></a-entity>
+  </a-scene>
+
+  <script>
+    AFRAME.registerComponent('respawn-handler', {
+      init: function () {
+        const sceneEl = this.el;
+
+        // Store the initial positions of throwable objects
+        const throwableObjects = document.querySelectorAll('[grabbable]');
+        const initialPositions = Array.from(throwableObjects).map(obj => obj.getAttribute('position'));
+
+        // Check positions and respawn objects on the table if too far away
+        setInterval(() => {
+          throwableObjects.forEach((obj, index) => {
+            const position = obj.getAttribute('position');
+            const distance = position.distanceTo(initialPositions[index]);
+
+            // Respawn if the object is too far away
+            if (distance > 10) {
+              obj.setAttribute('position', { x: 0, y: 1, z: -6 });
+            }
+          });
+        }, 1000);
+      }
+    });
+  </script>
+</body>
+</html>
