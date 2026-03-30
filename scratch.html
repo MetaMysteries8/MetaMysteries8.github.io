@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scratch 2.0 Web Player</title>
+    <style>
+        /* Scratch-themed modern reset */
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #0f172a; /* Slate dark background */
+            color: #f8fafc;
+            font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+            overflow: hidden;
+        }
+
+        /* --- Startup UI Styling --- */
+        #startup-ui {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100%;
+            text-align: center;
+            background: radial-gradient(circle at center, #1e293b 0%, #0f172a 100%);
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 100;
+        }
+
+        /* Scratch Logo colors */
+        .scratch-title {
+            font-size: 3rem;
+            margin-bottom: 10px;
+            font-weight: 900;
+            letter-spacing: 1px;
+            color: #FF8C1A; /* Scratch Orange */
+            text-shadow: 2px 2px 0px rgba(0,0,0,0.3);
+        }
+
+        .scratch-subtitle {
+            font-size: 1.2rem;
+            color: #94a3b8;
+            margin-bottom: 40px;
+        }
+
+        /* File Uploader Styles */
+        .file-section {
+            background: #1e293b;
+            padding: 25px;
+            border-radius: 16px;
+            border: 3px dashed #334155;
+            margin-bottom: 35px;
+            transition: all 0.3s ease;
+            max-width: 400px;
+            width: 90%;
+        }
+
+        .file-section:hover {
+            border-color: #4D97FF; /* Scratch Blue */
+            background: #233147;
+        }
+
+        #file-name-display {
+            margin-top: 15px;
+            font-size: 0.95rem;
+            color: #4D97FF;
+            font-weight: bold;
+        }
+
+        /* Engine Buttons */
+        .btn-container {
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            justify-content: center;
+            max-width: 600px;
+        }
+
+        .btn {
+            background-color: #334155;
+            color: white;
+            border: none;
+            padding: 14px 28px;
+            font-size: 1.05rem;
+            border-radius: 50px; /* Pill shape like Scratch buttons */
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(0,0,0,0.3);
+        }
+
+        .btn-ruffle { background-color: #FF8C1A; color: white; }
+        .btn-ruffle:hover { background-color: #ff9d3d; }
+
+        .btn-cheerpx { background-color: #4D97FF; color: white; }
+        .btn-cheerpx:hover { background-color: #6aa8ff; }
+        
+        .btn-awayfl { background-color: #10b981; color: white; }
+        .btn-awayfl:hover { background-color: #34d399; }
+
+        /* --- Player Container Styling --- */
+        #player-wrapper {
+            display: none;
+            width: 100%;
+            height: 100%;
+            background-color: #000;
+            position: relative;
+        }
+
+        #player-container {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        /* Loading Screen & Progress Bar */
+        #loading-screen {
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-color: #0f172a;
+            z-index: 10;
+        }
+
+        .loading-text {
+            color: #f8fafc;
+            font-size: 1.5rem;
+            margin-bottom: 20px;
+            font-weight: bold;
+        }
+
+        .progress-bar-container {
+            width: 300px;
+            height: 20px;
+            background-color: #1e293b;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            width: 0%;
+            background-color: #4D97FF;
+            border-radius: 10px;
+            transition: width 0.2s ease;
+        }
+
+        /* Exit Button Overlay */
+        #exit-btn {
+            position: absolute;
+            top: -50px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(15, 23, 42, 0.9);
+            color: white;
+            border: 2px solid #334155;
+            border-top: none;
+            padding: 10px 30px;
+            border-radius: 0 0 16px 16px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: bold;
+            z-index: 50;
+            transition: top 0.3s ease;
+        }
+
+        #player-wrapper:hover #exit-btn {
+            top: 0;
+        }
+
+        #exit-btn:hover {
+            background: rgba(255, 140, 26, 0.9); /* Turns Scratch Orange on hover */
+            border-color: #FF8C1A;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Startup Menu -->
+    <div id="startup-ui">
+        <h1 class="scratch-title">Scratch 2.0 Web Player</h1>
+        <p class="scratch-subtitle">Emulate the classic Scratch offline editor directly in your browser</p>
+
+        <!-- Target File Info -->
+        <div class="file-section" style="cursor: default; pointer-events: none;">
+            <div style="font-size: 1.1rem; color: #f8fafc; margin-bottom: 5px;">Target File:</div>
+            <div id="file-name-display" style="font-size: 1.2rem; color: #FF8C1A; font-weight: bold; margin-top: 0;">Official Scratch 2.0 (v425)</div>
+        </div>
+
+        <div class="btn-container">
+            <button class="btn btn-ruffle" onclick="launchPlayer('ruffle')">▶ Play with Ruffle</button>
+            <button class="btn btn-cheerpx" onclick="launchPlayer('cheerpx')">▶ Play with CheerpX</button>
+            <button class="btn btn-awayfl" onclick="launchPlayer('awayfl')">▶ Play with AwayFL</button>
+        </div>
+    </div>
+
+    <!-- The emulator will inject itself here -->
+    <div id="player-wrapper">
+        <button id="exit-btn" onclick="exitToMenu()">Exit Editor</button>
+        
+        <div id="loading-screen">
+            <div class="loading-text" id="loading-status">Starting up...</div>
+            <div class="progress-bar-container">
+                <div class="progress-bar-fill" id="progress-fill"></div>
+            </div>
+        </div>
+
+        <div id="player-container"></div>
+    </div>
+
+    <script>
+        // Official Scratch GitHub release URL
+        const DEFAULT_SWF_URL = "https://github.com/scratchfoundation/scratch-flash/releases/download/v425/Scratch.swf";
+        
+        let targetSwfUrl = DEFAULT_SWF_URL; 
+        let cachedBlobUrl = null; // We will cache the downloaded file here
+        
+        const startupUI = document.getElementById("startup-ui");
+        const playerWrapper = document.getElementById("player-wrapper");
+        const container = document.getElementById("player-container");
+        const loadingScreen = document.getElementById("loading-screen");
+        const loadingStatus = document.getElementById("loading-status");
+        const progressFill = document.getElementById("progress-fill");
+
+        let ruffleLoaded = false;
+        let cheerpxLoaded = false;
+        let awayflLoaded = false;
+
+        // --- Fetch SWF with Progress Tracker ---
+        async function fetchSwfWithProgress() {
+            // If we already downloaded the file, skip downloading!
+            if (cachedBlobUrl) return cachedBlobUrl;
+
+            loadingStatus.innerText = "Downloading Scratch 2.0 (11MB)...";
+            progressFill.style.width = "0%";
+
+            try {
+                const response = await fetch(targetSwfUrl);
+                if (!response.ok) throw new Error("Network response was not ok");
+                
+                const contentLength = response.headers.get('content-length');
+                const total = contentLength ? parseInt(contentLength, 10) : 0;
+                let loaded = 0;
+                
+                const reader = response.body.getReader();
+                const chunks = [];
+                
+                while(true) {
+                    const {done, value} = await reader.read();
+                    if (done) break;
+                    
+                    chunks.push(value);
+                    loaded += value.length;
+                    
+                    if (total) {
+                        const percent = Math.round((loaded / total) * 100);
+                        progressFill.style.width = `${percent}%`;
+                        if (percent === 100) loadingStatus.innerText = "Processing File...";
+                    } else {
+                        // Fallback if the server doesn't tell us the total file size
+                        loadingStatus.innerText = `Downloading Scratch... ${Math.round(loaded/1024/1024)} MB`;
+                        progressFill.style.width = "50%"; // Fake progress
+                    }
+                }
+                
+                // Combine chunks into a single playable file in memory
+                const blob = new Blob(chunks, {type: 'application/x-shockwave-flash'});
+                cachedBlobUrl = URL.createObjectURL(blob);
+                return cachedBlobUrl;
+
+            } catch (error) {
+                console.warn("Could not track download progress (CORS restriction). Falling back to direct URL load.", error);
+                // If standard fetch fails due to strict CORS, we just pass the URL directly to the engine
+                return targetSwfUrl; 
+            }
+        }
+
+        // --- Main Launch Function ---
+        async function launchPlayer(engine) {
+            startupUI.style.display = "none";
+            playerWrapper.style.display = "block";
+            loadingScreen.style.display = "flex"; 
+            container.innerHTML = ''; 
+
+            // Fullscreen attempt
+            const docElm = document.documentElement;
+            if (docElm.requestFullscreen) docElm.requestFullscreen().catch(e => {});
+
+            // 1. Download the SWF and show progress (if not already downloaded)
+            const finalPlayableUrl = await fetchSwfWithProgress();
+
+            // 2. Load the requested Emulator Engine
+            loadingStatus.innerText = `Initializing ${engine.toUpperCase()} Engine...`;
+            progressFill.style.width = "100%";
+
+            if (engine === 'ruffle') loadRuffle(finalPlayableUrl);
+            else if (engine === 'cheerpx') loadCheerpX(finalPlayableUrl);
+            else if (engine === 'awayfl') loadAwayFL(finalPlayableUrl);
+        }
+
+        // --- Exit Function ---
+        function exitToMenu() {
+            if (document.exitFullscreen && document.fullscreenElement) {
+                document.exitFullscreen().catch(e => {});
+            }
+            container.innerHTML = '';
+            playerWrapper.style.display = "none";
+            loadingScreen.style.display = "none";
+            startupUI.style.display = "flex";
+        }
+
+        // --- Ruffle Loader ---
+        function loadRuffle(playUrl) {
+            const bootRuffle = () => {
+                loadingScreen.style.display = "none";
+                window.RufflePlayer = window.RufflePlayer || {};
+                const ruffle = window.RufflePlayer.newest();
+                const player = ruffle.createPlayer();
+                container.appendChild(player);
+
+                player.style.width = "100%";
+                player.style.height = "100%";
+
+                player.load({
+                    url: playUrl,
+                    allowScriptAccess: false,
+                    autoplay: "on",
+                    unmuteOverlay: "hidden",
+                    letterbox: "on"
+                }).catch(e => {
+                    alert("Ruffle Error. The file might be corrupted or incompatible.");
+                    exitToMenu();
+                });
+            };
+
+            if (!ruffleLoaded) {
+                const script = document.createElement("script");
+                script.src = "https://unpkg.com/@ruffle-rs/ruffle?t=" + Date.now();
+                script.onload = () => { ruffleLoaded = true; bootRuffle(); };
+                script.onerror = () => { alert("Failed to load Ruffle CDN."); exitToMenu(); };
+                document.head.appendChild(script);
+            } else {
+                bootRuffle();
+            }
+        }
+
+        // --- CheerpX Loader ---
+        function loadCheerpX(playUrl) {
+            const bootCheerpX = () => {
+                loadingScreen.style.display = "none";
+                container.innerHTML = `<embed src="${playUrl}" width="100%" height="100%" type="application/x-shockwave-flash">`;
+            };
+
+            if (!cheerpxLoaded) {
+                const script = document.createElement("script");
+                script.src = "https://cxf.leaningtech.com/latest/cxflash.js";
+                script.onload = () => {
+                    cheerpxLoaded = true;
+                    window.ppInit(); 
+                    bootCheerpX();
+                };
+                script.onerror = () => { alert("Failed to load CheerpX CDN."); exitToMenu(); };
+                document.head.appendChild(script);
+            } else {
+                bootCheerpX();
+            }
+        }
+
+        // --- AwayFL Loader ---
+        function loadAwayFL(playUrl) {
+            const bootAwayFL = () => {
+                loadingScreen.style.display = "none";
+                container.innerHTML = '<div id="awayfl-target" style="width:100%; height:100%;"></div>';
+                window.swfObject.embedSWF(playUrl, 'awayfl-target', '100%', '100%');
+            };
+
+            if (!awayflLoaded) {
+                const script = document.createElement('script');
+                script.src = "https://cdn.jsdelivr.net/gh/awayfl/awayfl-embed@master/dist/embed.js";
+                script.onload = () => { awayflLoaded = true; bootAwayFL(); };
+                script.onerror = () => { alert("Failed to load AwayFL CDN."); exitToMenu(); };
+                document.head.appendChild(script);
+            } else {
+                bootAwayFL();
+            }
+        }
+    </script>
+</body>
+</html>
