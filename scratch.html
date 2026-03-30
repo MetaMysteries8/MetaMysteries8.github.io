@@ -47,7 +47,7 @@
         .scratch-subtitle {
             font-size: 1.2rem;
             color: #94a3b8;
-            margin-bottom: 40px;
+            margin-bottom: 30px;
         }
 
         /* File Uploader Styles */
@@ -56,22 +56,33 @@
             padding: 25px;
             border-radius: 16px;
             border: 3px dashed #334155;
-            margin-bottom: 35px;
+            margin-bottom: 20px;
             transition: all 0.3s ease;
             max-width: 400px;
             width: 90%;
         }
 
-        .file-section:hover {
-            border-color: #4D97FF; /* Scratch Blue */
-            background: #233147;
+        /* Checkbox Styling */
+        .options-section {
+            margin-bottom: 30px;
         }
 
-        #file-name-display {
-            margin-top: 15px;
-            font-size: 0.95rem;
-            color: #4D97FF;
-            font-weight: bold;
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            font-size: 1.1rem;
+            color: #cbd5e1;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .checkbox-label input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+            accent-color: #FF8C1A;
         }
 
         /* Engine Buttons */
@@ -148,23 +159,6 @@
             font-weight: bold;
         }
 
-        .progress-bar-container {
-            width: 300px;
-            height: 20px;
-            background-color: #1e293b;
-            border-radius: 10px;
-            overflow: hidden;
-            box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
-        }
-
-        .progress-bar-fill {
-            height: 100%;
-            width: 0%;
-            background-color: #4D97FF;
-            border-radius: 10px;
-            transition: width 0.2s ease;
-        }
-
         /* Exit Button Overlay */
         #exit-btn {
             position: absolute;
@@ -207,6 +201,14 @@
             <div id="file-name-display" style="font-size: 1.2rem; color: #FF8C1A; font-weight: bold; margin-top: 0;">Official Scratch 2.0 (v425)</div>
         </div>
 
+        <!-- Fullscreen Option -->
+        <div class="options-section">
+            <label class="checkbox-label" for="fullscreen-checkbox">
+                <input type="checkbox" id="fullscreen-checkbox">
+                Launch in Fullscreen Mode
+            </label>
+        </div>
+
         <div class="btn-container">
             <button class="btn btn-ruffle" onclick="launchPlayer('ruffle')">▶ Play with Ruffle</button>
             <button class="btn btn-cheerpx" onclick="launchPlayer('cheerpx')">▶ Play with CheerpX</button>
@@ -219,10 +221,7 @@
         <button id="exit-btn" onclick="exitToMenu()">Exit Editor</button>
         
         <div id="loading-screen">
-            <div class="loading-text" id="loading-status">Starting up...</div>
-            <div class="progress-bar-container">
-                <div class="progress-bar-fill" id="progress-fill"></div>
-            </div>
+            <div class="loading-text" id="loading-status">Starting Engine...</div>
         </div>
 
         <div id="player-container"></div>
@@ -232,68 +231,16 @@
         // Official Scratch GitHub release URL
         const DEFAULT_SWF_URL = "https://github.com/scratchfoundation/scratch-flash/releases/download/v425/Scratch.swf";
         
-        let targetSwfUrl = DEFAULT_SWF_URL; 
-        let cachedBlobUrl = null; // We will cache the downloaded file here
-        
         const startupUI = document.getElementById("startup-ui");
         const playerWrapper = document.getElementById("player-wrapper");
         const container = document.getElementById("player-container");
         const loadingScreen = document.getElementById("loading-screen");
         const loadingStatus = document.getElementById("loading-status");
-        const progressFill = document.getElementById("progress-fill");
+        const fullscreenCheckbox = document.getElementById("fullscreen-checkbox");
 
         let ruffleLoaded = false;
         let cheerpxLoaded = false;
         let awayflLoaded = false;
-
-        // --- Fetch SWF with Progress Tracker ---
-        async function fetchSwfWithProgress() {
-            // If we already downloaded the file, skip downloading!
-            if (cachedBlobUrl) return cachedBlobUrl;
-
-            loadingStatus.innerText = "Downloading Scratch 2.0 (11MB)...";
-            progressFill.style.width = "0%";
-
-            try {
-                const response = await fetch(targetSwfUrl);
-                if (!response.ok) throw new Error("Network response was not ok");
-                
-                const contentLength = response.headers.get('content-length');
-                const total = contentLength ? parseInt(contentLength, 10) : 0;
-                let loaded = 0;
-                
-                const reader = response.body.getReader();
-                const chunks = [];
-                
-                while(true) {
-                    const {done, value} = await reader.read();
-                    if (done) break;
-                    
-                    chunks.push(value);
-                    loaded += value.length;
-                    
-                    if (total) {
-                        const percent = Math.round((loaded / total) * 100);
-                        progressFill.style.width = `${percent}%`;
-                        if (percent === 100) loadingStatus.innerText = "Processing File...";
-                    } else {
-                        // Fallback if the server doesn't tell us the total file size
-                        loadingStatus.innerText = `Downloading Scratch... ${Math.round(loaded/1024/1024)} MB`;
-                        progressFill.style.width = "50%"; // Fake progress
-                    }
-                }
-                
-                // Combine chunks into a single playable file in memory
-                const blob = new Blob(chunks, {type: 'application/x-shockwave-flash'});
-                cachedBlobUrl = URL.createObjectURL(blob);
-                return cachedBlobUrl;
-
-            } catch (error) {
-                console.warn("Could not track download progress (CORS restriction). Falling back to direct URL load.", error);
-                // If standard fetch fails due to strict CORS, we just pass the URL directly to the engine
-                return targetSwfUrl; 
-            }
-        }
 
         // --- Main Launch Function ---
         async function launchPlayer(engine) {
@@ -302,16 +249,16 @@
             loadingScreen.style.display = "flex"; 
             container.innerHTML = ''; 
 
-            // Fullscreen attempt
-            const docElm = document.documentElement;
-            if (docElm.requestFullscreen) docElm.requestFullscreen().catch(e => {});
+            // Only attempt fullscreen if the user checked the box
+            if (fullscreenCheckbox.checked) {
+                const docElm = document.documentElement;
+                if (docElm.requestFullscreen) docElm.requestFullscreen().catch(e => console.warn(e));
+            }
 
-            // 1. Download the SWF and show progress (if not already downloaded)
-            const finalPlayableUrl = await fetchSwfWithProgress();
+            // We pass the raw URL to the engines so they handle CORS, streaming, and base-paths natively
+            const finalPlayableUrl = DEFAULT_SWF_URL;
 
-            // 2. Load the requested Emulator Engine
             loadingStatus.innerText = `Initializing ${engine.toUpperCase()} Engine...`;
-            progressFill.style.width = "100%";
 
             if (engine === 'ruffle') loadRuffle(finalPlayableUrl);
             else if (engine === 'cheerpx') loadCheerpX(finalPlayableUrl);
@@ -348,7 +295,8 @@
                     unmuteOverlay: "hidden",
                     letterbox: "on"
                 }).catch(e => {
-                    alert("Ruffle Error. The file might be corrupted or incompatible.");
+                    console.error("Ruffle Runtime Error:", e);
+                    alert("Ruffle Error: Scratch 2.0 uses complex ActionScript 3 which Ruffle is still perfecting. If it fails to load completely, try CheerpX!");
                     exitToMenu();
                 });
             };
