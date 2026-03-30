@@ -117,9 +117,6 @@
         .btn-ruffle { background-color: #FF8C1A; color: white; }
         .btn-ruffle:hover { background-color: #ff9d3d; }
 
-        .btn-cheerpx { background-color: #4D97FF; color: white; }
-        .btn-cheerpx:hover { background-color: #6aa8ff; }
-        
         .btn-awayfl { background-color: #10b981; color: white; }
         .btn-awayfl:hover { background-color: #34d399; }
 
@@ -211,7 +208,6 @@
 
         <div class="btn-container">
             <button class="btn btn-ruffle" onclick="launchPlayer('ruffle')">▶ Play with Ruffle</button>
-            <button class="btn btn-cheerpx" onclick="launchPlayer('cheerpx')">▶ Play with CheerpX</button>
             <button class="btn btn-awayfl" onclick="launchPlayer('awayfl')">▶ Play with AwayFL</button>
         </div>
     </div>
@@ -239,7 +235,6 @@
         const fullscreenCheckbox = document.getElementById("fullscreen-checkbox");
 
         let ruffleLoaded = false;
-        let cheerpxLoaded = false;
         let awayflLoaded = false;
 
         // --- Main Launch Function ---
@@ -261,7 +256,6 @@
             loadingStatus.innerText = `Initializing ${engine.toUpperCase()} Engine...`;
 
             if (engine === 'ruffle') loadRuffle(finalPlayableUrl);
-            else if (engine === 'cheerpx') loadCheerpX(finalPlayableUrl);
             else if (engine === 'awayfl') loadAwayFL(finalPlayableUrl);
         }
 
@@ -309,28 +303,6 @@
                 document.head.appendChild(script);
             } else {
                 bootRuffle();
-            }
-        }
-
-        // --- CheerpX Loader ---
-        function loadCheerpX(playUrl) {
-            const bootCheerpX = () => {
-                loadingScreen.style.display = "none";
-                container.innerHTML = `<embed src="${playUrl}" width="100%" height="100%" type="application/x-shockwave-flash">`;
-            };
-
-            if (!cheerpxLoaded) {
-                const script = document.createElement("script");
-                script.src = "https://cxf.leaningtech.com/latest/cxflash.js";
-                script.onload = () => {
-                    cheerpxLoaded = true;
-                    window.ppInit(); 
-                    bootCheerpX();
-                };
-                script.onerror = () => { alert("Failed to load CheerpX CDN."); exitToMenu(); };
-                document.head.appendChild(script);
-            } else {
-                bootCheerpX();
             }
         }
 
