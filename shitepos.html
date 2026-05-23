@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Ultimate Shitpost</title>
+
+    <!-- Discord & OpenGraph Embed Metadata -->
+    <meta property="og:type" content="video.other">
+    <meta property="og:title" content="An Absolute Masterpiece">
+    <meta property="og:description" content="Yes, this video is actually 85 hours long. Enjoy.">
+    
+    <!-- Link to your video file (Replace with your actual domain) -->
+    <meta property="og:video" content="https://yourdomain.com">
+    <meta property="og:video:secure_url" content="https://yourdomain.com">
+    <meta property="og:video:type" content="video/mp4">
+    
+    <!-- Tricks Discord into giving you a massive widescreen player box -->
+    <meta property="og:video:width" content="1280">
+    <meta property="og:video:height" content="720">
+
+    <style>
+        body {
+            background-color: #0b0b0b;
+            color: #ffffff;
+            font-family: 'Courier New', Courier, monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+        h1 {
+            color: #ff0055;
+            text-shadow: 0 0 10px #ff0055;
+            font-size: 2rem;
+            margin-bottom: 20px;
+            text-transform: uppercase;
+        }
+        #video-container {
+            width: 80%;
+            max-width: 800px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        video {
+            border: 4px solid #ff0055;
+            box-shadow: 0 0 20px #ff0055;
+            width: 100%;
+            /* Keeps the 60x34 pixels hyper-sharp on the web page */
+            image-rendering: pixelated; 
+            image-rendering: crisp-edges;
+        }
+        .placeholder {
+            font-size: 2.5rem;
+            color: #555;
+            text-shadow: 0 0 5px #222;
+            font-weight: bold;
+            letter-spacing: 2px;
+            animation: blink 1.5s infinite ease-in-out;
+        }
+        @keyframes blink {
+            0%, 100% { opacity: 0.4; }
+            50% { opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+
+    <h1>THE 85-HOUR ARCHIVE</h1>
+    
+    <div id="video-container">
+        <!-- Standard HTML5 Video Player -->
+        <video id="memeVideo" controls autoplay loop muted>
+            <source src="shitepos.mp4" type="video/mp4">
+            Your browser does not support the video tag.
+        </video>
+    </div>
+
+    <script>
+        const video = document.getElementById('memeVideo');
+        const container = document.getElementById('video-container');
+
+        // Function to nuke the player and display the placeholder text
+        function triggerPlaceholder() {
+            container.innerHTML = '<div class="placeholder">(shitepostcomesoon)</div>';
+        }
+
+        // If the server returns a 404 or the file is missing/corrupt
+        video.addEventListener('error', function() {
+            triggerPlaceholder();
+        }, true);
+
+        // Safety fallback: If it hasn't started loading any data within 5 seconds
+        setTimeout(() => {
+            if (video.networkState === video.NETWORK_NO_SOURCE || video.readyState === 0) {
+                triggerPlaceholder();
+            }
+        }, 5000);
+    </script>
+
+</body>
+</html>
