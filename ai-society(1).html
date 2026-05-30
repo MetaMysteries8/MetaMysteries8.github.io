@@ -1,0 +1,1321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Society Simulator</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap');
+
+  :root {
+    --bg: #050810;
+    --panel: #0a0f1e;
+    --border: #1a2a4a;
+    --accent: #00d4ff;
+    --accent2: #ff6b35;
+    --accent3: #7fff00;
+    --text: #c8e0ff;
+    --dim: #4a6080;
+    --danger: #ff2244;
+    --gold: #ffd700;
+    --glow: 0 0 20px rgba(0,212,255,0.4);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Share Tech Mono', monospace;
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+  }
+
+  /* ─── SCREENS ─── */
+  .screen { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 100; }
+  .screen.hidden { display: none; }
+
+  /* SETUP SCREEN */
+  #setupScreen {
+    background: radial-gradient(ellipse at 50% 30%, #0a1530 0%, #050810 70%);
+    flex-direction: column;
+    gap: 0;
+    overflow-y: auto;
+    padding: 20px;
+  }
+
+  .title-block {
+    text-align: center;
+    margin-bottom: 24px;
+  }
+  .title-block h1 {
+    font-family: 'Orbitron', sans-serif;
+    font-size: clamp(22px,4vw,42px);
+    font-weight: 900;
+    letter-spacing: 4px;
+    color: var(--accent);
+    text-shadow: 0 0 40px rgba(0,212,255,0.6);
+    animation: pulse 3s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100%{text-shadow:0 0 40px rgba(0,212,255,0.6)} 50%{text-shadow:0 0 80px rgba(0,212,255,1)} }
+  .title-block p { color: var(--dim); font-size:13px; margin-top:6px; letter-spacing:2px; }
+
+  .setup-container {
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    gap: 20px;
+    width: 100%;
+    max-width: 900px;
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 18px;
+  }
+  .panel-title {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 11px;
+    letter-spacing: 3px;
+    color: var(--accent);
+    margin-bottom: 14px;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+  }
+
+  /* API KEY SETUP */
+  .api-row { margin-bottom:10px; }
+  .api-row label { font-size:11px; color:var(--dim); display:block; margin-bottom:4px; }
+  .api-row input {
+    width:100%; background:#060c1a; border:1px solid var(--border);
+    color:var(--text); padding:8px 10px; border-radius:4px; font-family:inherit;
+    font-size:12px; outline:none;
+    transition: border-color 0.2s;
+  }
+  .api-row input:focus { border-color: var(--accent); }
+
+  .byop-btn {
+    width:100%; padding:9px; background:linear-gradient(135deg,#1a3a6a,#0a1a3a);
+    border:1px solid var(--accent); color:var(--accent); border-radius:4px;
+    cursor:pointer; font-family:'Orbitron',sans-serif; font-size:10px;
+    letter-spacing:2px; margin-top:8px; transition:all 0.2s;
+  }
+  .byop-btn:hover { background:rgba(0,212,255,0.15); box-shadow:var(--glow); }
+
+  /* CHARACTER BUILDER */
+  .char-form { display:flex; flex-direction:column; gap:10px; }
+  .char-form select, .char-form input[type=text] {
+    background:#060c1a; border:1px solid var(--border); color:var(--text);
+    padding:8px 10px; border-radius:4px; font-family:inherit; font-size:12px;
+    outline:none; width:100%;
+  }
+  .char-form select:focus, .char-form input:focus { border-color:var(--accent); }
+
+  .trait-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+  .trait-btn {
+    padding:5px 8px; background:#060c1a; border:1px solid var(--border);
+    color:var(--dim); border-radius:4px; cursor:pointer; font-size:10px;
+    text-align:center; transition:all 0.15s; font-family:inherit;
+  }
+  .trait-btn.active { border-color:var(--accent3); color:var(--accent3); background:rgba(127,255,0,0.08); }
+
+  .add-char-btn {
+    padding:10px; background:linear-gradient(135deg,#1a3a1a,#0a1a0a);
+    border:1px solid var(--accent3); color:var(--accent3); border-radius:4px;
+    cursor:pointer; font-family:'Orbitron',sans-serif; font-size:10px;
+    letter-spacing:2px; transition:all 0.2s;
+  }
+  .add-char-btn:hover { background:rgba(127,255,0,0.12); box-shadow:0 0 15px rgba(127,255,0,0.3); }
+
+  /* ROSTER */
+  .roster-panel { display:flex; flex-direction:column; }
+  .roster-list { flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:6px; min-height:120px; }
+  .roster-item {
+    background:#060c1a; border:1px solid var(--border); border-radius:4px;
+    padding:8px 10px; display:flex; align-items:center; gap:8px;
+    animation: slideIn 0.3s ease;
+  }
+  @keyframes slideIn { from{opacity:0;transform:translateX(20px)} to{opacity:1;transform:none} }
+  .roster-avatar { width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:14px; flex-shrink:0; }
+  .roster-info { flex:1; min-width:0; }
+  .roster-name { font-size:12px; color:var(--text); }
+  .roster-sub { font-size:10px; color:var(--dim); }
+  .roster-remove { background:none; border:none; color:var(--danger); cursor:pointer; font-size:14px; padding:2px 6px; }
+
+  .launch-btn {
+    margin-top:14px; padding:14px; background:linear-gradient(135deg,#1a0a30,#300a1a);
+    border:1px solid var(--accent2); color:var(--accent2); border-radius:6px;
+    cursor:pointer; font-family:'Orbitron',sans-serif; font-size:13px;
+    letter-spacing:3px; transition:all 0.3s; font-weight:700;
+  }
+  .launch-btn:hover { background:rgba(255,107,53,0.15); box-shadow:0 0 30px rgba(255,107,53,0.4); transform:translateY(-1px); }
+  .launch-btn:disabled { opacity:0.4; cursor:not-allowed; transform:none; }
+
+  /* ─── GAME SCREEN ─── */
+  #gameScreen { background:var(--bg); }
+
+  canvas { display:block; }
+
+  /* HUD */
+  #hud {
+    position:fixed; top:0; left:0; right:0; z-index:50;
+    display:flex; align-items:center; gap:10px; padding:8px 12px;
+    background:rgba(5,8,16,0.85); border-bottom:1px solid var(--border);
+    backdrop-filter:blur(8px);
+  }
+  .hud-title { font-family:'Orbitron',sans-serif; font-size:11px; color:var(--accent); letter-spacing:2px; white-space:nowrap; }
+  .hud-stat { font-size:10px; color:var(--dim); white-space:nowrap; }
+  .hud-stat span { color:var(--text); }
+  .hud-spacer { flex:1; }
+  .hud-btn {
+    padding:4px 10px; background:var(--panel); border:1px solid var(--border);
+    color:var(--dim); border-radius:4px; cursor:pointer; font-family:inherit;
+    font-size:10px; transition:all 0.2s;
+  }
+  .hud-btn:hover { border-color:var(--accent); color:var(--accent); }
+  .hud-btn.active { border-color:var(--accent2); color:var(--accent2); }
+
+  /* LOG PANEL */
+  #logPanel {
+    position:fixed; bottom:0; left:0; width:360px; z-index:50;
+    background:rgba(5,8,16,0.9); border-right:1px solid var(--border); border-top:1px solid var(--border);
+    backdrop-filter:blur(8px);
+  }
+  .log-header {
+    padding:6px 12px; display:flex; align-items:center; gap:8px;
+    border-bottom:1px solid var(--border);
+  }
+  .log-title { font-family:'Orbitron',sans-serif; font-size:9px; letter-spacing:2px; color:var(--accent); }
+  .log-toggle { margin-left:auto; background:none; border:none; color:var(--dim); cursor:pointer; font-size:16px; }
+  #logList {
+    height:160px; overflow-y:auto; padding:6px;
+    display:flex; flex-direction:column; gap:3px;
+  }
+  .log-entry {
+    font-size:10px; padding:3px 6px; border-radius:3px;
+    border-left:2px solid var(--border);
+    animation: fadeIn 0.4s ease;
+  }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:none} }
+  .log-entry.action { border-color:var(--accent); color:#a0c8e8; }
+  .log-entry.event { border-color:var(--accent2); color:#e0a88a; }
+  .log-entry.crisis { border-color:var(--danger); color:#ff8899; }
+  .log-entry.society { border-color:var(--accent3); color:#aaee88; }
+  .log-time { color:var(--dim); font-size:9px; }
+
+  /* SELECTED CHAR PANEL */
+  #charPanel {
+    position:fixed; top:44px; right:0; width:280px; z-index:50;
+    background:rgba(5,8,16,0.92); border-left:1px solid var(--border);
+    backdrop-filter:blur(8px); padding:12px;
+    transition: transform 0.3s;
+  }
+  #charPanel.hidden { transform:translateX(100%); }
+  .char-panel-name { font-family:'Orbitron',sans-serif; font-size:14px; color:var(--text); margin-bottom:4px; }
+  .char-panel-model { font-size:10px; color:var(--dim); margin-bottom:12px; }
+  .needs-bars { display:flex; flex-direction:column; gap:6px; margin-bottom:12px; }
+  .need-row { display:flex; align-items:center; gap:8px; }
+  .need-label { font-size:10px; color:var(--dim); width:60px; flex-shrink:0; }
+  .need-bar-bg { flex:1; height:6px; background:#0a0f1e; border-radius:3px; overflow:hidden; border:1px solid var(--border); }
+  .need-bar-fill { height:100%; border-radius:3px; transition:width 0.5s; }
+  .need-val { font-size:10px; color:var(--dim); width:28px; text-align:right; }
+
+  .char-thought {
+    background:#060c1a; border:1px solid var(--border); border-radius:4px;
+    padding:8px; font-size:11px; color:var(--text); line-height:1.5;
+    min-height:60px; font-style:italic;
+  }
+  .char-status-tag {
+    display:inline-block; margin-top:6px; padding:2px 8px; border-radius:10px;
+    font-size:9px; letter-spacing:1px;
+  }
+
+  /* SOCIETY PANEL */
+  #societyPanel {
+    position:fixed; top:44px; left:0; width:200px; z-index:50;
+    background:rgba(5,8,16,0.88); border-right:1px solid var(--border);
+    backdrop-filter:blur(8px); padding:10px;
+  }
+  .soc-title { font-family:'Orbitron',sans-serif; font-size:9px; letter-spacing:2px; color:var(--accent3); margin-bottom:10px; }
+  .soc-stat { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; font-size:10px; }
+  .soc-stat-label { color:var(--dim); }
+  .soc-stat-val { color:var(--text); }
+  .soc-bar-bg { height:4px; background:#0a0f1e; border-radius:2px; margin-top:2px; margin-bottom:8px; overflow:hidden; }
+  .soc-bar-fill { height:100%; border-radius:2px; transition:width 1s; }
+
+  /* DAY/NIGHT */
+  #dayNight {
+    position:fixed; top:44px; left:50%; transform:translateX(-50%);
+    z-index:50; font-family:'Orbitron',sans-serif; font-size:10px;
+    color:var(--dim); letter-spacing:2px; text-align:center;
+    pointer-events:none;
+  }
+
+  /* SPEED CONTROLS */
+  #speedControls {
+    position:fixed; bottom:210px; left:12px; z-index:51;
+    display:flex; gap:4px;
+  }
+  .speed-btn {
+    width:32px; height:32px; background:var(--panel); border:1px solid var(--border);
+    color:var(--dim); border-radius:4px; cursor:pointer; font-family:inherit;
+    font-size:12px; display:flex; align-items:center; justify-content:center;
+    transition:all 0.2s;
+  }
+  .speed-btn.active { border-color:var(--accent); color:var(--accent); }
+
+  /* TOOLTIP */
+  #tooltip {
+    position:fixed; pointer-events:none; z-index:200;
+    background:rgba(5,8,16,0.95); border:1px solid var(--accent);
+    border-radius:4px; padding:6px 10px; font-size:10px; color:var(--text);
+    display:none; max-width:180px;
+  }
+
+  /* LOADING */
+  #loadingOverlay {
+    position:fixed; inset:0; background:rgba(5,8,16,0.9);
+    display:flex; align-items:center; justify-content:center;
+    z-index:200; font-family:'Orbitron',sans-serif; letter-spacing:3px;
+    color:var(--accent); font-size:14px; flex-direction:column; gap:12px;
+    pointer-events:none; transition:opacity 0.5s;
+  }
+  #loadingOverlay.hidden { opacity:0; pointer-events:none; }
+  .loading-dots::after { content:'...'; animation: dots 1.5s infinite; }
+  @keyframes dots { 0%{content:'.'} 33%{content:'..'} 66%{content:'...'} }
+
+  /* Scrollbars */
+  ::-webkit-scrollbar { width:4px; }
+  ::-webkit-scrollbar-track { background:#060c1a; }
+  ::-webkit-scrollbar-thumb { background:var(--border); border-radius:2px; }
+
+  select option { background:#060c1a; }
+
+  .emoji-picker { display:flex; gap:4px; flex-wrap:wrap; }
+  .emoji-opt { font-size:18px; cursor:pointer; padding:2px; border-radius:3px; transition:transform 0.1s; }
+  .emoji-opt:hover { transform:scale(1.3); }
+  .emoji-opt.selected { outline:2px solid var(--accent); border-radius:3px; }
+
+  .info-badge {
+    display:inline-block; background:rgba(0,212,255,0.1); border:1px solid var(--accent);
+    color:var(--accent); padding:2px 6px; border-radius:3px; font-size:9px; letter-spacing:1px;
+  }
+</style>
+</head>
+<body>
+
+<!-- SETUP SCREEN -->
+<div id="setupScreen" class="screen">
+  <div class="title-block">
+    <h1>⬡ AI SOCIETY SIM ⬡</h1>
+    <p>BUILD A CIVILIZATION · WATCH IT THRIVE OR COLLAPSE</p>
+  </div>
+
+  <div class="setup-container">
+    <!-- LEFT: API + Character Builder -->
+    <div style="display:flex;flex-direction:column;gap:14px;">
+      <input type="hidden" id="appKeyInput" value="">
+      <input type="hidden" id="apiKeyInput" value="">
+      <div class="panel" style="text-align:center;">
+        <button class="byop-btn" onclick="startBYOP()" style="width:100%;">⚡ AUTHORIZE WITH POLLINATIONS</button>
+        <div id="byopNote" style="font-size:9px;color:var(--dim);margin-top:6px;">Authorize your Pollen to power the simulation.</div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">➕ Add Character</div>
+        <div class="char-form">
+          <input type="text" id="charName" placeholder="Character name...">
+          <div>
+            <div style="font-size:10px;color:var(--dim);margin-bottom:6px;">Avatar</div>
+            <div class="emoji-picker" id="emojiPicker">
+              👨 👩 🧔 👱 🧑 👴 👵 🧙 🧝 🤖 🧟 👽 🧛 🧜 🦸 🤠 👮 👷
+            </div>
+          </div>
+          <div>
+            <div style="font-size:10px;color:var(--dim);margin-bottom:4px;display:flex;align-items:center;gap:8px;">
+              AI Model
+              <span id="modelLoadStatus" style="color:var(--dim);font-size:9px;"></span>
+            </div>
+            <select id="modelSelect">
+              <option value="openai">⏳ Loading models...</option>
+            </select>
+            <div id="modelMeta" style="font-size:9px;color:var(--dim);margin-top:4px;line-height:1.5;min-height:14px;"></div>
+          </div>
+          <div>
+            <div style="font-size:10px;color:var(--dim);margin-bottom:6px;">Personality Traits</div>
+            <div class="trait-grid" id="traitGrid">
+              <button class="trait-btn" data-trait="curious">🔍 Curious</button>
+              <button class="trait-btn" data-trait="aggressive">⚔️ Aggressive</button>
+              <button class="trait-btn" data-trait="cooperative">🤝 Cooperative</button>
+              <button class="trait-btn" data-trait="creative">🎨 Creative</button>
+              <button class="trait-btn" data-trait="lazy">😴 Lazy</button>
+              <button class="trait-btn" data-trait="leader">👑 Leader</button>
+              <button class="trait-btn" data-trait="spiritual">🙏 Spiritual</button>
+              <button class="trait-btn" data-trait="scientist">🔬 Scientist</button>
+            </div>
+          </div>
+          <button class="add-char-btn" onclick="addCharacter()">+ ADD TO SOCIETY</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: Roster -->
+    <div class="panel" style="display:flex;flex-direction:column;">
+      <div class="panel-title">👥 Roster <span id="rosterCount" style="color:var(--dim)">(0 / 12)</span></div>
+      <div class="roster-list" id="rosterList">
+        <div style="color:var(--dim);font-size:11px;text-align:center;padding:20px;">Add characters to begin...</div>
+      </div>
+
+      <div style="margin-top:14px;">
+        <div class="panel-title">📋 Scenario</div>
+        <select id="scenarioSelect" style="width:100%;background:#060c1a;border:1px solid var(--border);color:var(--text);padding:8px;border-radius:4px;font-family:inherit;font-size:12px;outline:none;margin-bottom:8px;">
+          <option value="blank">🌍 Blank World — survive from scratch</option>
+          <option value="postapoc">☢️ Post-Apocalypse — rebuild civilization</option>
+          <option value="island">🏝️ Desert Island — escape or build paradise</option>
+          <option value="space">🚀 Space Colony — terraform a new world</option>
+          <option value="medieval">⚔️ Medieval Kingdom — forge an empire</option>
+        </select>
+        <div style="font-size:9px;color:var(--dim);line-height:1.6;" id="scenarioDesc">
+          A pristine world. No structures, no rules. Build a civilization from nothing.
+        </div>
+      </div>
+
+      <button class="launch-btn" id="launchBtn" onclick="launchSim()" disabled>
+        ▶ LAUNCH SIMULATION
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- GAME SCREEN -->
+<div id="gameScreen" class="screen hidden">
+  <canvas id="worldCanvas"></canvas>
+
+  <!-- HUD -->
+  <div id="hud">
+    <div class="hud-title">AI SOCIETY</div>
+    <div class="hud-stat">Day <span id="hudDay">1</span></div>
+    <div class="hud-stat">Pop <span id="hudPop">0</span></div>
+    <div class="hud-stat">Year <span id="hudYear">1</span></div>
+    <div class="hud-spacer"></div>
+    <div id="dayNightLabel" style="font-family:'Orbitron',sans-serif;font-size:10px;letter-spacing:2px;"></div>
+    <div class="hud-spacer"></div>
+    <button class="hud-btn" onclick="togglePause()" id="pauseBtn">⏸ PAUSE</button>
+    <button class="hud-btn" onclick="triggerEvent()">⚡ EVENT</button>
+    <button class="hud-btn" onclick="showSetup()">⚙ SETUP</button>
+  </div>
+
+  <!-- Society Stats -->
+  <div id="societyPanel">
+    <div class="soc-title">CIVILIZATION</div>
+
+    <div class="soc-stat"><span class="soc-stat-label">Happiness</span><span class="soc-stat-val" id="socHappy">50%</span></div>
+    <div class="soc-bar-bg"><div class="soc-bar-fill" id="socHappyBar" style="width:50%;background:var(--accent3)"></div></div>
+
+    <div class="soc-stat"><span class="soc-stat-label">Order</span><span class="soc-stat-val" id="socOrder">50%</span></div>
+    <div class="soc-bar-bg"><div class="soc-bar-fill" id="socOrderBar" style="width:50%;background:var(--accent)"></div></div>
+
+    <div class="soc-stat"><span class="soc-stat-label">Tech</span><span class="soc-stat-val" id="socTech">0%</span></div>
+    <div class="soc-bar-bg"><div class="soc-bar-fill" id="socTechBar" style="width:0%;background:var(--gold)"></div></div>
+
+    <div class="soc-stat"><span class="soc-stat-label">Resources</span><span class="soc-stat-val" id="socRes">100%</span></div>
+    <div class="soc-bar-bg"><div class="soc-bar-fill" id="socResBar" style="width:100%;background:var(--accent2)"></div></div>
+
+    <div style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px;">
+      <div class="soc-stat"><span class="soc-stat-label">Era</span><span class="soc-stat-val" id="socEra" style="color:var(--gold)">Primitive</span></div>
+      <div class="soc-stat"><span class="soc-stat-label">Events</span><span class="soc-stat-val" id="socEvents">0</span></div>
+      <div class="soc-stat"><span class="soc-stat-label">Deaths</span><span class="soc-stat-val" id="socDeaths" style="color:var(--danger)">0</span></div>
+    </div>
+  </div>
+
+  <!-- Character detail panel -->
+  <div id="charPanel" class="hidden">
+    <div class="char-panel-name" id="cpName">—</div>
+    <div class="char-panel-model" id="cpModel">model</div>
+    <div class="needs-bars" id="cpNeeds"></div>
+    <div style="font-size:9px;color:var(--dim);margin-bottom:4px;">THINKING</div>
+    <div class="char-thought" id="cpThought">...</div>
+    <div id="cpStatusTag" class="char-status-tag" style="background:rgba(0,212,255,0.1);border:1px solid var(--accent);color:var(--accent);font-size:9px;letter-spacing:1px;"></div>
+  </div>
+
+  <!-- Log -->
+  <div id="logPanel">
+    <div class="log-header">
+      <div class="log-title">📡 SOCIETY LOG</div>
+      <button class="log-toggle" onclick="toggleLog()" id="logToggleBtn">▼</button>
+    </div>
+    <div id="logList"></div>
+  </div>
+
+  <!-- Speed -->
+  <div id="speedControls">
+    <button class="speed-btn" onclick="setSpeed(0.5)">½</button>
+    <button class="speed-btn active" onclick="setSpeed(1)" id="spd1">1x</button>
+    <button class="speed-btn" onclick="setSpeed(2)" id="spd2">2x</button>
+    <button class="speed-btn" onclick="setSpeed(4)" id="spd3">4x</button>
+  </div>
+</div>
+
+<!-- Tooltip -->
+<div id="tooltip"></div>
+
+<!-- Loading -->
+<div id="loadingOverlay" class="hidden">
+  <div>INITIALIZING WORLD</div>
+  <div class="loading-dots"></div>
+</div>
+
+<script>
+// ─── STATE ───────────────────────────────────────────────────────────────────
+const STATE = {
+  appKey: 'pk_REPLACE_ME',
+  apiKey: '',
+  characters: [],
+  scenario: 'blank',
+  simRunning: false,
+  paused: false,
+  speed: 1,
+  day: 1,
+  hour: 6,
+  year: 1,
+  tick: 0,           // FIX: renamed from simTick to avoid collision with simTick_fn
+  eventCount: 0,
+  deathCount: 0,
+  selectedChar: null,
+  logOpen: true,
+  society: { happiness: 50, order: 50, tech: 0, resources: 100, era: 'Primitive' },
+  worldObjects: [],
+  camera: { x: 0, y: 0, zoom: 1, dragging: false, lastX: 0, lastY: 0 },
+  pendingClick: false  // FIX: track click vs drag
+};
+
+// FIX: per-character traits tracked in the builder object, not a shared global array
+let builderTraits = [];
+let selectedEmoji = '👨';
+
+const SCENARIOS = {
+  blank:    'A pristine world. No structures, no rules. Build a civilization from nothing.',
+  postapoc: 'The old world is ash. Radiation, mutants, and scarce supplies. Can you rebuild?',
+  island:   'Marooned on a tropical island with no rescue in sight. Survive — or build paradise.',
+  space:    'A barren moon, life support ticking down. Terraform or die trying.',
+  medieval: 'A feudal age kingdom. Forge alliances, wage wars, build an empire.'
+};
+
+const ERA_THRESHOLDS = [
+  [0,'Primitive'],[20,'Stone Age'],[35,'Bronze Age'],[50,'Iron Age'],
+  [65,'Medieval'],[75,'Renaissance'],[85,'Industrial'],[92,'Atomic'],[97,'Digital'],[100,'Post-Scarcity']
+];
+
+// ─── SETUP UI ─────────────────────────────────────────────────────────────────
+document.getElementById('appKeyInput').addEventListener('input', e => STATE.appKey = e.target.value.trim());
+document.getElementById('apiKeyInput').addEventListener('input', e => STATE.apiKey = e.target.value.trim());
+
+// ─── LIVE MODEL FETCH ────────────────────────────────────────────────────────
+// GET /text/models — no auth required, returns array of model objects
+let LIVE_MODELS = [];  // populated on page load
+
+async function fetchTextModels() {
+  const sel    = document.getElementById('modelSelect');
+  const status = document.getElementById('modelLoadStatus');
+  status.textContent = '⏳ fetching...';
+  try {
+    const res  = await fetch('https://gen.pollinations.ai/text/models');
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    // API returns either an array directly or { data: [...] }
+    const raw = Array.isArray(data) ? data : (data.data || []);
+
+    // Map — use paid_only and tools directly from the API response fields
+    const mapped = raw.filter(m => m.id || m.name).map(m => ({
+      id:            m.id   || m.name,
+      name:          m.name || m.id,
+      description:   m.description || '',
+      contextWindow: m.context_length || m.contextWindow || null,
+      inputCost:     m.pricing?.input  || m.input_cost  || null,
+      outputCost:    m.pricing?.output || m.output_cost || null,
+      supportsTools: m.tools === true || (Array.isArray(m.tools) && m.tools.length > 0),
+      paid:          m.paid_only === true,  // exact API field
+    }));
+
+    // Only keep models that support tools — characters need to think and act
+    LIVE_MODELS = mapped.filter(m => m.supportsTools);
+    if (LIVE_MODELS.length === 0) LIVE_MODELS = mapped; // fallback if API changed shape
+
+    if(LIVE_MODELS.length === 0) throw new Error('No tool-capable models returned');
+
+    const skipped = mapped.length - LIVE_MODELS.length;
+
+    // Sort: free (not paid_only) first, then alphabetical within each group
+    LIVE_MODELS.sort((a,b) => {
+      if(a.paid !== b.paid) return a.paid ? 1 : -1;
+      return a.id.localeCompare(b.id);
+    });
+
+    // Populate <select>
+    sel.innerHTML = '';
+
+    const freeModels = LIVE_MODELS.filter(m => !m.paid);
+    const paidModels = LIVE_MODELS.filter(m =>  m.paid);
+
+    function addGroup(label, models) {
+      if(!models.length) return;
+      const g = document.createElement('optgroup');
+      g.label = label;
+      models.forEach(m => {
+        const o = document.createElement('option');
+        o.value = m.id;
+        const costHint = m.inputCost != null ? ` [$${m.inputCost}/1k]` : '';
+        o.textContent = `${m.id}${costHint}`;
+        g.appendChild(o);
+      });
+      sel.appendChild(g);
+    }
+
+    addGroup('\u26a1 Free / Tier Models', freeModels);
+    addGroup('💰 Paid Models', paidModels);
+
+    // Default to 'openai' if present, else first tool-capable model
+    const preferred = ['openai','openai-fast','claude','gemini'];
+    const def = preferred.find(p => LIVE_MODELS.some(m => m.id === p));
+    if(def) sel.value = def;
+
+    status.textContent = `\u2713 ${LIVE_MODELS.length} models (${skipped} no-tool hidden)`;
+    status.style.color = 'var(--accent3)';
+
+    // Wire metadata preview on change
+    sel.addEventListener('change', showModelMeta);
+    showModelMeta();
+
+  } catch(e) {
+    status.textContent = '⚠ fallback';
+    status.style.color = 'var(--accent2)';
+    // Fallback hardcoded list so the app still works
+    const fallback = ['openai','openai-fast','claude','claude-fast','gemini','gemini-fast','deepseek','mistral','llama','grok','qwen-coder'];
+    sel.innerHTML = fallback.map(id => `<option value="${id}">${id}</option>`).join('');
+    LIVE_MODELS = fallback.map(id => ({ id, name:id, description:'', free:true }));
+    sel.addEventListener('change', showModelMeta);
+  }
+}
+
+function showModelMeta() {
+  const sel  = document.getElementById('modelSelect');
+  const meta = document.getElementById('modelMeta');
+  const m    = LIVE_MODELS.find(x => x.id === sel.value);
+  if(!m) { meta.textContent = ''; return; }
+  const parts = [];
+  if(m.contextWindow) parts.push(`ctx: ${(m.contextWindow/1000).toFixed(0)}k`);
+  if(m.inputCost != null) parts.push(`in: ${m.inputCost}/1k tok`);
+  if(m.outputCost != null) parts.push(`out: ${m.outputCost}/1k tok`);
+  if(m.supportsTools) parts.push('🔧 tools');
+  if(!m.paid) parts.push('✓ free tier');
+  if(m.description) parts.push(m.description.slice(0,60));
+  meta.textContent = parts.join(' · ') || '';
+}
+
+// Fetch models immediately on page load (no auth needed)
+fetchTextModels();
+
+// Emoji picker
+(function buildEmojiPicker() {
+  const picker = document.getElementById('emojiPicker');
+  picker.innerHTML = '';
+  ['👨','👩','🧔','👱','🧑','👴','👵','🧙','🧝','🤖','🧟','👽','🧛','🧜','🦸','🤠','👮','👷','🧑‍🚀','🧑‍🔬','🧑‍🌾','🧑‍💻'].forEach(em => {
+    const s = document.createElement('span');
+    s.className = 'emoji-opt';
+    s.textContent = em;
+    if(em === '👨') s.classList.add('selected');
+    s.onclick = () => {
+      picker.querySelectorAll('.emoji-opt').forEach(x => x.classList.remove('selected'));
+      s.classList.add('selected');
+      selectedEmoji = em;
+    };
+    picker.appendChild(s);
+  });
+})();
+
+// Traits — FIX: use builderTraits, reset properly per character
+document.querySelectorAll('.trait-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    btn.classList.toggle('active');
+    const t = btn.dataset.trait;
+    const i = builderTraits.indexOf(t);
+    if(i > -1) builderTraits.splice(i, 1); else builderTraits.push(t);
+  });
+});
+
+document.getElementById('scenarioSelect').addEventListener('change', e => {
+  STATE.scenario = e.target.value;
+  document.getElementById('scenarioDesc').textContent = SCENARIOS[e.target.value];
+});
+
+function addCharacter() {
+  if(STATE.characters.length >= 12) { alert('Max 12 characters!'); return; }
+  const name = document.getElementById('charName').value.trim() || `Character ${STATE.characters.length + 1}`;
+  const model = document.getElementById('modelSelect').value;
+  const char = {
+    id: Date.now() + Math.random(),
+    name,
+    emoji: selectedEmoji,
+    model,
+    traits: [...builderTraits],  // FIX: snapshot, not reference
+    x: 0, y: 0, tx: 0, ty: 0,
+    needs: { hunger:80, thirst:80, sleep:80, social:60, purpose:50, safety:70 },
+    alive: true,
+    age: Math.floor(Math.random()*30 + 18),
+    thought: 'Just arrived in this world...',
+    action: 'idle',
+    history: [],
+    thinking: false,
+    lastThinkAt: 0,
+    color: `hsl(${Math.random()*360},60%,65%)`
+  };
+  STATE.characters.push(char);
+  renderRoster();
+  document.getElementById('charName').value = '';
+  // FIX: reset builder traits properly
+  builderTraits = [];
+  document.querySelectorAll('.trait-btn').forEach(b => b.classList.remove('active'));
+}
+
+function renderRoster() {
+  const list = document.getElementById('rosterList');
+  const count = STATE.characters.length;
+  document.getElementById('rosterCount').textContent = `(${count} / 12)`;
+  document.getElementById('launchBtn').disabled = count < 1;
+  if(count === 0) {
+    list.innerHTML = '<div style="color:var(--dim);font-size:11px;text-align:center;padding:20px;">Add characters to begin...</div>';
+    return;
+  }
+  list.innerHTML = STATE.characters.map((c, i) => `
+    <div class="roster-item">
+      <div class="roster-avatar" style="background:${c.color}22;border:1px solid ${c.color}44">${c.emoji}</div>
+      <div class="roster-info">
+        <div class="roster-name">${c.name}</div>
+        <div class="roster-sub">${c.model} · ${c.traits.slice(0,2).join(', ') || 'no traits'}</div>
+      </div>
+      <button class="roster-remove" onclick="removeChar(${i})">✕</button>
+    </div>
+  `).join('');
+}
+
+function removeChar(i) {
+  STATE.characters.splice(i, 1);
+  renderRoster();
+}
+
+function startBYOP() {
+  const appKey = STATE.appKey;
+  if (!appKey) {
+    if (!confirm("No App Key set. Continue anyway? (App won't be attributed for tier upgrades.)")) return;
+  }
+  const redirectUri = window.location.href.split('#')[0];
+  const params = new URLSearchParams({ redirect_uri: redirectUri, budget: '20', expiry: '7' });
+  if (appKey) params.set('client_id', appKey);
+  const url = `https://enter.pollinations.ai/authorize?${params}`;
+  const win = window.open(url, '_blank');
+  if (!win) { prompt('Copy this URL, open in your browser, then paste the sk_ key:', url); }
+}
+
+// Handle BYOP redirect back (same-tab flow)
+(function handleBYOPReturn() {
+  try {
+    const hash = new URLSearchParams(window.location.hash.slice(1));
+    const key = hash.get('api_key');
+    if (key) {
+      STATE.apiKey = key;
+      document.getElementById('apiKeyInput').value = key;
+      const note = document.getElementById('byopNote');
+      if (note) { note.textContent = '✅ Authorized! Ready to launch.'; note.style.color = 'var(--accent3)'; }
+      try { window.history.replaceState(null, '', window.location.pathname); } catch(e) {}
+    }
+  } catch(e) {}
+})();
+
+function launchSim() {
+  const key = document.getElementById('apiKeyInput').value.trim();
+  if(!key) {
+    if(confirm('No API key set.\n\nUse BYOP to let users authorize their own pollen?\n(You earn 25% markup on all usage)')) {
+      startBYOP();
+    }
+    return;
+  }
+  STATE.apiKey = key;
+  document.getElementById('setupScreen').classList.add('hidden');
+  document.getElementById('gameScreen').classList.remove('hidden');
+  initWorld();
+}
+
+function showSetup() {
+  STATE.simRunning = false;
+  if(simInterval) { clearInterval(simInterval); simInterval = null; }
+  document.getElementById('gameScreen').classList.add('hidden');
+  document.getElementById('setupScreen').classList.remove('hidden');
+}
+
+// ─── WORLD INIT ───────────────────────────────────────────────────────────────
+function initWorld() {
+  const canvas = document.getElementById('worldCanvas');
+  // FIX: proper resize handler that doesn't re-init camera
+  const resizeCanvas = () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight - 44; };
+  resizeCanvas();
+  window.addEventListener('resize', resizeCanvas);
+
+  STATE.simRunning = true;
+  STATE.paused = false;
+  STATE.day = 1; STATE.hour = 6; STATE.year = 1;
+  STATE.tick = 0; STATE.eventCount = 0; STATE.deathCount = 0;
+  STATE.worldObjects = [];
+  // FIX: camera reset only on init
+  STATE.camera = { x: 0, y: 0, zoom: 1, dragging: false, lastX: 0, lastY: 0 };
+
+  // Reset society
+  STATE.society = { happiness: 50, order: 50, tech: 0, resources: 100, era: 'Primitive' };
+
+  // Scatter characters on load
+  const aliveChars = STATE.characters;
+  aliveChars.forEach((c, i) => {
+    const angle = (i / aliveChars.length) * Math.PI * 2;
+    const r = 80 + Math.random() * 60;
+    c.x = Math.cos(angle) * r;
+    c.y = Math.sin(angle) * r;
+    c.tx = c.x; c.ty = c.y;
+    c.alive = true;
+    c.thought = getScenarioIntro(c);
+    c.history = [];
+    c.lastThinkAt = 0;
+    c.thinking = false;
+    c.action = 'idle';
+    c.needs = { hunger:80, thirst:80, sleep:80, social:60, purpose:50, safety:70 };
+  });
+
+  placeScenarioObjects();
+  setupCanvasEvents(canvas);
+  updateSocietyPanel();
+
+  // FIX: clear any existing loop before starting
+  if(simInterval) clearInterval(simInterval);
+  lastRender = 0;
+  requestAnimationFrame(renderLoop);
+  startSimLoop();
+
+  addLog(`🌍 Simulation started — ${aliveChars.length} soul${aliveChars.length!==1?'s':''} enter the world.`, 'society');
+  addLog(`📜 ${SCENARIOS[STATE.scenario].split('.')[0]}.`, 'event');
+
+  // Staggered intro thoughts
+  setTimeout(() => {
+    aliveChars.forEach((c, i) => {
+      setTimeout(() => thinkAsync(c, `You are ${c.name}, just arriving in this ${STATE.scenario} world. Traits: ${c.traits.join(', ')||'none'}. Introduce yourself and your first raw reaction to the surroundings in 1-2 short sentences.`), i * 900);
+    });
+  }, 1500);
+}
+
+function getScenarioIntro(c) {
+  return { blank:'I find myself in a new world...', postapoc:'The ruins stretch as far as I can see...', island:'Salt air, distant waves, no ship in sight...', space:'Stars everywhere. Thin atmosphere. We must act fast.', medieval:'The kingdom is young. Everything is possible.' }[STATE.scenario] || '...';
+}
+
+function placeScenarioObjects() {
+  const templates = {
+    blank:    ['🌳','🌲','🌿','💧','🌾','🪨','🍄'],
+    postapoc: ['☢️','🏚️','🦴','💀','🌵','🪓','🔧'],
+    island:   ['🌴','🐚','🌊','🍌','🦀','🏖️','🐠'],
+    space:    ['🔮','💎','🌑','⚡','🔧','🛸','🌌'],
+    medieval: ['🏰','⚔️','🛡️','🌲','🌾','💰','🔥']
+  }[STATE.scenario] || ['🌳','💧','🪨'];
+  STATE.worldObjects = Array.from({length:28}, () => {
+    const angle = Math.random()*Math.PI*2, r = 160 + Math.random()*380;
+    return { emoji: templates[Math.floor(Math.random()*templates.length)], x: Math.cos(angle)*r, y: Math.sin(angle)*r, scale: 0.7+Math.random()*0.8 };
+  });
+}
+
+// ─── CANVAS EVENTS ────────────────────────────────────────────────────────────
+function setupCanvasEvents(canvas) {
+  // FIX: track mousedown pos to distinguish click vs drag
+  let mouseDownX = 0, mouseDownY = 0;
+
+  canvas.addEventListener('mousedown', e => {
+    STATE.camera.dragging = true;
+    STATE.camera.lastX = e.clientX;
+    STATE.camera.lastY = e.clientY;
+    mouseDownX = e.clientX;
+    mouseDownY = e.clientY;
+  });
+
+  canvas.addEventListener('mousemove', e => {
+    if(STATE.camera.dragging) {
+      STATE.camera.x += (e.clientX - STATE.camera.lastX) / STATE.camera.zoom;
+      STATE.camera.y += (e.clientY - STATE.camera.lastY) / STATE.camera.zoom;
+      STATE.camera.lastX = e.clientX;
+      STATE.camera.lastY = e.clientY;
+    }
+    // Tooltip on hover
+    const pos = screenToWorld(e.clientX, e.clientY, canvas);
+    const hovered = STATE.characters.find(c => c.alive && dist(c.x, c.y, pos.x, pos.y) < 22);
+    const tip = document.getElementById('tooltip');
+    if(hovered) {
+      tip.style.display = 'block';
+      tip.style.left = (e.clientX + 14) + 'px';
+      tip.style.top  = (e.clientY - 10) + 'px';
+      tip.innerHTML  = `<b>${hovered.name}</b><br><span style="color:var(--dim)">${hovered.model}</span><br>${hovered.thought.slice(0,70)}…`;
+    } else {
+      tip.style.display = 'none';
+    }
+  });
+
+  canvas.addEventListener('mouseup', e => {
+    const wasDrag = Math.abs(e.clientX - mouseDownX) > 5 || Math.abs(e.clientY - mouseDownY) > 5;
+    STATE.camera.dragging = false;
+    // FIX: only fire click logic if not a drag
+    if(!wasDrag) {
+      const pos = screenToWorld(e.clientX, e.clientY, canvas);
+      const clicked = STATE.characters.find(c => c.alive && dist(c.x, c.y, pos.x, pos.y) < 22);
+      if(clicked) selectChar(clicked);
+      else deselectChar();
+    }
+  });
+
+  canvas.addEventListener('mouseleave', () => {
+    STATE.camera.dragging = false;
+    document.getElementById('tooltip').style.display = 'none';
+  });
+
+  canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    const factor = e.deltaY > 0 ? 0.9 : 1.1;
+    STATE.camera.zoom = Math.max(0.25, Math.min(4, STATE.camera.zoom * factor));
+  }, { passive: false });
+}
+
+function screenToWorld(sx, sy, canvas) {
+  const cx = canvas.width/2  + STATE.camera.x * STATE.camera.zoom;
+  const cy = canvas.height/2 + STATE.camera.y * STATE.camera.zoom;
+  return { x: (sx - cx) / STATE.camera.zoom, y: (sy - cy) / STATE.camera.zoom };
+}
+function dist(x1,y1,x2,y2) { return Math.sqrt((x2-x1)**2+(y2-y1)**2); }
+
+// ─── RENDER ───────────────────────────────────────────────────────────────────
+let lastRender = 0;
+function renderLoop(ts) {
+  if(!STATE.simRunning) return;
+  const dt = Math.min((ts - lastRender) / 1000, 0.1);
+  lastRender = ts;
+
+  const canvas = document.getElementById('worldCanvas');
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Sky
+  const h = STATE.hour;
+  const isDay  = h >= 7 && h < 19;
+  const isDusk = h >= 17 && h < 22;
+  const isDawn = h >= 4  && h < 8;
+  const skyGrad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  if(isDay)       { skyGrad.addColorStop(0,'#0a1a2a'); skyGrad.addColorStop(1,'#0d2040'); }
+  else if(isDusk) { skyGrad.addColorStop(0,'#1a0a0a'); skyGrad.addColorStop(1,'#280d0d'); }
+  else if(isDawn) { skyGrad.addColorStop(0,'#0a100a'); skyGrad.addColorStop(1,'#0d1a20'); }
+  else            { skyGrad.addColorStop(0,'#020408'); skyGrad.addColorStop(1,'#050810'); }
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.save();
+  ctx.translate(canvas.width/2 + STATE.camera.x * STATE.camera.zoom, canvas.height/2 + STATE.camera.y * STATE.camera.zoom);
+  ctx.scale(STATE.camera.zoom, STATE.camera.zoom);
+
+  drawGrid(ctx);
+  drawWorldObjects(ctx);
+  if(!STATE.paused) moveCharacters(dt);
+  drawCharacters(ctx);
+
+  ctx.restore();
+
+  // HUD day/night label
+  document.getElementById('dayNightLabel').textContent =
+    isDay ? '☀️ DAY' : isDusk ? '🌅 DUSK' : isDawn ? '🌄 DAWN' : '🌙 NIGHT';
+
+  requestAnimationFrame(renderLoop);
+}
+
+function drawGrid(ctx) {
+  const size = 80, range = 700;
+  ctx.strokeStyle = 'rgba(26,42,74,0.25)';
+  ctx.lineWidth = 0.5 / STATE.camera.zoom;
+  for(let x = -range; x <= range; x += size) { ctx.beginPath(); ctx.moveTo(x,-range); ctx.lineTo(x,range); ctx.stroke(); }
+  for(let y = -range; y <= range; y += size) { ctx.beginPath(); ctx.moveTo(-range,y); ctx.lineTo(range,y); ctx.stroke(); }
+  // Origin circle
+  ctx.strokeStyle = 'rgba(0,212,255,0.1)';
+  ctx.lineWidth = 1 / STATE.camera.zoom;
+  ctx.beginPath(); ctx.arc(0,0,100,0,Math.PI*2); ctx.stroke();
+}
+
+function drawWorldObjects(ctx) {
+  STATE.worldObjects.forEach(obj => {
+    ctx.font = `${Math.floor(20 * obj.scale)}px serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(obj.emoji, obj.x, obj.y);
+  });
+}
+
+function moveCharacters(dt) {
+  const spd = STATE.speed * 28;
+  STATE.characters.forEach(c => {
+    if(!c.alive) return;
+    const dx = c.tx - c.x, dy = c.ty - c.y;
+    const d = Math.sqrt(dx*dx + dy*dy);
+    if(d > 2) { c.x += (dx/d) * Math.min(d, spd*dt); c.y += (dy/d) * Math.min(d, spd*dt); }
+  });
+}
+
+function drawCharacters(ctx) {
+  const z = STATE.camera.zoom;
+  STATE.characters.forEach(c => {
+    if(!c.alive) return;
+    const sel = STATE.selectedChar === c;
+
+    // Shadow ellipse
+    ctx.fillStyle = 'rgba(0,0,0,0.28)';
+    ctx.beginPath(); ctx.ellipse(c.x, c.y+15, 11, 4, 0, 0, Math.PI*2); ctx.fill();
+
+    // Selection ring
+    if(sel) {
+      ctx.strokeStyle = 'rgba(0,212,255,0.7)';
+      ctx.lineWidth = 2/z;
+      ctx.beginPath(); ctx.arc(c.x, c.y, 22, 0, Math.PI*2); ctx.stroke();
+    }
+
+    // Thinking bubble
+    if(c.thinking) {
+      ctx.font = `${11/z}px serif`;
+      ctx.textAlign = 'center';
+      ctx.fillText('💭', c.x+15, c.y-22);
+    }
+
+    // Critical needs warning
+    const minNeed = Math.min(...Object.values(c.needs));
+    if(minNeed < 20) {
+      ctx.fillStyle = '#ff3344';
+      ctx.font = `bold ${11/z}px sans-serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('!', c.x+18, c.y-10);
+    }
+
+    // Emoji
+    ctx.font = `${28/z}px serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(c.emoji, c.x, c.y);
+
+    // Name tag
+    if(z > 0.55) {
+      const ns = Math.max(8, 11/z);
+      ctx.font = `${ns}px "Share Tech Mono",monospace`;
+      ctx.fillStyle = sel ? '#00d4ff' : '#8aafcf';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.fillText(c.name, c.x, c.y + 16);
+    }
+
+    // Health bar
+    if(z > 0.45) {
+      const avg = Object.values(c.needs).reduce((a,b)=>a+b,0) / 6 / 100;
+      const bw = 32, bh = 3;
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(c.x - bw/2, c.y - 30, bw, bh);
+      ctx.fillStyle = avg > 0.6 ? '#44cc44' : avg > 0.3 ? '#ccaa00' : '#cc2222';
+      ctx.fillRect(c.x - bw/2, c.y - 30, bw * avg, bh);
+    }
+  });
+}
+
+// ─── SIMULATION LOOP ─────────────────────────────────────────────────────────
+let simInterval = null;
+
+function startSimLoop() {
+  // FIX: always clear the old interval before creating a new one
+  if(simInterval) { clearInterval(simInterval); simInterval = null; }
+  simInterval = setInterval(simTick_fn, Math.round(2000 / STATE.speed));
+}
+
+function simTick_fn() {
+  if(!STATE.simRunning || STATE.paused) return;
+  STATE.tick++;           // FIX: use STATE.tick not a local simTick variable
+
+  // Advance time
+  STATE.hour++;
+  if(STATE.hour >= 24) { STATE.hour = 0; STATE.day++; }
+  if(STATE.day > 365)  { STATE.day = 1;  STATE.year++; }
+
+  document.getElementById('hudDay').textContent  = STATE.day;
+  document.getElementById('hudYear').textContent = STATE.year;
+  const alive = STATE.characters.filter(c => c.alive);
+  document.getElementById('hudPop').textContent  = alive.length;
+
+  if(alive.length === 0) {
+    addLog('☠️ All souls have perished. The world falls silent.', 'crisis');
+    STATE.simRunning = false;
+    clearInterval(simInterval);
+    return;
+  }
+
+  const isNight = STATE.hour < 6 || STATE.hour >= 22;
+
+  // Decay needs
+  alive.forEach(c => {
+    c.needs.hunger -= (isNight ? 0.3 : 0.7) * STATE.speed;
+    c.needs.thirst -= (isNight ? 0.4 : 0.9) * STATE.speed;
+    c.needs.sleep  += isNight ? 2.5 : -0.4;
+    if(STATE.tick % 4 === 0) c.needs.social -= 1.0;
+    c.needs.purpose -= 0.25;
+    c.needs.safety  = Math.max(0, Math.min(100, c.needs.safety + (Math.random()-0.5)*4));
+    Object.keys(c.needs).forEach(k => c.needs[k] = Math.max(0, Math.min(100, c.needs[k])));
+
+    // Death check
+    if((c.needs.hunger <= 0 || c.needs.thirst <= 0) && Math.random() < 0.07) {
+      killChar(c, c.needs.hunger <= 0 ? 'starvation' : 'dehydration');
+      return;
+    }
+
+    // Wander
+    if(Math.random() < 0.28) {
+      const a = Math.random()*Math.PI*2, r = 30 + Math.random()*110;
+      c.tx = Math.max(-520, Math.min(520, c.x + Math.cos(a)*r));
+      c.ty = Math.max(-520, Math.min(520, c.y + Math.sin(a)*r));
+    }
+  });
+
+  // Society stats
+  const stillAlive = STATE.characters.filter(c => c.alive);
+  if(stillAlive.length > 0) {
+    const avgWellbeing = stillAlive.reduce((sum,c) => sum + Object.values(c.needs).reduce((a,b)=>a+b,0)/6, 0) / stillAlive.length;
+    STATE.society.happiness = Math.max(0, Math.min(100, STATE.society.happiness*0.94 + avgWellbeing*0.06));
+    STATE.society.resources = Math.max(0, Math.min(100, STATE.society.resources - 0.08*STATE.speed));
+    if(STATE.tick % 18 === 0 && stillAlive.some(c=>c.traits.includes('scientist'))) {
+      STATE.society.tech = Math.min(100, STATE.society.tech + 0.6);
+    }
+    // Era
+    const era = ERA_THRESHOLDS.filter(([t]) => STATE.society.tech >= t).pop();
+    if(era) STATE.society.era = era[1];
+  }
+
+  updateSocietyPanel();
+
+  // AI thinking: pick one eligible char every 3 ticks
+  if(STATE.tick % 3 === 0) {
+    const candidates = stillAlive.filter(c => !c.thinking && Date.now() - c.lastThinkAt > 10000);
+    if(candidates.length > 0) {
+      const c = candidates[Math.floor(Math.random()*candidates.length)];
+      thinkAsync(c, buildThinkPrompt(c, stillAlive));
+    }
+  }
+
+  // Random events
+  if(Math.random() < 0.018 * STATE.speed) triggerRandomEvent(stillAlive);
+
+  // Update char panel if open
+  if(STATE.selectedChar && STATE.selectedChar.alive) updateCharPanel(STATE.selectedChar);
+}
+
+function buildThinkPrompt(c, aliveChars) {
+  const others = aliveChars.filter(x=>x!==c).map(x=>x.name).join(', ') || 'nobody';
+  const needs  = Object.entries(c.needs).map(([k,v])=>`${k}:${Math.round(v)}%`).join(', ');
+  const tod    = STATE.hour>=7&&STATE.hour<19 ? 'daytime' : STATE.hour>=19 ? 'evening' : 'night';
+  const season = ['Spring','Summer','Autumn','Winter'][Math.floor(((STATE.day-1)/91)%4)];
+  return `You are ${c.name}, age ${c.age}, in a ${STATE.scenario} world. Traits: ${c.traits.join(', ')||'none'}.
+Current needs — ${needs}. It is ${tod}, ${season}, Year ${STATE.year} Day ${STATE.day}.
+Society: happiness ${Math.round(STATE.society.happiness)}%, tech ${Math.round(STATE.society.tech)}%, era: ${STATE.society.era}.
+Others present: ${others}.
+What are you doing RIGHT NOW? Respond in 1-2 vivid, in-character sentences. Take a concrete action (eat, drink, talk, build, fight, explore, pray, etc.).`;
+}
+
+function killChar(c, cause) {
+  c.alive = false;
+  STATE.deathCount++;
+  STATE.society.happiness = Math.max(0, STATE.society.happiness - 12);
+  addLog(`💀 ${c.emoji} ${c.name} died of ${cause} — Day ${STATE.day}, Year ${STATE.year}`, 'crisis');
+  document.getElementById('socDeaths').textContent = STATE.deathCount;
+  if(STATE.selectedChar === c) deselectChar();
+}
+
+// ─── AI THINKING ─────────────────────────────────────────────────────────────
+async function thinkAsync(char, prompt) {
+  if(!STATE.apiKey || char.thinking || !char.alive) return;
+  char.thinking = true;
+  char.lastThinkAt = Date.now();
+
+  try {
+    const res = await fetch('https://gen.pollinations.ai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${STATE.apiKey}`
+      },
+      body: JSON.stringify({
+        model: char.model,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+
+    if(!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      if(res.status === 401) addLog('🔑 Auth error — check your API key.', 'crisis');
+      else if(res.status === 402) addLog('⚠️ Out of pollen! Top up at enter.pollinations.ai', 'crisis');
+      else addLog(`⚠️ API error ${res.status}: ${err.error?.message||res.statusText}`, 'crisis');
+      return;
+    }
+
+    const data = await res.json();
+    // FIX: Pollinations uses OpenAI format only — no data.content array
+    const text = (data.choices?.[0]?.message?.content || '').trim();
+    if(!text) return;
+
+    char.thought = text.slice(0, 220);
+    char.history.push({ day: STATE.day, year: STATE.year, thought: char.thought });
+
+    // Need effects based on keywords
+    if(/eat|food|meal|feast|hunt|forage/i.test(text))   char.needs.hunger  = Math.min(100, char.needs.hunger  + 22);
+    if(/drink|water|river|rain|fluid/i.test(text))       char.needs.thirst  = Math.min(100, char.needs.thirst  + 22);
+    if(/sleep|rest|nap|doze|slumber/i.test(text))        char.needs.sleep   = Math.min(100, char.needs.sleep   + 25);
+    if(/talk|meet|social|friend|gather|together/i.test(text)) char.needs.social = Math.min(100, char.needs.social + 12);
+    if(/build|craft|create|invent|design|plan/i.test(text)) {
+      char.needs.purpose = Math.min(100, char.needs.purpose + 18);
+      STATE.society.tech = Math.min(100, STATE.society.tech + 0.4);
+    }
+
+    // Log categorization
+    if(/attack|fight|kill|war|destroy|burn/i.test(text)) {
+      STATE.society.order = Math.max(0, STATE.society.order - 9);
+      addLog(`⚔️ ${char.emoji} ${char.name}: "${text.slice(0,90)}"`, 'crisis');
+    } else if(/build|found|create|discover|invent|establish/i.test(text)) {
+      addLog(`🔨 ${char.emoji} ${char.name}: "${text.slice(0,90)}"`, 'society');
+    } else {
+      addLog(`💬 ${char.emoji} ${char.name}: "${text.slice(0,90)}"`, 'action');
+    }
+
+    if(STATE.selectedChar === char) updateCharPanel(char);
+  } catch(e) {
+    char.thought = `[Network error: ${e.message.slice(0,60)}]`;
+  } finally {
+    char.thinking = false;
+  }
+}
+
+// ─── RANDOM EVENTS ────────────────────────────────────────────────────────────
+const EVENTS = [
+  { name:'Drought',       desc:'Water sources drying up!',                effect: c => { c.needs.thirst -= 22; },              type:'crisis'  },
+  { name:'Plague',        desc:'A mysterious illness sweeps the land.',    effect: c => { c.needs.hunger -= 18; c.needs.safety -= 15; }, type:'crisis' },
+  { name:'Wildfire',      desc:'Flames engulf the surrounding land!',      effect: c => { c.needs.safety -= 28; },              type:'crisis'  },
+  { name:'Feast',         desc:'A bountiful harvest!',                     effect: c => { c.needs.hunger += 30; c.needs.social += 15; }, type:'society' },
+  { name:'Great Discovery', desc:'A breakthrough advances civilization!',  effect: () => { STATE.society.tech += 6; },          type:'society' },
+  { name:'Civil War',     desc:'Factions turn on each other!',             effect: () => { STATE.society.order -= 22; STATE.society.happiness -= 15; }, type:'crisis' },
+  { name:'Festival',      desc:'A joyous celebration uplifts all spirits!',effect: c => { c.needs.social += 28; c.needs.purpose += 12; }, type:'society' },
+  { name:'Earthquake',    desc:'The ground trembles violently!',            effect: c => { c.needs.safety -= 32; },             type:'crisis'  },
+  { name:'Trade Boom',    desc:'Merchants arrive with abundant goods!',    effect: () => { STATE.society.resources = Math.min(100, STATE.society.resources + 18); }, type:'society' },
+  { name:'Meteor Shower', desc:'Breathtaking lights fill the sky. Purpose renewed.', effect: c => { c.needs.purpose += 22; },  type:'event'   },
+  { name:'Epidemic',      desc:'Disease spreads rapidly through the population.', effect: c => { c.needs.hunger -= 12; c.needs.sleep -= 15; }, type:'crisis' },
+  { name:'Golden Age',    desc:'Peace and prosperity grace the land.',     effect: c => { c.needs.social += 20; c.needs.purpose += 15; STATE.society.happiness += 10; }, type:'society' }
+];
+
+function triggerRandomEvent(aliveChars) {
+  const evt = EVENTS[Math.floor(Math.random()*EVENTS.length)];
+  STATE.eventCount++;
+  addLog(`⚡ EVENT: ${evt.name} — ${evt.desc}`, evt.type);
+  aliveChars.forEach(c => {
+    evt.effect(c);
+    Object.keys(c.needs).forEach(k => c.needs[k] = Math.max(0, Math.min(100, c.needs[k])));
+  });
+  document.getElementById('socEvents').textContent = STATE.eventCount;
+  // One character reacts
+  const reactor = aliveChars[Math.floor(Math.random()*aliveChars.length)];
+  if(reactor) thinkAsync(reactor, `A major event just happened: "${evt.name}: ${evt.desc}". You are ${reactor.name}. React to this in 1-2 vivid sentences, staying fully in character for a ${STATE.scenario} world.`);
+}
+
+function triggerEvent() {
+  const alive = STATE.characters.filter(c => c.alive);
+  if(alive.length === 0) { addLog('No one left to affect.', 'event'); return; }
+  triggerRandomEvent(alive);
+}
+
+// ─── UI HELPERS ───────────────────────────────────────────────────────────────
+function selectChar(c) {
+  STATE.selectedChar = c;
+  // FIX: panel is always in DOM (just hidden via transform), safe to update
+  document.getElementById('charPanel').classList.remove('hidden');
+  updateCharPanel(c);
+}
+
+function deselectChar() {
+  STATE.selectedChar = null;
+  document.getElementById('charPanel').classList.add('hidden');
+}
+
+function updateCharPanel(c) {
+  document.getElementById('cpName').textContent  = `${c.emoji} ${c.name}`;
+  document.getElementById('cpModel').textContent = `${c.model} · Age ${c.age} · ${c.traits.join(', ') || 'no traits'}`;
+  document.getElementById('cpNeeds').innerHTML = Object.entries(c.needs).map(([k,v]) => {
+    const pct = Math.round(Math.max(0, v));
+    const col = pct>60 ? '#44cc44' : pct>30 ? '#ccaa00' : '#cc2222';
+    return `<div class="need-row">
+      <div class="need-label">${k}</div>
+      <div class="need-bar-bg"><div class="need-bar-fill" style="width:${pct}%;background:${col}"></div></div>
+      <div class="need-val">${pct}%</div>
+    </div>`;
+  }).join('');
+  document.getElementById('cpThought').textContent = c.thought || '...';
+  // FIX: c.action is always set, but guard anyway
+  document.getElementById('cpStatusTag').textContent = c.thinking ? 'THINKING...' : (c.action || 'idle').toUpperCase();
+}
+
+function updateSocietyPanel() {
+  const s = STATE.society;
+  document.getElementById('socHappy').textContent    = Math.round(s.happiness) + '%';
+  document.getElementById('socHappyBar').style.width = Math.max(0,s.happiness) + '%';
+  document.getElementById('socOrder').textContent    = Math.round(s.order) + '%';
+  document.getElementById('socOrderBar').style.width = Math.max(0,s.order) + '%';
+  document.getElementById('socTech').textContent     = Math.round(s.tech) + '%';
+  document.getElementById('socTechBar').style.width  = s.tech + '%';
+  document.getElementById('socRes').textContent      = Math.round(s.resources) + '%';
+  document.getElementById('socResBar').style.width   = Math.max(0,s.resources) + '%';
+  document.getElementById('socEra').textContent      = s.era;
+}
+
+function addLog(msg, type='action') {
+  const list = document.getElementById('logList');
+  const entry = document.createElement('div');
+  entry.className = `log-entry ${type}`;
+  const h = String(Math.floor(STATE.hour || 0)).padStart(2,'0');
+  entry.innerHTML = `<span class="log-time">[Y${STATE.year||1} D${STATE.day||1} ${h}:00]</span> ${msg}`;
+  list.appendChild(entry);
+  list.scrollTop = list.scrollHeight;
+  while(list.children.length > 200) list.removeChild(list.firstChild);
+}
+
+function toggleLog() {
+  const logList = document.getElementById('logList');
+  STATE.logOpen = !STATE.logOpen;
+  logList.style.display = STATE.logOpen ? 'flex' : 'none';
+  document.getElementById('logToggleBtn').textContent = STATE.logOpen ? '▼' : '▲';
+}
+
+function togglePause() {
+  STATE.paused = !STATE.paused;
+  document.getElementById('pauseBtn').textContent = STATE.paused ? '▶ RESUME' : '⏸ PAUSE';
+  document.getElementById('pauseBtn').classList.toggle('active', STATE.paused);
+}
+
+function setSpeed(s) {
+  STATE.speed = s;
+  document.querySelectorAll('.speed-btn').forEach(b => b.classList.remove('active'));
+  const labels = { 0.5:'½', 1:'1x', 2:'2x', 4:'4x' };
+  document.querySelectorAll('.speed-btn').forEach(b => {
+    if(b.textContent.trim() === labels[s]) b.classList.add('active');
+  });
+  startSimLoop(); // FIX: this now correctly clears the old interval first
+}
+</script>
+</body>
+</html>
