@@ -321,7 +321,7 @@
   <div class="setup-container">
     <!-- LEFT: API + Character Builder -->
     <div style="display:flex;flex-direction:column;gap:14px;">
-      <input type="hidden" id="appKeyInput" value="">
+      <input type="hidden" id="appKeyInput" value="pk_NeDItyp0ofCa4z0C">
       <input type="hidden" id="apiKeyInput" value="">
       <div class="panel" style="text-align:center;">
         <button class="byop-btn" onclick="startBYOP()" style="width:100%;">⚡ AUTHORIZE WITH POLLINATIONS</button>
@@ -492,6 +492,20 @@ const STATE = {
   logOpen: true,
   society: { happiness: 50, order: 50, tech: 0, resources: 100, era: 'Primitive' },
   worldObjects: [],
+  // Resource nodes on the map — AI gets told their locations in prompts
+  resourceNodes: [
+    { id:'river',    emoji:'🌊', label:'River',        x: -180, y:  60, type:'water',  amount:100, maxAmount:100, desc:'Fresh water source' },
+    { id:'forest',   emoji:'🌲', label:'Forest',       x:  140, y: -90, type:'food',   amount:100, maxAmount:100, desc:'Hunting and foraging ground' },
+    { id:'berries',  emoji:'🍓', label:'Berry Patch',  x: -60,  y: 180, type:'food',   amount:80,  maxAmount:80,  desc:'Wild berries and edible plants' },
+    { id:'cave',     emoji:'🪨', label:'Cave',         x:  260, y:  30, type:'shelter',amount:100, maxAmount:100, desc:'Natural shelter from weather and predators' },
+    { id:'mine',     emoji:'⛏️', label:'Ore Deposit',  x:  320, y:-200, type:'craft',  amount:100, maxAmount:100, desc:'Stone and ore for tools and building' },
+    { id:'ruins',    emoji:'🏚️', label:'Old Ruins',    x: -300, y:-140, type:'lore',   amount:60,  maxAmount:60,  desc:'Ancient knowledge and salvageable materials' },
+    { id:'field',    emoji:'🌾', label:'Open Field',   x:   20, y: -30, type:'farm',   amount:100, maxAmount:100, desc:'Flat fertile land good for farming' },
+    { id:'hill',     emoji:'⛰️', label:'High Ground',  x: -80,  y:-220, type:'defense',amount:100, maxAmount:100, desc:'Strategic high ground with wide visibility' },
+    { id:'spring',   emoji:'💧', label:'Hot Spring',   x:  80,  y: 240, type:'water',  amount:100, maxAmount:100, desc:'Warm healing waters' },
+    { id:'coast',    emoji:'🏖️', label:'Coast',        x: -400, y: 100, type:'food',   amount:100, maxAmount:100, desc:'Fishing and sea trade access' }
+  ],
+  buildings: [],  // constructed structures: { type, x, y, builtBy, day }
   camera: { x: 0, y: 0, zoom: 1, dragging: false, lastX: 0, lastY: 0 },
   pendingClick: false  // FIX: track click vs drag
 };
@@ -548,8 +562,7 @@ async function fetchTextModels() {
     // Only keep models that support tools — characters need to think and act
     LIVE_MODELS = mapped.filter(m => m.supportsTools);
     if (LIVE_MODELS.length === 0) LIVE_MODELS = mapped; // fallback if API changed shape
-
-    if(LIVE_MODELS.length === 0) throw new Error('No tool-capable models returned');
+    if (LIVE_MODELS.length === 0) throw new Error('No models returned from API');
 
     const skipped = mapped.length - LIVE_MODELS.length;
 
@@ -673,6 +686,7 @@ function addCharacter() {
     thought: 'Just arrived in this world...',
     action: 'idle',
     history: [],
+    memory: [],
     thinking: false,
     lastThinkAt: 0,
     color: `hsl(${Math.random()*360},60%,65%)`
@@ -714,7 +728,7 @@ function removeChar(i) {
 function startBYOP() {
   const appKey = STATE.appKey;
   if (!appKey) {
-    if (!confirm("No App Key set. Continue anyway? (App won't be attributed for tier upgrades.)")) return;
+    if (!confirm("No App Key set. Continue anyway?")) return;
   }
   const redirectUri = window.location.href.split('#')[0];
   const params = new URLSearchParams({ redirect_uri: redirectUri, budget: '20', expiry: '7' });
@@ -773,11 +787,33 @@ function initWorld() {
   STATE.day = 1; STATE.hour = 6; STATE.year = 1;
   STATE.tick = 0; STATE.eventCount = 0; STATE.deathCount = 0;
   STATE.worldObjects = [];
+  STATE.buildings = [];
   // FIX: camera reset only on init
   STATE.camera = { x: 0, y: 0, zoom: 1, dragging: false, lastX: 0, lastY: 0 };
 
   // Reset society
   STATE.society = { happiness: 50, order: 50, tech: 0, resources: 100, era: 'Primitive' };
+
+  // Reset resource nodes to full, then apply scenario modifiers
+  STATE.resourceNodes.forEach(n => n.amount = n.maxAmount);
+  const s = STATE.scenario;
+  if (s === 'postapoc') {
+    // Most resources devastated
+    STATE.resourceNodes.forEach(n => { n.amount = Math.round(n.maxAmount * (0.1 + Math.random()*0.25)); });
+    STATE.society.resources = 20; STATE.society.happiness = 20; STATE.society.order = 30;
+  } else if (s === 'island') {
+    // Water/food plentiful, no mine/ruins
+    STATE.resourceNodes.find(n=>n.id==='mine').amount = 0;
+    STATE.resourceNodes.find(n=>n.id==='ruins').amount = 0;
+    STATE.society.resources = 80;
+  } else if (s === 'space') {
+    // Nearly everything scarce, high tech start
+    STATE.resourceNodes.forEach(n => { n.amount = Math.round(n.maxAmount * 0.15); });
+    STATE.society.tech = 40; STATE.society.resources = 30; STATE.society.happiness = 35;
+  } else if (s === 'medieval') {
+    // Moderate everything, high order
+    STATE.society.order = 70; STATE.society.tech = 20;
+  }
 
   // Scatter characters on load
   const aliveChars = STATE.characters;
@@ -930,6 +966,7 @@ function renderLoop(ts) {
 
   drawGrid(ctx);
   drawWorldObjects(ctx);
+  drawResourceNodes(ctx);
   if(!STATE.paused) moveCharacters(dt);
   drawCharacters(ctx);
 
@@ -959,6 +996,38 @@ function drawWorldObjects(ctx) {
     ctx.font = `${Math.floor(20 * obj.scale)}px serif`;
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(obj.emoji, obj.x, obj.y);
+  });
+}
+
+function drawResourceNodes(ctx) {
+  STATE.resourceNodes.forEach(n => {
+    const alpha = 0.4 + 0.6 * (n.amount / n.maxAmount);
+    ctx.globalAlpha = alpha;
+    ctx.font = '22px serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(n.emoji, n.x, n.y);
+    // Label
+    ctx.globalAlpha = 0.7;
+    ctx.font = 'bold 9px monospace';
+    ctx.fillStyle = '#a8f0c6';
+    ctx.fillText(n.label, n.x, n.y + 16);
+    // Depletion bar
+    const bw = 28, bh = 3;
+    ctx.fillStyle = '#1a2e1a';
+    ctx.fillRect(n.x - bw/2, n.y + 21, bw, bh);
+    ctx.fillStyle = n.amount > 40 ? '#4ade80' : n.amount > 15 ? '#facc15' : '#f87171';
+    ctx.fillRect(n.x - bw/2, n.y + 21, bw * (n.amount / n.maxAmount), bh);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#e8f5e9';
+  });
+
+  // Draw buildings
+  STATE.buildings.forEach(b => {
+    ctx.globalAlpha = 0.9;
+    ctx.font = '18px serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(b.type.split(' ')[0], b.x, b.y);
+    ctx.globalAlpha = 1;
   });
 }
 
@@ -1065,16 +1134,16 @@ function simTick_fn() {
 
   // Decay needs
   alive.forEach(c => {
-    c.needs.hunger -= (isNight ? 0.3 : 0.7) * STATE.speed;
-    c.needs.thirst -= (isNight ? 0.4 : 0.9) * STATE.speed;
+    c.needs.hunger -= (isNight ? 0.18 : 0.45) * STATE.speed;
+    c.needs.thirst -= (isNight ? 0.22 : 0.55) * STATE.speed;
     c.needs.sleep  += isNight ? 2.5 : -0.4;
-    if(STATE.tick % 4 === 0) c.needs.social -= 1.0;
-    c.needs.purpose -= 0.25;
+    if(STATE.tick % 8 === 0) c.needs.social -= 0.8;
+    c.needs.purpose -= 0.12;
     c.needs.safety  = Math.max(0, Math.min(100, c.needs.safety + (Math.random()-0.5)*4));
     Object.keys(c.needs).forEach(k => c.needs[k] = Math.max(0, Math.min(100, c.needs[k])));
 
     // Death check
-    if((c.needs.hunger <= 0 || c.needs.thirst <= 0) && Math.random() < 0.07) {
+    if((c.needs.hunger <= 0 || c.needs.thirst <= 0) && STATE.day > 3 && Math.random() < 0.04) {
       killChar(c, c.needs.hunger <= 0 ? 'starvation' : 'dehydration');
       return;
     }
@@ -1104,8 +1173,8 @@ function simTick_fn() {
   updateSocietyPanel();
 
   // AI thinking: pick one eligible char every 3 ticks
-  if(STATE.tick % 3 === 0) {
-    const candidates = stillAlive.filter(c => !c.thinking && Date.now() - c.lastThinkAt > 10000);
+  if(STATE.tick % 2 === 0) {
+    const candidates = stillAlive.filter(c => !c.thinking && Date.now() - c.lastThinkAt > 6000);
     if(candidates.length > 0) {
       const c = candidates[Math.floor(Math.random()*candidates.length)];
       thinkAsync(c, buildThinkPrompt(c, stillAlive));
@@ -1120,15 +1189,45 @@ function simTick_fn() {
 }
 
 function buildThinkPrompt(c, aliveChars) {
-  const others = aliveChars.filter(x=>x!==c).map(x=>x.name).join(', ') || 'nobody';
-  const needs  = Object.entries(c.needs).map(([k,v])=>`${k}:${Math.round(v)}%`).join(', ');
-  const tod    = STATE.hour>=7&&STATE.hour<19 ? 'daytime' : STATE.hour>=19 ? 'evening' : 'night';
-  const season = ['Spring','Summer','Autumn','Winter'][Math.floor(((STATE.day-1)/91)%4)];
-  return `You are ${c.name}, age ${c.age}, in a ${STATE.scenario} world. Traits: ${c.traits.join(', ')||'none'}.
-Current needs — ${needs}. It is ${tod}, ${season}, Year ${STATE.year} Day ${STATE.day}.
-Society: happiness ${Math.round(STATE.society.happiness)}%, tech ${Math.round(STATE.society.tech)}%, era: ${STATE.society.era}.
-Others present: ${others}.
-What are you doing RIGHT NOW? Respond in 1-2 vivid, in-character sentences. Take a concrete action (eat, drink, talk, build, fight, explore, pray, etc.).`;
+  const others = aliveChars.filter(x=>x!==c).map(x=>{
+    const dist = Math.round(Math.hypot(x.x-c.x, x.y-c.y));
+    return `${x.name} (${dist}u away, hunger:${Math.round(x.needs.hunger)}%)`;
+  }).join('; ') || 'nobody';
+
+  const needs = Object.entries(c.needs).map(([k,v])=>`${k}:${Math.round(v)}%`).join(', ');
+  const tod   = STATE.hour>=7&&STATE.hour<19 ? 'daytime' : STATE.hour>=19 ? 'evening' : 'night';
+  const season= ['Spring','Summer','Autumn','Winter'][Math.floor(((STATE.day-1)/91)%4)];
+
+  // Nearby resource nodes sorted by distance
+  const nodeInfo = STATE.resourceNodes
+    .filter(n => n.amount > 0)
+    .map(n => {
+      const dist = Math.round(Math.hypot(n.x-c.x, n.y-c.y));
+      return { n, dist };
+    })
+    .sort((a,b)=>a.dist-b.dist)
+    .slice(0,6)
+    .map(({n,dist})=>`${n.emoji}${n.label}(${dist}u,${Math.round(n.amount)}% full): ${n.desc}`)
+    .join(' | ');
+
+  // Nearby buildings
+  const bldgs = STATE.buildings.slice(-6).map(b=>`${b.type} at (${b.x},${b.y})`).join(', ') || 'none yet';
+
+  // My most urgent need
+  const urgentNeed = Object.entries(c.needs).sort((a,b)=>a[1]-b[1])[0];
+  const urgentWarn = urgentNeed[1] < 25 ? `⚠️ CRITICAL: ${urgentNeed[0]} is at ${Math.round(urgentNeed[1])}% — you MUST address this NOW.` : '';
+
+  return `You are ${c.name}, ${c.age}yo. Traits: ${c.traits.join(',')||'none'}. Scenario: ${STATE.scenario}.
+TIME: ${tod}, ${season}, Year ${STATE.year} Day ${STATE.day}, Hour ${STATE.hour}.
+YOUR NEEDS (low=bad): ${needs}.
+${urgentWarn}
+YOUR POSITION: (${Math.round(c.x)}, ${Math.round(c.y)}) on the map.
+NEARBY RESOURCES: ${nodeInfo}
+BUILDINGS BUILT SO FAR: ${bldgs}
+OTHER PEOPLE: ${others}
+CIVILIZATION: happiness ${Math.round(STATE.society.happiness)}%, order ${Math.round(STATE.society.order)}%, tech ${Math.round(STATE.society.tech)}%, resources ${Math.round(STATE.society.resources)}%, era: ${STATE.society.era}.
+${c.memory && c.memory.length ? 'YOUR RECENT MEMORIES: ' + c.memory.slice(-3).join(' | ') : ''}
+Decide what you do RIGHT NOW. Move toward a resource, eat, drink, sleep, talk, build, craft, fight, or plan. Be specific about WHERE you go and WHAT you do. 1-2 vivid sentences only.`;
 }
 
 function killChar(c, cause) {
@@ -1173,25 +1272,71 @@ async function thinkAsync(char, prompt) {
     const text = (data.choices?.[0]?.message?.content || '').trim();
     if(!text) return;
 
-    char.thought = text.slice(0, 220);
+    char.thought = text.slice(0, 280);
     char.history.push({ day: STATE.day, year: STATE.year, thought: char.thought });
+    if (!char.memory) char.memory = [];
+    char.memory.push(`Day ${STATE.day}: ${text.slice(0,100)}`);
+    if (char.memory.length > 8) char.memory.shift();
 
-    // Need effects based on keywords
-    if(/eat|food|meal|feast|hunt|forage/i.test(text))   char.needs.hunger  = Math.min(100, char.needs.hunger  + 22);
-    if(/drink|water|river|rain|fluid/i.test(text))       char.needs.thirst  = Math.min(100, char.needs.thirst  + 22);
-    if(/sleep|rest|nap|doze|slumber/i.test(text))        char.needs.sleep   = Math.min(100, char.needs.sleep   + 25);
-    if(/talk|meet|social|friend|gather|together/i.test(text)) char.needs.social = Math.min(100, char.needs.social + 12);
-    if(/build|craft|create|invent|design|plan/i.test(text)) {
-      char.needs.purpose = Math.min(100, char.needs.purpose + 18);
-      STATE.society.tech = Math.min(100, STATE.society.tech + 0.4);
+    // ── Spatial: steer toward mentioned resource node ──────────────────────
+    const nodeMatch = STATE.resourceNodes.find(n =>
+      n.amount > 5 && new RegExp(n.label.split(' ')[0], 'i').test(text)
+    );
+    if (nodeMatch) {
+      // Move character toward that node
+      char.tx = nodeMatch.x + (Math.random()-0.5)*40;
+      char.ty = nodeMatch.y + (Math.random()-0.5)*40;
+      // If close enough, consume the resource
+      const dist = Math.hypot(char.x - nodeMatch.x, char.y - nodeMatch.y);
+      if (dist < 120) {
+        const consume = Math.min(nodeMatch.amount, 15);
+        nodeMatch.amount = Math.max(0, nodeMatch.amount - consume);
+        if (nodeMatch.type === 'water')  char.needs.thirst = Math.min(100, char.needs.thirst + consume*1.8);
+        if (nodeMatch.type === 'food')   char.needs.hunger = Math.min(100, char.needs.hunger + consume*1.8);
+        if (nodeMatch.type === 'shelter') char.needs.safety = Math.min(100, char.needs.safety + consume*0.8);
+      }
     }
 
-    // Log categorization
-    if(/attack|fight|kill|war|destroy|burn/i.test(text)) {
+    // ── Resource regeneration (slow) ────────────────────────────────────────
+    if (STATE.tick % 60 === 0) {
+      STATE.resourceNodes.forEach(n => {
+        n.amount = Math.min(n.maxAmount, n.amount + n.maxAmount * 0.04);
+      });
+    }
+
+    // ── Need effects from action keywords ──────────────────────────────────
+    if(/eat|food|meal|feast|hunt|forage|berry|berries|fish/i.test(text))   char.needs.hunger  = Math.min(100, char.needs.hunger  + 25);
+    if(/drink|water|river|spring|rain|fluid/i.test(text))                   char.needs.thirst  = Math.min(100, char.needs.thirst  + 25);
+    if(/sleep|rest|nap|doze|slumber|cave/i.test(text))                      char.needs.sleep   = Math.min(100, char.needs.sleep   + 28);
+    if(/talk|meet|social|friend|gather|together|council/i.test(text))       char.needs.social  = Math.min(100, char.needs.social  + 15);
+    if(/build|craft|create|invent|design|plan|construct|forge/i.test(text)) {
+      char.needs.purpose = Math.min(100, char.needs.purpose + 20);
+      STATE.society.tech = Math.min(100, STATE.society.tech + 0.5);
+      // Register a building
+      if(/build|construct|erect|found/i.test(text)) {
+        const btype = /shelter|hut|house/i.test(text) ? '🏠 Shelter'
+                    : /farm|field|crop/i.test(text)   ? '🌾 Farm'
+                    : /forge|smith/i.test(text)        ? '⚒️ Forge'
+                    : /temple|shrine/i.test(text)      ? '🛕 Temple'
+                    : '🪵 Structure';
+        STATE.buildings.push({ type: btype, x: Math.round(char.x), y: Math.round(char.y), builtBy: char.name, day: STATE.day });
+        if (STATE.buildings.length > 20) STATE.buildings.shift();
+        STATE.society.resources = Math.max(0, STATE.society.resources - 3);
+      }
+    }
+    if(/mine|ore|stone|dig|excavat/i.test(text)) {
+      const mine = STATE.resourceNodes.find(n=>n.id==='mine');
+      if(mine && mine.amount > 5) { mine.amount -= 8; STATE.society.tech = Math.min(100, STATE.society.tech + 0.3); }
+    }
+
+    // ── Log categorization ─────────────────────────────────────────────────
+    if(/attack|fight|kill|war|destroy|burn|murder/i.test(text)) {
       STATE.society.order = Math.max(0, STATE.society.order - 9);
       addLog(`⚔️ ${char.emoji} ${char.name}: "${text.slice(0,90)}"`, 'crisis');
-    } else if(/build|found|create|discover|invent|establish/i.test(text)) {
+    } else if(/build|found|create|discover|invent|establish|construct/i.test(text)) {
       addLog(`🔨 ${char.emoji} ${char.name}: "${text.slice(0,90)}"`, 'society');
+    } else if(/eat|drink|forage|hunt|fish/i.test(text)) {
+      addLog(`🍖 ${char.emoji} ${char.name}: "${text.slice(0,90)}"`, 'action');
     } else {
       addLog(`💬 ${char.emoji} ${char.name}: "${text.slice(0,90)}"`, 'action');
     }
