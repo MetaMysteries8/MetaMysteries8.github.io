@@ -944,36 +944,128 @@ async function fetchVisionModels() {
     }
 }
 
+// Fetch models from a custom OpenAI-compatible endpoint via /v1/models
+async function fetchCustomModels() {
+    const select     = document.getElementById('model-select');
+    const statusSpan = document.getElementById('model-status');
+    if (!select) return;
+
+    const base = (window._customApiBase || '').replace(/\/$/, '');
+    if (!base) {
+        select.innerHTML = '<option value="">⚠ Set Base URL in API Settings</option>';
+        select.disabled = true;
+        if (statusSpan) statusSpan.textContent = 'no URL';
+        return;
+    }
+
+    select.innerHTML = '<option value="">Loading models…</option>';
+    select.disabled  = true;
+    if (statusSpan) statusSpan.textContent = 'fetching…';
+
+    const key = providerKeys['custom'] || '';
+    try {
+        const res = await fetch(`${base}/v1/models`, {
+            headers: {
+                'Content-Type': 'application/json',
+                ...(key ? { 'Authorization': `Bearer ${key}` } : {}),
+            },
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+
+        // OpenAI /v1/models returns { data: [ { id, object, ... }, ... ] }
+        const rawModels = Array.isArray(data) ? data
+            : Array.isArray(data.data) ? data.data
+            : [];
+
+        const modelIds = rawModels
+            .map(m => (typeof m === 'string' ? m : m.id || m.name || ''))
+            .filter(Boolean)
+            .sort();
+
+        select.innerHTML = '';
+        if (!modelIds.length) {
+            select.innerHTML = '<option value="">No models returned</option>';
+            select.disabled = true;
+            if (statusSpan) statusSpan.textContent = '0 models';
+            return;
+        }
+
+        // If vision toggle is OFF, show all models (user picks the right one)
+        // If vision toggle is ON, still show all — user confirmed they support vision
+        const saved = localStorage.getItem(MODEL_STORAGE_KEY) || modelIds[0];
+        const grp = document.createElement('optgroup');
+        grp.label = PROVIDERS.custom.hasVision
+            ? '🔧 Custom Models (vision enabled)'
+            : '🔧 Custom Models (bridge mode)';
+
+        for (const id of modelIds) {
+            const opt = document.createElement('option');
+            opt.value = id;
+            opt.textContent = id;
+            if (id === saved) opt.selected = true;
+            grp.appendChild(opt);
+        }
+        select.appendChild(grp);
+        select.disabled = false;
+        if (statusSpan) statusSpan.textContent = `${modelIds.length} models`;
+
+        // Cache the list on the provider for re-use
+        PROVIDERS.custom.visionModels = modelIds;
+        PROVIDERS.custom.defaultModel = modelIds.includes(saved) ? saved : modelIds[0];
+
+    } catch (err) {
+        console.error('[Custom] /v1/models fetch failed:', err);
+        select.innerHTML = `<option value="">⚠ ${err.message}</option>`;
+        select.disabled = true;
+        if (statusSpan) statusSpan.textContent = '⚠ error';
+    }
+}
+
 function populateModelDropdown() {
     const select     = document.getElementById('model-select');
     const statusSpan = document.getElementById('model-status');
     if (!select) return;
 
-    // For non-Pollinations providers, show their static vision model list
+    // Local provider — single fixed model
+    if (activeProvider.id === 'local') {
+        select.innerHTML = '';
+        const grp = document.createElement('optgroup');
+        grp.label = '💻 Local Model (in-browser)';
+        const opt = document.createElement('option');
+        opt.value = LOCAL_VLM_MODEL;
+        opt.textContent = `SmolVLM-256M — ${_localVLMState === 'ready' ? '✅ loaded' : '⏳ not loaded'}`;
+        opt.selected = true;
+        grp.appendChild(opt);
+        select.appendChild(grp);
+        select.disabled = true;
+        if (statusSpan) statusSpan.textContent = _localVLMState === 'ready' ? '✅ local' : '⏳ not loaded';
+        return;
+    }
+
+    // Custom OpenAI-compat provider — fetch /v1/models dynamically
+    if (activeProvider.id === 'custom') {
+        fetchCustomModels();
+        return;
+    }
+
+    // Named providers (openai, anthropic, gemini) — show static vision model list
     if (activeProvider.id !== 'pollinations') {
         const models = activeProvider.visionModels || [];
         select.innerHTML = '';
         const grp = document.createElement('optgroup');
-        if (activeProvider.id === 'local') {
-            grp.label = '💻 Local Model (in-browser)';
-        } else {
-            grp.label = `${activeProvider.label} Vision Models`;
-        }
+        grp.label = `${activeProvider.label} Vision Models`;
         const saved = localStorage.getItem(MODEL_STORAGE_KEY) || activeProvider.defaultModel;
         for (const m of models) {
             const opt = document.createElement('option');
             opt.value = m;
-            opt.textContent = activeProvider.id === 'local'
-                ? `SmolVLM-256M — ${_localVLMState === 'ready' ? '✅ loaded' : '⏳ not loaded'}`
-                : m;
+            opt.textContent = m;
             if (m === saved) opt.selected = true;
             grp.appendChild(opt);
         }
         select.appendChild(grp);
-        select.disabled = activeProvider.id === 'local'; // can't change local model
-        if (statusSpan) statusSpan.textContent = activeProvider.id === 'local'
-            ? (_localVLMState === 'ready' ? '✅ local' : '⏳ not loaded')
-            : `${models.length} models`;
+        select.disabled = false;
+        if (statusSpan) statusSpan.textContent = `${models.length} models`;
         return;
     }
 
@@ -1151,6 +1243,41 @@ function buildProviderPanel() {
         bridgeNote.innerHTML = '🔭 <strong>Bridge mode:</strong> SmolVLM will caption the screen locally, then send the description to your cloud LLM. Load the local model first.';
         bridgeNote.style.display = PROVIDERS.custom.hasVision ? 'none' : 'block';
         customRowsContainer.appendChild(bridgeNote);
+
+        // Refresh models button — fetches /v1/models and shows count inline
+        const refreshRow = document.createElement('div');
+        refreshRow.className = 'provider-row provider-local-row';
+        const refreshStatus = document.createElement('span');
+        refreshStatus.className = 'provider-local-status';
+        refreshStatus.id = 'custom-model-fetch-status';
+        refreshStatus.textContent = PROVIDERS.custom.visionModels?.length
+            ? `${PROVIDERS.custom.visionModels.length} models cached`
+            : 'Models not yet fetched';
+        const refreshBtn = document.createElement('button');
+        refreshBtn.className = 'provider-load-local-btn';
+        refreshBtn.textContent = '🔄 Fetch Models';
+        refreshBtn.addEventListener('click', async () => {
+            refreshBtn.disabled = true;
+            refreshBtn.textContent = '⏳ Fetching…';
+            refreshStatus.textContent = 'Connecting…';
+            // Read current URL/key from inputs before saving
+            const urlEl = document.getElementById('custom-base-url');
+            const keyEl = document.getElementById('provider-key-input');
+            if (urlEl) window._customApiBase = urlEl.value.trim();
+            if (keyEl) providerKeys['custom'] = keyEl.value.trim();
+            // Temporarily switch to custom so fetchCustomModels works
+            const prevProvider = activeProvider;
+            activeProvider = PROVIDERS.custom;
+            await fetchCustomModels();
+            activeProvider = prevProvider;
+            const count = PROVIDERS.custom.visionModels?.length || 0;
+            refreshStatus.textContent = count ? `✅ ${count} models fetched` : '⚠ No models returned';
+            refreshBtn.disabled = false;
+            refreshBtn.textContent = '🔄 Fetch Models';
+        });
+        refreshRow.appendChild(refreshStatus);
+        refreshRow.appendChild(refreshBtn);
+        customRowsContainer.appendChild(refreshRow);
 
         // Local model status + load button
         const localRow = document.createElement('div');
