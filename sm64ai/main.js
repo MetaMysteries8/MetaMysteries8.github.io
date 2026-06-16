@@ -950,9 +950,11 @@ async function fetchCustomModels() {
     const statusSpan = document.getElementById('model-status');
     if (!select) return;
 
-    const base = (window._customApiBase || '').replace(/\/$/, '');
+    // Read base URL from memory or localStorage
+    const base = (window._customApiBase || localStorage.getItem('sm64_custom_base') || '').replace(/\/$/, '');
     if (!base) {
-        select.innerHTML = '<option value="">⚠ Set Base URL in API Settings</option>';
+        // No URL configured yet — show a prompt but don't spam errors
+        select.innerHTML = '<option value="">⚙️ Set Base URL in API Settings first</option>';
         select.disabled = true;
         if (statusSpan) statusSpan.textContent = 'no URL';
         return;
@@ -962,7 +964,8 @@ async function fetchCustomModels() {
     select.disabled  = true;
     if (statusSpan) statusSpan.textContent = 'fetching…';
 
-    const key = providerKeys['custom'] || '';
+    // Read key from memory, then localStorage fallback
+    const key = providerKeys['custom'] || localStorage.getItem('sm64_key_custom') || '';
     try {
         const res = await fetch(`${base}/v1/models`, {
             headers: {
@@ -2347,7 +2350,19 @@ Module.onRuntimeInitialized = function () {
 // 22. BOOT
 // ────────────────────────────────────────────────────────────
 restoreProviderState();
-fetchVisionModels();
+// After restoring provider state, fetch the right model list
+if (activeProvider.id === 'custom') {
+    // Only auto-fetch if base URL is already configured
+    if (window._customApiBase || localStorage.getItem('sm64_custom_base')) {
+        fetchCustomModels();
+    } else {
+        populateModelDropdown(); // shows "Set Base URL" prompt
+    }
+} else if (activeProvider.id === 'pollinations') {
+    fetchVisionModels();
+} else {
+    populateModelDropdown(); // static list for openai/anthropic/gemini/local
+}
 initAuth();
 renderControlsGuide(null);   // show static controls immediately
 // Voices may not be loaded yet — wait for them then re-render tutorial if open
