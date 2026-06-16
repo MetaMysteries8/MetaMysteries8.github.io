@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Super Mario 64 Web</title>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+    <div id="app">
+        <canvas id="canvas" tabindex="0" aria-label="Super Mario 64 canvas"></canvas>
+        <button id="ai-player-btn">AI Player</button>
+        <div id="ai-status"></div>
+        <div id="controls-panel">
+            <button id="mute-btn" title="Mute game audio">🔊</button>
+            <label>Speed: <input type="range" id="speed-slider" min="0.5" max="3" step="0.5" value="1"><span id="speed-label">1x</span></label>
+        </div>
+        <div id="instruction-panel">
+            <input type="text" id="ai-instruction" placeholder="Tell AI what to do...">
+            <button id="send-instruction">Send</button>
+        </div>
+        <button id="ai-buddy-btn">AI Buddy Coach</button>
+        <div id="buddy-panel">
+            <div id="buddy-text"></div>
+        </div>
+        <button id="view-memory-btn">View AI Memory</button>
+        <div id="memory-panel">
+            <h3>AI Memory & Notes</h3>
+            <div id="memory-content"></div>
+            <button id="close-memory-btn">Close</button>
+        </div>
+        <button id="pregame-notes-btn">AI Study Notes</button>
+
+        <!-- Auth overlay -->
+        <div id="auth-overlay">
+            <div id="auth-panel">
+                <div id="auth-logo">🍄</div>
+                <h2>SM64 AI Player</h2>
+                <p id="auth-desc">This app uses Pollinations AI to watch and play Super Mario 64. Connect your Pollinations account to get started — your Pollen, your usage.</p>
+                <button id="auth-btn">🔑 Connect Pollinations Account</button>
+                <div id="auth-status"></div>
+                <p id="auth-note">You'll be redirected to Pollinations to authorize. The key stays in your browser only.</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+      window.Module = window.Module || {};
+      Module.canvas = document.getElementById('canvas');
+      Module.locateFile = (path) => (path.endsWith('.wasm') ? './sm64.wasm' : path);
+      Module.preRun = [];
+      Module.postRun = [];
+    </script>
+    <script src="./sm64.js"></script>
+    <script type="module" src="./main.js"></script>
+</body>
+</html>
