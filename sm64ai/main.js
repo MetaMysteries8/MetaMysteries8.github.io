@@ -610,7 +610,7 @@ function loadTransformersJS() {
         const wait = setInterval(() => {
             if (window.__transformers__) { clearInterval(wait); resolve(window.__transformers__); }
         }, 200);
-        setTimeout(() => { clearInterval(wait); reject(new Error('Transformers.js load timeout')); }, 30000);
+        setTimeout(() => { clearInterval(wait); reject(new Error('Transformers.js load timeout (90s)')); }, 90000);
     });
 }
 
@@ -624,33 +624,52 @@ async function initLocalVLM(onProgress) {
         onProgress?.('Loading Transformers.js…', 5);
         const { pipeline, env } = await loadTransformersJS();
 
-        onProgress?.('Downloading SmolVLM-256M model (~400 MB)…', 10);
         // Use WebGPU if available, fall back to WASM
-        const device = navigator.gpu ? 'webgpu' : 'wasm';
+        const device = (typeof navigator !== 'undefined' && navigator.gpu) ? 'webgpu' : 'wasm';
+        onProgress?.(`Downloading SmolVLM-256M (~400 MB) via ${device.toUpperCase()}…`, 10);
 
-        _localVLMPipe = await pipeline(
+        // dtype: fp16 for WebGPU, q4 for WASM (quantised for speed/memory)
+        // Fall back to fp32 if q4 not supported
+        let dtype = device === 'webgpu' ? 'fp16' : 'q4';
+
+        const tryLoad = async (dtypeAttempt) => pipeline(
             'image-text-to-text',
             LOCAL_VLM_MODEL,
             {
                 device,
-                dtype: device === 'webgpu' ? 'fp16' : 'q4',
+                dtype: dtypeAttempt,
                 progress_callback: (info) => {
-                    if (info.status === 'progress') {
-                        const pct = Math.round(10 + (info.progress || 0) * 0.85);
-                        onProgress?.(`Downloading… ${Math.round(info.progress || 0)}%`, pct);
+                    // Transformers.js v3: info.progress is already 0–100
+                    if (info.status === 'progress' && typeof info.progress === 'number') {
+                        const pct = Math.round(10 + info.progress * 0.88);
+                        onProgress?.(`Downloading… ${Math.round(info.progress)}%`, pct);
+                    } else if (info.status === 'initiate') {
+                        onProgress?.(`Fetching ${info.file || 'model files'}…`, 12);
+                    } else if (info.status === 'done') {
+                        onProgress?.(`Loaded ${info.file || 'file'}`, 95);
                     }
                 },
             }
         );
 
+        try {
+            _localVLMPipe = await tryLoad(dtype);
+        } catch (dtypeErr) {
+            // dtype not supported — retry with fp32
+            console.warn(`[SmolVLM] dtype=${dtype} failed, retrying with fp32:`, dtypeErr.message);
+            onProgress?.('Retrying with fp32 (may be slower)…', 15);
+            dtype = 'fp32';
+            _localVLMPipe = await tryLoad('fp32');
+        }
+
         _localVLMState = 'ready';
-        onProgress?.('Local vision model ready!', 100);
+        onProgress?.('Local vision model ready! ✅', 100);
         return true;
     } catch (err) {
         console.error('Local VLM init error:', err);
         _localVLMState = 'error';
         _localVLMError = err.message;
-        onProgress?.(`Error: ${err.message}`, -1);
+        onProgress?.(`❌ Error: ${err.message}`, -1);
         return false;
     }
 }
@@ -721,17 +740,36 @@ document.getElementById('local-model-load-btn')?.addEventListener('click', async
     btn.textContent = 'Loading…';
     const ok = await initLocalVLM(updateLocalModelProgress);
     if (ok) {
-        // Switch active provider to local
-        activeProvider = PROVIDERS.local;
-        try { localStorage.setItem(PROVIDER_STORAGE, 'local'); } catch {}
-        populateModelDropdown();
-        hideLocalModelModal();
-        tts.interrupt('Local vision model loaded! AI player is ready.');
+        // Only switch to local provider if user isn't already on a cloud provider
+        // If they're on a cloud provider with vision=false, keep it and use bridge mode
+        const wasOnCustom = activeProvider.id === 'custom' && !PROVIDERS.custom.hasVision;
+        const wasOnOtherCloud = activeProvider.id !== 'local' && !providerHasVision();
+
+        if (wasOnCustom || wasOnOtherCloud) {
+            // Bridge mode: keep current cloud provider, SmolVLM handles vision
+            populateModelDropdown();
+            hideLocalModelModal();
+            tts.interrupt('Vision bridge ready! SmolVLM will describe the screen for your cloud AI.');
+        } else {
+            // Switch to local provider
+            activeProvider = PROVIDERS.local;
+            try { localStorage.setItem(PROVIDER_STORAGE, 'local'); } catch {}
+            populateModelDropdown();
+            hideLocalModelModal();
+            tts.interrupt('Local vision model loaded! AI player is ready.');
+        }
+
+        // Update the provider panel local row if it's open
+        const localStatusEl = document.getElementById('provider-local-status');
+        const loadLocalBtnEl = document.getElementById('provider-load-local-btn');
+        if (localStatusEl) localStatusEl.textContent = 'SmolVLM-256M: ✅ Loaded';
+        if (loadLocalBtnEl) { loadLocalBtnEl.textContent = '✅ Loaded'; loadLocalBtnEl.disabled = true; }
+
         // If AI was waiting to start, retry
         if (_pendingAIStart) { _pendingAIStart = false; toggleAIPlayer(); }
     } else {
         btn.disabled = false;
-        btn.textContent = 'Retry';
+        btn.textContent = '↺ Retry';
     }
 });
 
@@ -998,30 +1036,106 @@ function buildProviderPanel() {
     keyRow.appendChild(keyInput);
     panel.appendChild(keyRow);
 
-    // Custom base URL row (only for custom provider)
-    if (activeProvider.id === 'custom') {
+    // Placeholder for dynamic custom rows — inserted after key row
+    const customRowsContainer = document.createElement('div');
+    customRowsContainer.id = 'custom-provider-rows';
+    panel.appendChild(customRowsContainer);
+
+    function buildCustomRows(providerId) {
+        customRowsContainer.innerHTML = '';
+        if (providerId !== 'custom') return;
+
+        // Base URL input
         const urlRow = document.createElement('div');
         urlRow.className = 'provider-row';
-        urlRow.innerHTML = '<label class="provider-label">Base URL</label>';
+        const urlLabel = document.createElement('label');
+        urlLabel.className = 'provider-label';
+        urlLabel.textContent = 'Base URL';
         const urlInput = document.createElement('input');
         urlInput.type = 'text'; urlInput.id = 'custom-base-url';
         urlInput.className = 'provider-key-input';
         urlInput.placeholder = 'https://your-api.example.com';
-        urlInput.value = window._customApiBase || '';
-        urlInput.addEventListener('input', () => { window._customApiBase = urlInput.value.trim(); });
+        urlInput.value = window._customApiBase
+            || (localStorage.getItem('sm64_custom_base') || '');
+        urlInput.addEventListener('input', () => {
+            window._customApiBase = urlInput.value.trim();
+        });
+        urlRow.appendChild(urlLabel);
         urlRow.appendChild(urlInput);
-        panel.appendChild(urlRow);
+        customRowsContainer.appendChild(urlRow);
 
+        // Vision toggle row
         const visionRow = document.createElement('div');
-        visionRow.className = 'provider-row';
-        visionRow.innerHTML = '<label class="provider-label">Vision-capable?</label>';
+        visionRow.className = 'provider-row provider-vision-row';
+
+        const visionLabelEl = document.createElement('label');
+        visionLabelEl.className = 'provider-label';
+        visionLabelEl.textContent = 'Model supports vision (image input)';
+
+        const visionToggleWrap = document.createElement('label');
+        visionToggleWrap.className = 'provider-toggle-wrap';
+
         const visionCheck = document.createElement('input');
         visionCheck.type = 'checkbox'; visionCheck.id = 'custom-vision-check';
         visionCheck.checked = PROVIDERS.custom.hasVision === true;
-        visionCheck.addEventListener('change', () => { PROVIDERS.custom.hasVision = visionCheck.checked; });
-        visionRow.appendChild(visionCheck);
-        panel.appendChild(visionRow);
+
+        const toggleTrack = document.createElement('span');
+        toggleTrack.className = 'toggle-track';
+        const toggleThumb = document.createElement('span');
+        toggleThumb.className = 'toggle-thumb';
+        toggleTrack.appendChild(toggleThumb);
+
+        const visionToggleLabel = document.createElement('span');
+        visionToggleLabel.className = 'provider-toggle-label';
+        visionToggleLabel.id = 'custom-vision-label';
+        visionToggleLabel.textContent = PROVIDERS.custom.hasVision ? 'Vision ON' : 'Visionless — bridge mode';
+
+        visionCheck.addEventListener('change', () => {
+            PROVIDERS.custom.hasVision = visionCheck.checked;
+            visionToggleLabel.textContent = visionCheck.checked ? 'Vision ON' : 'Visionless — bridge mode';
+            bridgeNote.style.display = visionCheck.checked ? 'none' : 'block';
+            try { localStorage.setItem('sm64_custom_vision', visionCheck.checked ? '1' : '0'); } catch {}
+        });
+
+        visionToggleWrap.appendChild(visionCheck);
+        visionToggleWrap.appendChild(toggleTrack);
+        visionToggleWrap.appendChild(visionToggleLabel);
+
+        visionRow.appendChild(visionLabelEl);
+        visionRow.appendChild(visionToggleWrap);
+        customRowsContainer.appendChild(visionRow);
+
+        // Bridge mode note
+        const bridgeNote = document.createElement('p');
+        bridgeNote.className = 'provider-bridge-note';
+        bridgeNote.id = 'custom-bridge-note';
+        bridgeNote.innerHTML = '🔭 <strong>Bridge mode:</strong> SmolVLM will caption the screen locally, then send the description to your cloud LLM. Load the local model first.';
+        bridgeNote.style.display = PROVIDERS.custom.hasVision ? 'none' : 'block';
+        customRowsContainer.appendChild(bridgeNote);
+
+        // Local model status + load button
+        const localRow = document.createElement('div');
+        localRow.className = 'provider-row provider-local-row';
+        localRow.id = 'provider-local-row';
+        const localStatus = document.createElement('span');
+        localStatus.className = 'provider-local-status';
+        localStatus.id = 'provider-local-status';
+        const stateMap = { idle: '⬜ Not loaded', loading: '⏳ Loading…', ready: '✅ Loaded', error: '❌ Error' };
+        localStatus.textContent = `SmolVLM-256M: ${stateMap[_localVLMState] || '⬜ Not loaded'}`;
+        const loadLocalBtn = document.createElement('button');
+        loadLocalBtn.className = 'provider-load-local-btn';
+        loadLocalBtn.id = 'provider-load-local-btn';
+        loadLocalBtn.textContent = _localVLMState === 'ready' ? '✅ Loaded' : '⬇ Load Local Model';
+        loadLocalBtn.disabled = _localVLMState === 'ready' || _localVLMState === 'loading';
+        loadLocalBtn.addEventListener('click', () => {
+            showLocalModelModal();
+        });
+        localRow.appendChild(localStatus);
+        localRow.appendChild(loadLocalBtn);
+        customRowsContainer.appendChild(localRow);
     }
+
+    buildCustomRows(activeProvider.id);
 
     // Save button
     const saveBtn = document.createElement('button');
@@ -1035,6 +1149,19 @@ function buildProviderPanel() {
             providerKeys[newId] = newKey;
             try { localStorage.setItem(`sm64_key_${newId}`, newKey); } catch {}
         }
+        // Persist custom provider settings
+        if (newId === 'custom') {
+            const urlEl = document.getElementById('custom-base-url');
+            if (urlEl) {
+                window._customApiBase = urlEl.value.trim();
+                try { localStorage.setItem('sm64_custom_base', window._customApiBase); } catch {}
+            }
+            const visionEl = document.getElementById('custom-vision-check');
+            if (visionEl) {
+                PROVIDERS.custom.hasVision = visionEl.checked;
+                try { localStorage.setItem('sm64_custom_vision', visionEl.checked ? '1' : '0'); } catch {}
+            }
+        }
         try { localStorage.setItem(PROVIDER_STORAGE, newId); } catch {}
         populateModelDropdown();
         closeProviderPanel();
@@ -1042,13 +1169,14 @@ function buildProviderPanel() {
     });
     panel.appendChild(saveBtn);
 
-    // Update key row on provider change
+    // Update key row + custom rows on provider change
     sel.addEventListener('change', () => {
         const p = PROVIDERS[sel.value];
         keyLabel.textContent    = p.keyLabel;
         keyInput.placeholder    = p.noKey ? 'No key needed — runs locally' : p.keyPlaceholder;
         keyInput.disabled       = !!(p.oauthOnly || p.noKey);
         keyInput.value          = providerKeys[p.id] || '';
+        buildCustomRows(p.id);
     });
 }
 
@@ -1076,6 +1204,11 @@ function restoreProviderState() {
             const k = localStorage.getItem(`sm64_key_${id}`);
             if (k) providerKeys[id] = k;
         }
+        // Restore custom provider settings
+        const savedBase   = localStorage.getItem('sm64_custom_base');
+        const savedVision = localStorage.getItem('sm64_custom_vision');
+        if (savedBase)   window._customApiBase       = savedBase;
+        if (savedVision !== null) PROVIDERS.custom.hasVision = savedVision === '1';
     } catch {}
 }
 
