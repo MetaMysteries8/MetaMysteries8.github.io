@@ -993,6 +993,34 @@ body {
 /* Streamer toggle button stays reachable when not in streamer mode */
 #streamer-toggle-btn.active { background: rgba(142,36,170,0.30); color: #ce93d8; }
 
+/* ── Credits ─────────────────────────────────────────────── */
+#auth-credit {
+    margin-top: 16px;
+    font-size: 11px;
+    color: rgba(255,255,255,0.40);
+    line-height: 1.5;
+}
+#auth-credit a { color: var(--cyan); text-decoration: none; }
+#auth-credit a:hover { text-decoration: underline; }
+
+/* Subtle persistent credit to the original project (bottom-left during play) */
+#origin-credit {
+    position: fixed;
+    bottom: 8px; left: 10px;
+    z-index: 90;
+    font-size: 11px;
+    color: rgba(255,255,255,0.35);
+    text-decoration: none;
+    background: rgba(0,0,0,0.30);
+    padding: 3px 8px; border-radius: 6px;
+    backdrop-filter: blur(4px);
+    transition: color 0.15s;
+    pointer-events: auto;
+}
+#origin-credit:hover { color: var(--cyan); }
+/* Hidden in streamer mode (the streamer watermark takes over) */
+#app.streamer-mode #origin-credit { display: none; }
+
 /* ── AI thought-stream chatlog (top-right, streamer mode) ──── */
 #ai-chatlog {
     display: none;            /* set to flex via JS in streamer mode */

@@ -1,6 +1,10 @@
 // ============================================================
 // Super Mario 64 Web – AI Player  (v3)
 //
+// Built on top of the original "Super Mario 64 Web" by Tenslant on websim:
+//   https://websim.com/@Tenslant/super-mario-64-web
+// AI player layer by Endoxidev/MetaMysteries8.
+//
 // NEW in v3:
 //  - TTS queue with interrupt / wait / drain modes (no overlap)
 //  - Multi-API provider system (Pollinations, OpenAI, Anthropic,
@@ -85,19 +89,37 @@ let _baseScanTries = 0;      // throttles re-scans when not yet found
 function _looksLikeMario(b) {
     const f = Module.HEAPF32, U16 = Module.HEAPU16, I16 = Module.HEAP16, I8 = Module.HEAP8, U32 = Module.HEAPU32;
     if (!Module.HEAPU8 || b + 0xB8 > Module.HEAPU8.length) return false;
+
+    // Health: high byte = wedge count, must be 1..8, full = 0x0880
     const health = U16[(b + MS_OFF.HEALTH) >> 1];
-    if (health < 0x0100 || health > 0x08FF) return false;          // 1..8 wedges
+    const wedges = health >> 8;
+    if (wedges < 1 || wedges > 8 || health < 0x0100 || health > 0x0880) return false;
+
+    // Lives: Mario always has >= 1 while alive (starts at 4). Rejects the
+    // false-positive that showed lives=0.
     const lives = I8[b + MS_OFF.LIVES];
-    if (lives < 0 || lives > 100) return false;
+    if (lives < 1 || lives > 99) return false;
+
     const stars = I16[(b + MS_OFF.STARS) >> 1];
     if (stars < 0 || stars > 120) return false;
     const coins = I16[(b + MS_OFF.COINS) >> 1];
-    if (coins < 0 || coins > 1000) return false;
+    if (coins < 0 || coins > 999) return false;
+
+    // Action must be a real decomp action id (carries group/flag bits, never tiny)
     const action = U32[(b + MS_OFF.ACTION) >> 2];
-    if (action === 0 || action > 0x0FFFFFFF) return false;         // decomp action ids
+    if (action < 0x00000040 || action > 0xFFFFFFFF) return false;
+
+    // Position: finite, in-bounds, and NOT all-zero (Mario is never at exact
+    // origin in a level — this was the giveaway for the bad base).
     const x = f[(b + MS_OFF.POS_X) >> 2], y = f[(b + MS_OFF.POS_Y) >> 2], z = f[(b + MS_OFF.POS_Z) >> 2];
     if (!(Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z))) return false;
-    if (Math.abs(x) > 40000 || Math.abs(y) > 40000 || Math.abs(z) > 40000) return false;
+    if (Math.abs(x) > 20000 || Math.abs(y) > 20000 || Math.abs(z) > 20000) return false;
+    if (Math.abs(x) < 1 && Math.abs(z) < 1) return false;          // reject (0,_,0)
+
+    // Forward speed must be a sane small float
+    const v = f[(b + MS_OFF.FWD_VEL) >> 2];
+    if (!Number.isFinite(v) || Math.abs(v) > 300) return false;
+
     return true;
 }
 
@@ -114,13 +136,16 @@ function _findMarioBase() {
     return -1;
 }
 
+// ACT_FLAG_* bits (sm64 decomp): STATIONARY 0x200, MOVING 0x400, AIR 0x800,
+// SWIMMING 0x2000, METAL_WATER 0x4000, IDLE 0x400000.
+function _actionInWater(a) { return !!(a & 0x00002000) || !!(a & 0x00004000); }
 function _actionLabel(a) {
     if (!a) return 'idle';
-    if (a & 0x02000000) return 'swimming/in water';
-    if (a & 0x00800000) return 'airborne';
-    if (a & 0x00400000) return 'moving';
-    if (a & 0x00200000) return 'standing';
-    if (a & 0x00010000) return 'crouch/slide';
+    if (_actionInWater(a))   return 'swimming/in water';
+    if (a & 0x00000800)      return 'airborne (jump/fall)';
+    if (a & 0x00000400)      return 'moving';
+    if (a & 0x00400000)      return 'idle';
+    if (a & 0x00000200)      return 'standing';
     return 'action 0x' + (a >>> 0).toString(16);
 }
 
@@ -158,7 +183,7 @@ function readGameState() {
             facing: _yawToCompass(yaw),
             actionId: action,
             actionName: _actionLabel(action),
-            inWater: !!(action & 0x02000000),
+            inWater: _actionInWater(action),
             levelId: 0, area: 0, levelName: 'In game',
         };
         _gameState = state;
@@ -579,6 +604,7 @@ const AI_TOOLS = [
     _tool('look_around', 'Rotate the camera to survey the surroundings (helps you see exits/paths you may be facing away from).'),
     _tool('set_goal', 'Set a persistent short-term goal you will keep pursuing across turns.',
         { goal: { type: 'string', description: 'e.g. "enter the castle door"' } }, ['goal']),
+    _tool('study_guide', 'Re-read the SM64 strategy guides and refresh your study notes (use if you are unsure how to progress).'),
     _tool('save_waypoint', 'Remember Mario\'s current position under a name, to navigate back to later.',
         { name: { type: 'string' } }, ['name']),
     _tool('waypoint_distance', 'Get distance and turn direction from Mario to a saved waypoint (uses real coordinates).',
@@ -657,6 +683,10 @@ async function executeTool(name, args = {}) {
             case 'set_goal': {
                 userInstruction = String(args.goal || '').slice(0, 200);
                 return userInstruction ? `Goal set: ${userInstruction}` : 'No goal provided.';
+            }
+            case 'study_guide': {
+                await runStudy({ silent: true });
+                return `Studied the guide — ${aiNotes.length} strategy notes ready (now in my context).`;
             }
             case 'save_waypoint': {
                 const st = readGameState();
@@ -2457,15 +2487,22 @@ ${perceptionNote}
 
 GAME OBJECTIVE:
 1. Start outside the castle — head to the entrance bridge and go inside
-2. Skip dialog by pressing jump (X) or start (Enter) repeatedly
+2. Advance/skip any dialog box by pressing jump (X) — NOT start
 3. Once inside, do NOT run back out — proceed forward
 4. Find the first door (no star requirement) and enter it
 5. Jump into the painting to start the first level
 6. Collect stars to progress
 
-Controls: ArrowUp/Down/Left/Right = move, jump (X) = jump/skip dialog, start (Enter) = pause/skip dialog, crouch (Space) = duck, action (C) = dive/punch/grab, cameraLeft (Z) = rotate camera to look around.
+CONTROLS (read carefully):
+- ArrowUp/Down/Left/Right = walk/steer Mario (Up = forward relative to camera)
+- jump (X) = jump, AND this is how you advance/skip dialog boxes
+- crouch (Space) = duck / crawl / start a long jump
+- action (C) = dive / punch / grab / read a sign
+- cameraLeft (Z) = rotate the camera to look around
+- start (Enter) = PAUSE MENU ONLY. It opens/closes the pause screen. It does NOT skip dialog.
 
 KEY RULES:
+- ⛔ Do NOT press start (Enter) during normal play — it just pauses the game. Only press start ONCE if a pause menu is currently on screen, to close it. To skip/advance dialog use jump (X).
 - Act on the CURRENT situation only. If two frames are shown, the RIGHT/CURRENT frame is reality NOW — the LEFT/PREVIOUS frame is ONLY to judge if you moved. NEVER walk toward something that is only in the previous frame.
 - To change direction you must TURN: hold ArrowLeft or ArrowRight to rotate Mario, or use cameraLeft to spin the camera and re-orient. Don't just push ArrowUp if you're facing the wrong way.
 - If Mario is in WATER, getting out is top priority: press jump (X) to surface and swim toward land. If you keep failing, call the de_water tool.
@@ -2734,6 +2771,12 @@ async function toggleAIPlayer() {
         clearChatlog();
         aiStream.getVideoTracks()[0].addEventListener('ended', stopAIPlayer);
 
+        // Auto-study the guide before playing (once), in the background
+        if (aiNotes.length === 0 && getActiveKey()) {
+            updateAIStatus('📚 Studying the guide before playing…');
+            runStudy({ silent: true }).catch(() => {});
+        }
+
         if (aiMode === 'auto') {
             aiBtn.textContent = '⏹ Stop AI';
             aiBtn.classList.add('active');
@@ -2974,61 +3017,60 @@ document.getElementById('memory-backdrop').addEventListener('click', () => {
 // ────────────────────────────────────────────────────────────
 // 20. PRE-GAME STUDY NOTES
 // ────────────────────────────────────────────────────────────
-document.getElementById('pregame-notes-btn').addEventListener('click', async () => {
-    if (!getActiveKey()) {
-        if (activeProvider.id === 'pollinations') document.getElementById('auth-overlay').classList.remove('hidden');
-        else openProviderPanel(activeProvider.id);
-        return;
-    }
+let _studyInFlight = false;
 
+// Generate strategy notes from the guides. Reusable by the button, the
+// auto-study-on-start, and the AI's own study_guide tool.
+async function runStudy({ silent = false, openMemory = false } = {}) {
+    if (_studyInFlight) return aiNotes;
+    if (!getActiveKey()) {
+        if (!silent) {
+            if (activeProvider.id === 'pollinations') document.getElementById('auth-overlay').classList.remove('hidden');
+            else openProviderPanel(activeProvider.id);
+        }
+        return aiNotes;
+    }
+    _studyInFlight = true;
     const btn = document.getElementById('pregame-notes-btn');
-    btn.disabled = true;
-    btn.textContent = '⏳ Studying…';
-    tts.speak('Starting to study the SM64 guide. This will take a moment.');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Studying…'; }
+    if (!silent) tts.speak('Studying the SM64 guide. One moment.');
 
     try {
         const { t1, t2 } = await loadTrainingData();
-
         const rawContent = await callChatAPI([
-            {
-                role: 'system',
-                content: `Analyze these Super Mario 64 gameplay guides and extract 10-14 concise, actionable strategy notes.
+            { role: 'system', content: `Analyze these Super Mario 64 gameplay guides and extract 10-14 concise, actionable strategy notes.
 Respond with ONLY valid JSON (no markdown fences):
-{"notes": ["note1", "note2", ...]}`,
-            },
-            {
-                role: 'user',
-                content: `Guides:\n\n=== GUIDE 1 ===\n${t1.slice(0, 5000)}\n\n=== GUIDE 2 ===\n${t2.slice(0, 5000)}`,
-            },
+{"notes": ["note1", "note2", ...]}` },
+            { role: 'user', content: `Guides:\n\n=== GUIDE 1 ===\n${t1.slice(0, 5000)}\n\n=== GUIDE 2 ===\n${t2.slice(0, 5000)}` },
         ], { json: true, max_tokens: 700 });
+        recordUsage();
 
         const clean  = rawContent.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
         const result = JSON.parse(clean);
-        aiNotes = result.notes || [];
+        if (Array.isArray(result.notes) && result.notes.length) aiNotes = result.notes;
 
-        btn.textContent = `✓ ${aiNotes.length} Notes Ready`;
-        btn.style.background = '#2e7d32';
-        tts.interrupt(`Done! Generated ${aiNotes.length} strategy notes.`);
-        setTimeout(() => {
-            btn.disabled = false;
-            btn.textContent = '📚 Study';
-            btn.style.background = '';
-        }, 3000);
-
-        document.getElementById('view-memory-btn').click();
-
+        if (btn) {
+            btn.textContent = `✓ ${aiNotes.length} Notes`;
+            btn.style.background = '#2e7d32';
+            setTimeout(() => { btn.disabled = false; btn.textContent = '📚 Study'; btn.style.background = ''; }, 3000);
+        }
+        if (!silent) tts.interrupt(`Done! ${aiNotes.length} strategy notes ready.`);
+        if (openMemory) document.getElementById('view-memory-btn')?.click();
+        return aiNotes;
     } catch (err) {
         console.error('Study notes error:', err);
-        btn.textContent = '❌ Error';
-        btn.style.background = '#b71c1c';
-        tts.interrupt('Study failed. Please try again.');
-        setTimeout(() => {
-            btn.disabled = false;
-            btn.textContent = '📚 Study';
-            btn.style.background = '';
-        }, 3000);
+        if (btn) {
+            btn.textContent = '❌ Error'; btn.style.background = '#b71c1c';
+            setTimeout(() => { btn.disabled = false; btn.textContent = '📚 Study'; btn.style.background = ''; }, 3000);
+        }
+        if (!silent) tts.interrupt('Study failed. Please try again.');
+        return aiNotes;
+    } finally {
+        _studyInFlight = false;
     }
-});
+}
+
+document.getElementById('pregame-notes-btn').addEventListener('click', () => runStudy({ openMemory: true }));
 
 // ────────────────────────────────────────────────────────────
 // 21. PERSISTENT SAVE (Emscripten IDBFS)
