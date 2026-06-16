@@ -41,6 +41,220 @@ const RAPID_FIRE_ACTION_MS    = 300;   // shorter action window
 const LOCAL_VLM_MODEL = 'HuggingFaceTB/SmolVLM-256M-Instruct';
 const LOCAL_VLM_CDN   = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/dist/transformers.min.js';
 
+// Vision-bridge: SmolVLM captions the screen, text sent to visionless cloud LLM
+// Caption is intentionally short to save tokens on the cloud side
+const BRIDGE_CAPTION_MAX_TOKENS = 80;
+
+// ── SM64 Memory Reader ──────────────────────────────────────
+// N64 NTSC US RAM addresses for gMarioStates[0] struct
+// The WASM port maps N64 RAM into a linear buffer; we find the base
+// by scanning Module.HEAPU8 for the known struct layout.
+//
+// All offsets are relative to the N64 RAM base (0x80000000 stripped).
+// We read them as: Module.HEAP32[(base + offset) >> 2]  (32-bit)
+//              or: Module.HEAPU8[base + offset]          (8-bit)
+//
+const N64_RAM_ADDR = {
+    // gMarioStates[0] fields (NTSC US)
+    MARIO_ACTION:    0x0033B17C,  // u32  — current action ID
+    MARIO_X:         0x0033B1AC,  // f32  — world X
+    MARIO_Y:         0x0033B1B0,  // f32  — world Y
+    MARIO_Z:         0x0033B1B4,  // f32  — world Z
+    MARIO_SPEED:     0x0033B1C4,  // f32  — horizontal speed
+    MARIO_COINS:     0x0033B218,  // s16  — coins
+    MARIO_STARS:     0x0033B21A,  // s16  — stars collected
+    MARIO_LIVES:     0x0033B21D,  // s8   — lives
+    MARIO_HEALTH:    0x0033B21E,  // s16  — health (upper byte = wedges, 0x0880 = full)
+    MARIO_CAP_TIMER: 0x0033B226,  // u16  — cap timer
+    MARIO_LEVEL:     0x0033B249,  // u8   — current level number
+    MARIO_AREA:      0x0033B24A,  // u8   — current area
+    // Camera
+    CAM_X:           0x0033C6A4,  // f32
+    CAM_Y:           0x0033C6A8,  // f32
+    CAM_Z:           0x0033C6AC,  // f32
+    CAM_H_ANGLE:     0x0033C6E4,  // s16  — horizontal angle
+};
+
+// Human-readable level names
+const LEVEL_NAMES = {
+    1:'Main Menu', 4:'Castle Grounds', 6:'Bob-omb Battlefield', 7:'Whomp\'s Fortress',
+    8:'Jolly Roger Bay', 9:'Cool Cool Mountain', 10:'Big Boo\'s Haunt', 11:'Hazy Maze Cave',
+    12:'Lethal Lava Land', 13:'Shifting Sand Land', 14:'Dire Dire Docks', 15:'Snowman\'s Land',
+    16:'Wet-Dry World', 17:'Tall Tall Mountain', 18:'Tiny-Huge Island', 19:'Tick Tock Clock',
+    20:'Rainbow Ride', 24:'Bowser in the Dark World', 27:'Bowser in the Fire Sea',
+    28:'Bowser in the Sky', 29:'Peach\'s Secret Slide', 30:'Cavern of the Metal Cap',
+    33:'Vanish Cap Under the Moat', 34:'Winged Mario Over the Rainbow',
+    36:'Castle Inside', 37:'Courtyard',
+};
+
+// Action ID → readable name (partial map for most common states)
+const ACTION_NAMES = {
+    0x00000000:'idle', 0x00000001:'start jump', 0x00000002:'jump', 0x00000004:'double jump',
+    0x00000008:'triple jump', 0x00000010:'backflip', 0x00000020:'steep jump',
+    0x00000040:'wall kick', 0x00000080:'side flip', 0x00000100:'long jump',
+    0x00000200:'water jump', 0x00000400:'dive', 0x00000800:'freefall',
+    0x00001000:'slide jump', 0x00002000:'air throw', 0x00004000:'twirl jump',
+    0x00008000:'ground pound', 0x00010000:'braking', 0x00020000:'crouching',
+    0x00040000:'crawling', 0x00080000:'stop slide', 0x00100000:'slide kick',
+    0x00200000:'hold braking', 0x00400000:'hold idle', 0x00800000:'hold heavy idle',
+    0x01000000:'walking', 0x02000000:'hold walking', 0x04000000:'turning',
+    0x08000000:'finish turning', 0x10000000:'sliding', 0x20000000:'hold sliding',
+    0x40000000:'riding shell', 0x80000000:'swimming',
+};
+
+// State of the memory reader
+let _wasmBase = -1;          // offset in HEAPU8 where N64 RAM starts
+let _gameState = null;       // last successfully read state object
+let _gameStateReady = false; // true once base is found
+
+function _findWasmBase() {
+    // Strategy: scan HEAPU8 for a pattern that looks like the Mario struct.
+    // The health field at 0x33B21E is typically 0x0880 (full health) on startup.
+    // We look for that 16-bit value at the expected offset from candidate bases.
+    // Emscripten typically places N64 RAM at a fixed offset (often 0x10000 or 0x20000).
+    // We try a range of likely bases.
+    if (!Module.HEAPU8) return -1;
+    const heap = Module.HEAPU8;
+    // Try common Emscripten base offsets for the N64 RAM region
+    const candidates = [];
+    for (let base = 0x10000; base < Math.min(heap.length, 0x800000); base += 0x10000) {
+        candidates.push(base);
+    }
+    for (const base of candidates) {
+        const healthOff = base + N64_RAM_ADDR.MARIO_HEALTH;
+        if (healthOff + 2 > heap.length) continue;
+        // Health should be between 0x0100 (1 wedge) and 0x0880 (full)
+        const health = (heap[healthOff] << 8) | heap[healthOff + 1];
+        if (health >= 0x0100 && health <= 0x0880) {
+            // Also check lives (should be 1-99)
+            const livesOff = base + N64_RAM_ADDR.MARIO_LIVES;
+            if (livesOff >= heap.length) continue;
+            const lives = heap[livesOff];
+            if (lives >= 1 && lives <= 99) {
+                console.log(`[SM64 Memory] Found WASM base at 0x${base.toString(16)} (health=0x${health.toString(16)}, lives=${lives})`);
+                return base;
+            }
+        }
+    }
+    return -1;
+}
+
+function readGameState() {
+    if (!_gameStateReady) {
+        // Try to find base if not yet found
+        if (_wasmBase === -1) {
+            _wasmBase = _findWasmBase();
+            if (_wasmBase === -1) return null;
+        }
+        _gameStateReady = true;
+    }
+
+    try {
+        const heap8  = Module.HEAPU8;
+        const heap32 = Module.HEAP32;
+        if (!heap8 || !heap32) return null;
+
+        const b = _wasmBase;
+
+        // Helper: read float at N64 address
+        const readF32 = (addr) => {
+            const off = (b + addr) >> 2;
+            if (off * 4 + 4 > heap8.length) return 0;
+            // N64 is big-endian; WASM is little-endian — swap bytes
+            const raw = heap8.slice(b + addr, b + addr + 4);
+            const swapped = new Uint8Array([raw[3], raw[2], raw[1], raw[0]]);
+            return new DataView(swapped.buffer).getFloat32(0);
+        };
+
+        // Helper: read unsigned 16-bit big-endian
+        const readU16 = (addr) => {
+            const off = b + addr;
+            if (off + 2 > heap8.length) return 0;
+            return (heap8[off] << 8) | heap8[off + 1];
+        };
+
+        // Helper: read signed 16-bit big-endian
+        const readS16 = (addr) => {
+            const v = readU16(addr);
+            return v >= 0x8000 ? v - 0x10000 : v;
+        };
+
+        // Helper: read unsigned 8-bit
+        const readU8 = (addr) => {
+            const off = b + addr;
+            if (off >= heap8.length) return 0;
+            return heap8[off];
+        };
+
+        // Helper: read unsigned 32-bit big-endian
+        const readU32 = (addr) => {
+            const off = b + addr;
+            if (off + 4 > heap8.length) return 0;
+            return ((heap8[off] << 24) | (heap8[off+1] << 16) | (heap8[off+2] << 8) | heap8[off+3]) >>> 0;
+        };
+
+        const actionId = readU32(N64_RAM_ADDR.MARIO_ACTION);
+        const healthRaw = readU16(N64_RAM_ADDR.MARIO_HEALTH);
+        const healthWedges = (healthRaw >> 8) & 0xFF; // upper byte = wedge count (max 8)
+        const levelId = readU8(N64_RAM_ADDR.MARIO_LEVEL);
+
+        const state = {
+            x:       Math.round(readF32(N64_RAM_ADDR.MARIO_X)),
+            y:       Math.round(readF32(N64_RAM_ADDR.MARIO_Y)),
+            z:       Math.round(readF32(N64_RAM_ADDR.MARIO_Z)),
+            speed:   Math.round(readF32(N64_RAM_ADDR.MARIO_SPEED) * 10) / 10,
+            coins:   readS16(N64_RAM_ADDR.MARIO_COINS),
+            stars:   readS16(N64_RAM_ADDR.MARIO_STARS),
+            lives:   readU8(N64_RAM_ADDR.MARIO_LIVES),
+            health:  healthWedges,  // 0-8 wedges
+            capTimer: readU16(N64_RAM_ADDR.MARIO_CAP_TIMER),
+            levelId,
+            levelName: LEVEL_NAMES[levelId] || `Level ${levelId}`,
+            area:    readU8(N64_RAM_ADDR.MARIO_AREA),
+            actionId,
+            actionName: ACTION_NAMES[actionId] || `action_0x${actionId.toString(16)}`,
+            camX:    Math.round(readF32(N64_RAM_ADDR.CAM_X)),
+            camY:    Math.round(readF32(N64_RAM_ADDR.CAM_Y)),
+            camZ:    Math.round(readF32(N64_RAM_ADDR.CAM_Z)),
+            camAngle: readS16(N64_RAM_ADDR.CAM_H_ANGLE),
+        };
+
+        // Sanity check: lives must be plausible
+        if (state.lives < 0 || state.lives > 99) return null;
+        if (state.stars < 0 || state.stars > 120) return null;
+
+        _gameState = state;
+        updateMemoryHUD(state);
+        return state;
+    } catch (err) {
+        console.warn('[SM64 Memory] Read error:', err);
+        return null;
+    }
+}
+
+function gameStateToText(state) {
+    if (!state) return '';
+    const hp = '❤'.repeat(Math.max(0, state.health)) + '🖤'.repeat(Math.max(0, 8 - state.health));
+    return [
+        `LIVE GAME STATE (read from WASM memory):`,
+        `  Level: ${state.levelName} (area ${state.area})`,
+        `  Mario pos: X=${state.x}, Y=${state.y}, Z=${state.z}`,
+        `  Speed: ${state.speed} units/frame | Action: ${state.actionName}`,
+        `  Health: ${hp} (${state.health}/8 wedges)`,
+        `  Stars: ${state.stars} | Coins: ${state.coins} | Lives: ${state.lives}`,
+        `  Camera: X=${state.camX}, Y=${state.camY}, Z=${state.camZ} (angle ${state.camAngle})`,
+        state.capTimer > 0 ? `  Cap timer: ${state.capTimer} frames remaining` : '',
+    ].filter(Boolean).join('\n');
+}
+
+function updateMemoryHUD(state) {
+    const chip = document.getElementById('memory-hud-chip');
+    if (!chip || !state) return;
+    chip.textContent = `⭐${state.stars} ❤${state.health}/8 🪙${state.coins} 🍄${state.lives} | ${state.levelName}`;
+    chip.title = gameStateToText(state);
+    chip.style.display = 'block';
+}
+
 // ────────────────────────────────────────────────────────────
 // 2. TTS QUEUE  (single channel, no overlap)
 // ────────────────────────────────────────────────────────────
@@ -270,9 +484,8 @@ function getActiveKey() {
 }
 
 async function callChatAPI(messages, opts = {}) {
-    // Local provider: route through in-browser SmolVLM
+    // Local provider: route through in-browser SmolVLM (full VQA mode)
     if (activeProvider.id === 'local') {
-        // Extract the image and text from the messages
         const userMsg = messages.find(m => m.role === 'user');
         let imageUrl = null, textPrompt = '';
         if (Array.isArray(userMsg?.content)) {
@@ -283,11 +496,43 @@ async function callChatAPI(messages, opts = {}) {
         } else {
             textPrompt = userMsg?.content || '';
         }
-        // Prepend system context to prompt
         const sysMsg = messages.find(m => m.role === 'system');
         const fullPrompt = (sysMsg ? sysMsg.content.slice(0, 500) + '\n\n' : '') + textPrompt.trim();
         if (imageUrl) return await callLocalVision(imageUrl, fullPrompt);
         throw new Error('Local vision model requires an image');
+    }
+
+    // Vision-bridge mode: provider has no vision, but SmolVLM is loaded
+    // SmolVLM captions the screenshot; that text is sent to the cloud LLM
+    if (!providerHasVision() && _localVLMState === 'ready' && !opts._bridgeCaption) {
+        // Extract image from messages
+        const userMsg = messages.find(m => m.role === 'user');
+        let imageUrl = null;
+        const textParts = [];
+        if (Array.isArray(userMsg?.content)) {
+            for (const p of userMsg.content) {
+                if (p.type === 'image_url') imageUrl = p.image_url.url;
+                if (p.type === 'text')      textParts.push(p.text);
+            }
+        }
+        if (imageUrl) {
+            // Step 1: SmolVLM captions the screen (fast, short)
+            const captionPrompt = 'Describe this Super Mario 64 screenshot in 1-2 sentences. Include: what Mario is doing, where he is, any enemies or obstacles nearby, and the current HUD values (stars, coins, health) if visible.';
+            const caption = await callLocalVision(imageUrl, captionPrompt);
+
+            // Step 2: Replace image with caption text in messages for cloud LLM
+            const bridgedMessages = messages.map(m => {
+                if (m.role !== 'user') return m;
+                const textContent = textParts.join(' ');
+                return {
+                    role: 'user',
+                    content: `[SCREEN DESCRIPTION from local vision model]: ${caption}\n\n${textContent}`,
+                };
+            });
+
+            // Step 3: Call cloud LLM with text-only messages
+            return await callChatAPI(bridgedMessages, { ...opts, _bridgeCaption: true });
+        }
     }
 
     const key   = getActiveKey();
@@ -429,6 +674,19 @@ async function callLocalVision(screenshotDataUrl, textPrompt) {
 
 // ── Non-vision warning modal ──────────────────────────────
 function showVisionRequiredModal() {
+    // Update the modal text based on SmolVLM state
+    const localBtn = document.getElementById('vision-req-local-btn');
+    if (localBtn) {
+        if (_localVLMState === 'ready') {
+            localBtn.textContent = '💻 Use Local Vision Bridge';
+        } else if (_localVLMState === 'loading') {
+            localBtn.textContent = '⏳ Loading…';
+            localBtn.disabled = true;
+        } else {
+            localBtn.textContent = '💻 Load Local Model';
+            localBtn.disabled = false;
+        }
+    }
     document.getElementById('vision-required-modal').classList.add('open');
     document.getElementById('vision-required-backdrop').classList.add('open');
 }
@@ -485,7 +743,16 @@ document.getElementById('vision-req-connect-btn')?.addEventListener('click', () 
     hideVisionRequiredModal();
     openProviderPanel();
 });
-document.getElementById('vision-req-local-btn')?.addEventListener('click', showLocalModelModal);
+document.getElementById('vision-req-local-btn')?.addEventListener('click', () => {
+    if (_localVLMState === 'ready') {
+        // SmolVLM already loaded — just enable bridge mode and start AI
+        hideVisionRequiredModal();
+        tts.interrupt('Vision bridge active. Local model will describe the screen for your cloud AI.');
+        if (_pendingAIStart) { _pendingAIStart = false; toggleAIPlayer(); }
+    } else {
+        showLocalModelModal();
+    }
+});
 
 let _pendingAIStart = false;
 
@@ -1216,6 +1483,16 @@ async function aiThink() {
 
         const { t1, t2 } = await loadTrainingData();
 
+        // Read live game state from WASM memory
+        const gameState = readGameState();
+        const memStateCtx = gameState
+            ? `\n\n${gameStateToText(gameState)}`
+            : '';
+
+        // Vision-bridge status
+        const isBridgeMode = !providerHasVision() && _localVLMState === 'ready';
+        if (isBridgeMode) updateAIStatus('🔭 Vision bridge: captioning screen…');
+
         const movementCtx = '\n\nNOTE: The player is idle (no input detected).';
         const memoryCtx   = aiMemory.length > 0
             ? `\n\nPAST MISTAKES TO AVOID:\n${aiMemory.slice(-5).map((m, i) => `${i + 1}. ${m}`).join('\n')}`
@@ -1241,7 +1518,7 @@ GAME OBJECTIVE:
 6. Collect stars to progress
 
 Controls: ArrowUp/Down/Left/Right = move, jump (X) = jump/skip dialog, start (Enter) = pause/skip dialog, crouch (Space) = duck, action (C) = dive/punch/grab
-${movementCtx}${memoryCtx}${notesCtx}${instrCtx}${trainingCtx}
+${movementCtx}${memStateCtx}${memoryCtx}${notesCtx}${instrCtx}${trainingCtx}
 
 Respond with ONLY valid JSON (no markdown fences):
 {
@@ -1402,8 +1679,11 @@ function scheduleAILoop() {
 // 17. TOGGLE AI PLAYER
 // ────────────────────────────────────────────────────────────
 async function toggleAIPlayer() {
-    // Check vision capability first
-    if (!providerHasVision()) {
+    // Vision-bridge check: if provider has no vision but SmolVLM is ready, allow it
+    const bridgeMode = !providerHasVision() && _localVLMState === 'ready';
+
+    // Check vision capability — block only if no vision AND no bridge
+    if (!providerHasVision() && !bridgeMode) {
         _pendingAIStart = true;
         showVisionRequiredModal();
         return;
@@ -1747,6 +2027,14 @@ Module.onRuntimeInitialized = function () {
             document.addEventListener('visibilitychange', () => { if (document.hidden) window.saveNow(); });
         }
     } catch (err) { console.error('save init error:', err); }
+
+    // Start memory reader polling (every 500ms — lightweight, just typed array reads)
+    setTimeout(() => {
+        // Give the game a moment to initialise Mario before first read
+        setInterval(() => {
+            try { readGameState(); } catch {}
+        }, 500);
+    }, 3000);
 };
 
 // ────────────────────────────────────────────────────────────
