@@ -86,6 +86,22 @@ let _marioBase     = -1;     // byte offset of gMarioState in the heap
 let _gameState     = null;   // last successfully read state
 let _baseScanTries = 0;      // throttles re-scans when not yet found
 
+// ⚠ Memory reading is DISABLED by default on this build.
+// The MarioState struct offsets could not be verified against this specific
+// wasm, and the scanner kept locking onto garbage — reporting Mario "in water"
+// at impossible coords (0,0,26) on dry land — which actively MISLED the AI.
+// Vision is the reliable source of truth, so we don't feed memory to the model.
+// Advanced users can re-enable to experiment/calibrate from the console:
+//     sm64Memory(true)
+let MEMORY_ENABLED = (() => { try { return localStorage.getItem('sm64_memory_enabled') === '1'; } catch { return false; } })();
+window.sm64Memory = (on) => {
+    MEMORY_ENABLED = !!on;
+    try { localStorage.setItem('sm64_memory_enabled', on ? '1' : '0'); } catch {}
+    if (!on) { _marioBase = -1; _gameState = null; }
+    console.log(`[SM64] memory reading ${on ? 'ENABLED (experimental)' : 'disabled'}`);
+    return MEMORY_ENABLED;
+};
+
 function _looksLikeMario(b) {
     const f = Module.HEAPF32, U16 = Module.HEAPU16, I16 = Module.HEAP16, I8 = Module.HEAP8, U32 = Module.HEAPU32;
     if (!Module.HEAPU8 || b + 0xB8 > Module.HEAPU8.length) return false;
@@ -156,6 +172,7 @@ function _yawToCompass(yaw) {
 }
 
 function readGameState() {
+    if (!MEMORY_ENABLED) return null;   // off by default — see note above
     if (!Module.HEAPU8) return null;
     if (_marioBase === -1 || !_looksLikeMario(_marioBase)) {
         // Re-scan occasionally (not every frame — a full scan is ~tens of ms)
@@ -649,6 +666,7 @@ async function executeTool(name, args = {}) {
         }
         switch (name) {
             case 'get_game_state': {
+                if (!MEMORY_ENABLED) return 'Live memory readout is unavailable/unreliable on this build — rely on what you SEE on the screen instead.';
                 const st = readGameState();
                 return st ? gameStateToText(st) : 'Game state not readable yet (still booting).';
             }
@@ -2464,20 +2482,28 @@ async function aiThink() {
             if (dist > 4000) motionCtx += `\n📍 Mario's position jumped ${dist} units suddenly — you likely warped, entered a painting, OR this is a title-screen DEMO cutting scenes. Re-check the SCREEN type before acting.`;
         }
 
+        const memOn = gameState != null;   // false when memory reading is disabled
+
         const perceptionNote = memoryOnly
             ? 'IMPORTANT: You CANNOT see the screen. Play entirely from the LIVE GAME STATE (RAM) below plus your knowledge of Super Mario 64. Reason from Mario\'s position (x,y,z), action, speed and camera angle. Call the get_game_state tool whenever you need exact, fresh numbers.'
             : (bridgeOK
-                ? 'A local vision model describes the screen for you (see the SCREEN DESCRIPTION). You may also call the get_game_state tool for exact RAM values.'
-                : 'Analyze the screenshot together with the LIVE GAME STATE below. You may call the get_game_state tool any time for exact, fresh RAM values.');
+                ? 'A local vision model describes the screen for you (see the SCREEN DESCRIPTION).'
+                : (memOn
+                    ? 'Analyze the screenshot together with the LIVE GAME STATE below.'
+                    : 'Analyze the screenshot. NOTE: there is NO live memory readout on this build — rely entirely on what you SEE in the image.'));
 
         const hierarchyNote = memoryOnly
             ? `HOW TO DECIDE (you have no vision):
 1) MEMORY FIRST — reason from the live game-state numbers (position, facing, speed, action) and SM64 knowledge.
 2) ANTI-STUCK TOOLS — if the numbers stop changing or you can't tell what's going on, call is_stuck / is_trapped.`
-            : `HOW TO DECIDE — strictly in this order:
+            : (memOn
+                ? `HOW TO DECIDE — strictly in this order:
 1) VISUALS FIRST — trust what you SEE in the CURRENT frame; your eyes rarely lie. Figure out the screen type and what is actually around Mario right now.
-2) MEMORY SECOND — use the live game-state numbers to confirm/refine what you see (exact position, facing, speed, whether you actually moved). If the picture and the numbers DISAGREE, trust your EYES — e.g. memory says "in water" but you clearly see a title/file-select/DEMO screen → it's a menu, ignore the numbers.
-3) ANTI-STUCK TOOLS THIRD — only when BOTH the visuals and the numbers are ambiguous or contradict reality (you might be stuck/softlocked and can't tell), call is_stuck / is_trapped for a second opinion before doing anything drastic.`;
+2) MEMORY SECOND — use the live game-state numbers to confirm/refine what you see. If the picture and the numbers DISAGREE, trust your EYES.
+3) ANTI-STUCK TOOLS THIRD — only when BOTH visuals and numbers are ambiguous, call is_stuck / is_trapped for a second opinion.`
+                : `HOW TO DECIDE:
+1) VISUALS FIRST — your EYES are the only source of truth here (no live memory). Identify the screen type and what is actually around Mario in the CURRENT frame, and act on that.
+2) ANTI-STUCK TOOLS — if you genuinely can't tell whether you're moving or you look stuck/softlocked, call is_stuck / is_trapped before doing anything drastic.`);
 
         const movementCtx = '\n\nNOTE: The player is idle (no input detected).';
         const memoryCtx   = aiMemory.length > 0
@@ -2527,8 +2553,10 @@ KEY RULES:
 - Act on the CURRENT situation only. If two frames are shown, the RIGHT/CURRENT frame is reality NOW — the LEFT/PREVIOUS frame is ONLY to judge if you moved. NEVER walk toward something that is only in the previous frame.
 - To change direction you must TURN: hold ArrowLeft or ArrowRight to rotate Mario, or use cameraLeft to spin the camera and re-orient. Don't just push ArrowUp if you're facing the wrong way.
 - If Mario is in WATER, getting out is top priority: press jump (X) to surface and swim toward land. If you keep failing, call the de_water tool.
-- If your position barely changes across turns you are STUCK — do something different (turn around, back up, jump). The "escape" tools (de_water, load_state teleport, reset_game) are LOCKED: to use them you must FIRST call is_stuck or is_trapped, and only if it confirms true do they unlock (during rapid-fire recovery + 5 turns). Don't try to teleport/escape without confirming.
-- Prefer the live numbers in the game state over guessing. Use tools (get_game_state, waypoint_distance, set_game_speed for tricky jumps) when helpful, but don't call tools every turn.
+- If you look STUCK (same spot across frames) do something different (turn around, back up, jump). The "escape" tools (de_water, load_state teleport, reset_game) are LOCKED: to use them you must FIRST call is_stuck or is_trapped, and only if it confirms true do they unlock (during rapid-fire recovery + 5 turns). Don't try to teleport/escape without confirming.
+- ${memOn
+    ? 'You may use tools (get_game_state, set_game_speed for tricky jumps) when helpful, but don\'t call tools every turn.'
+    : 'There is no reliable game memory — judge everything from the image. You may still use set_game_speed for tricky jumps, or is_stuck/is_trapped if confused, but don\'t call tools every turn.'}
 ${movementCtx}${memStateCtx}${motionCtx}${memoryCtx}${notesCtx}${instrCtx}${trainingCtx}
 
 Respond with ONLY valid JSON (no markdown fences):
@@ -3121,11 +3149,11 @@ Module.onRuntimeInitialized = function () {
         }
     } catch (err) { console.error('save init error:', err); }
 
-    // Start memory reader polling (every 500ms — lightweight, just typed array reads)
+    // Lightweight 500ms poll: read memory (if enabled) + refresh streamer overlay
     setTimeout(() => {
-        // Give the game a moment to initialise Mario before first read
         setInterval(() => {
             try { readGameState(); } catch {}
+            try { if (_streamerMode) updateStreamerOverlay(_gameState); } catch {}
         }, 500);
     }, 3000);
 };
@@ -3148,7 +3176,7 @@ function setStreamerMode(on) {
     document.getElementById('app')?.classList.toggle('streamer-mode', on);
     try { localStorage.setItem('sm64_streamer_mode', on ? '1' : '0'); } catch {}
     if (on) {
-        if (_gameState) updateStreamerOverlay(_gameState);
+        updateStreamerOverlay(_gameState);   // handles null / memory-off too
         updateStreamerVision(_aiVisionFrame);
         updateStreamerControls();
     }
@@ -3182,8 +3210,20 @@ function updateStreamerControls() {
 function updateStreamerOverlay(state) {
     if (!_streamerMode) return;
     updateStreamerControls();
-    if (!state) return;
     const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+    const badge = document.getElementById('so-ai-badge');
+    if (badge) badge.textContent = aiPlayerActive ? '🤖 AI PLAYING' : (buddyActive ? '🧡 BUDDY COACH' : '🎮 MANUAL');
+
+    // Memory disabled → the AI plays on vision only; don't show fake stats
+    if (!MEMORY_ENABLED) {
+        set('so-stars', '—'); set('so-coins', '—'); set('so-lives', '—');
+        set('so-level', 'Vision-only'); set('so-action', 'memory off'); set('so-speed', '—');
+        set('so-pos', 'position from sight');
+        const hp0 = document.getElementById('so-health');
+        if (hp0) hp0.innerHTML = '';
+        return;
+    }
+    if (!state) return;
     set('so-stars',  state.stars);
     set('so-coins',  state.coins);
     set('so-lives',  state.lives);
@@ -3196,9 +3236,6 @@ function updateStreamerOverlay(state) {
         hp.innerHTML = Array.from({ length: 8 }, (_, i) =>
             `<span class="so-wedge${i < state.health ? ' on' : ''}"></span>`).join('');
     }
-    // Reflect whether the AI is currently playing
-    const badge = document.getElementById('so-ai-badge');
-    if (badge) badge.textContent = aiPlayerActive ? '🤖 AI PLAYING' : (buddyActive ? '🧡 BUDDY COACH' : '🎮 MANUAL');
 }
 
 // Mirror exactly what the AI "sees" into the streamer overlay
