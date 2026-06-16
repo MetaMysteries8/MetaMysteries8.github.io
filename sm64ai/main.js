@@ -2442,7 +2442,7 @@ async function aiThink() {
         const { t1, t2 } = await loadTrainingData();
 
         const memStateCtx = gameState
-            ? `\n\n${gameStateToText(gameState)}`
+            ? `\n\n${gameStateToText(gameState)}\n  (If the screen is a TITLE/FILE-SELECT/DEMO, these numbers are from a background demo — ignore them and follow the SCREEN guidance.)`
             : '';
 
         // Movement since the previous decision — gives the model a sense of motion,
@@ -2459,7 +2459,9 @@ async function aiThink() {
                 motionCtx += `\n⚠ YOU APPEAR STUCK — your position has barely changed for ${_stuckCount} turns, so your last move is NOT working. Do something DIFFERENT: turn to face a new direction, back up, jump over the obstacle, or pick another path. Do not repeat the previous action.`;
             }
             if (_prevGameState.stars < gameState.stars) motionCtx += `\n🌟 You just collected a STAR — nice! Keep progressing.`;
-            if (_prevGameState.levelId !== gameState.levelId) motionCtx += `\n📍 The level/area just changed to ${gameState.levelName}. Re-orient before acting.`;
+            // Huge instantaneous jumps usually mean a warp, painting entry, OR an
+            // attract-mode DEMO cutting between scenes (a menu is playing demos).
+            if (dist > 4000) motionCtx += `\n📍 Mario's position jumped ${dist} units suddenly — you likely warped, entered a painting, OR this is a title-screen DEMO cutting scenes. Re-check the SCREEN type before acting.`;
         }
 
         const perceptionNote = memoryOnly
@@ -2467,6 +2469,15 @@ async function aiThink() {
             : (bridgeOK
                 ? 'A local vision model describes the screen for you (see the SCREEN DESCRIPTION). You may also call the get_game_state tool for exact RAM values.'
                 : 'Analyze the screenshot together with the LIVE GAME STATE below. You may call the get_game_state tool any time for exact, fresh RAM values.');
+
+        const hierarchyNote = memoryOnly
+            ? `HOW TO DECIDE (you have no vision):
+1) MEMORY FIRST — reason from the live game-state numbers (position, facing, speed, action) and SM64 knowledge.
+2) ANTI-STUCK TOOLS — if the numbers stop changing or you can't tell what's going on, call is_stuck / is_trapped.`
+            : `HOW TO DECIDE — strictly in this order:
+1) VISUALS FIRST — trust what you SEE in the CURRENT frame; your eyes rarely lie. Figure out the screen type and what is actually around Mario right now.
+2) MEMORY SECOND — use the live game-state numbers to confirm/refine what you see (exact position, facing, speed, whether you actually moved). If the picture and the numbers DISAGREE, trust your EYES — e.g. memory says "in water" but you clearly see a title/file-select/DEMO screen → it's a menu, ignore the numbers.
+3) ANTI-STUCK TOOLS THIRD — only when BOTH the visuals and the numbers are ambiguous or contradict reality (you might be stuck/softlocked and can't tell), call is_stuck / is_trapped for a second opinion before doing anything drastic.`;
 
         const movementCtx = '\n\nNOTE: The player is idle (no input detected).';
         const memoryCtx   = aiMemory.length > 0
@@ -2485,7 +2496,17 @@ async function aiThink() {
         const systemPrompt = `You are an AI playing Super Mario 64. Decide what actions to take.
 ${perceptionNote}
 
-GAME OBJECTIVE:
+${hierarchyNote}
+
+FIRST, IDENTIFY THE SCREEN — this is critical:
+- TITLE SCREEN ("Press Start", the big rotating Mario face/logo): press start (Enter) to begin.
+- FILE SELECT (a menu of Mario-head save files A/B/C/D, or Peach/coins icons): press jump (X) to pick a file and enter the game.
+- ATTRACT-MODE DEMO (gameplay is happening but YOU aren't moving Mario — the camera pans cinematically, scenes change on their own, often shows random levels/Bowser): you are NOT in control and the live stats are from the demo, NOT real. Press start (Enter) to exit the demo back to the menu.
+- DIALOG BOX (a white text box / sign / character speaking): press jump (X) to advance/close it.
+- ACTUAL GAMEPLAY (you can see Mario respond to your inputs on the castle grounds or in a level): now you actually play.
+If you are NOT clearly in ACTUAL GAMEPLAY, do not platform — just do the one correct button above to progress toward gameplay. Ignore "in water"/stuck logic on menus and demos.
+
+GAME OBJECTIVE (once you control Mario):
 1. Start outside the castle — head to the entrance bridge and go inside
 2. Advance/skip any dialog box by pressing jump (X) — NOT start
 3. Once inside, do NOT run back out — proceed forward
@@ -2499,10 +2520,10 @@ CONTROLS (read carefully):
 - crouch (Space) = duck / crawl / start a long jump
 - action (C) = dive / punch / grab / read a sign
 - cameraLeft (Z) = rotate the camera to look around
-- start (Enter) = PAUSE MENU ONLY. It opens/closes the pause screen. It does NOT skip dialog.
+- start (Enter) = CONFIRM/BEGIN on the title screen and to EXIT a demo; but during ACTUAL GAMEPLAY it opens the PAUSE menu. It does NOT skip dialog.
 
 KEY RULES:
-- ⛔ Do NOT press start (Enter) during normal play — it just pauses the game. Only press start ONCE if a pause menu is currently on screen, to close it. To skip/advance dialog use jump (X).
+- ⛔ During ACTUAL GAMEPLAY, do NOT press start (Enter) — it just pauses. Only press start to begin from the title screen, to exit an attract-mode demo, or to close a pause menu that is already open. To skip/advance dialog use jump (X).
 - Act on the CURRENT situation only. If two frames are shown, the RIGHT/CURRENT frame is reality NOW — the LEFT/PREVIOUS frame is ONLY to judge if you moved. NEVER walk toward something that is only in the previous frame.
 - To change direction you must TURN: hold ArrowLeft or ArrowRight to rotate Mario, or use cameraLeft to spin the camera and re-orient. Don't just push ArrowUp if you're facing the wrong way.
 - If Mario is in WATER, getting out is top priority: press jump (X) to surface and swim toward land. If you keep failing, call the de_water tool.
