@@ -55,205 +55,145 @@ const LOCAL_VLM_CDN   = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@
 // Caption is intentionally short to save tokens on the cloud side
 const BRIDGE_CAPTION_MAX_TOKENS = 80;
 
-// ── SM64 Memory Reader ──────────────────────────────────────
-// N64 NTSC US RAM addresses for gMarioStates[0] struct
-// The WASM port maps N64 RAM into a linear buffer; we find the base
-// by scanning Module.HEAPU8 for the known struct layout.
+// ── SM64 Memory Reader (sm64-port DECOMP build, NOT an emulator) ─────
+// This binary is the PC/decomp port compiled to wasm (found "sm64config",
+// "sm64_save_file" in it). So gMarioState is a NATIVE little-endian C struct
+// in the Emscripten heap at a build-specific address — the old N64 ROM
+// addresses + big-endian swapping were completely wrong (hence all zeros).
 //
-// All offsets are relative to the N64 RAM base (0x80000000 stripped).
-// We read them as: Module.HEAP32[(base + offset) >> 2]  (32-bit)
-//              or: Module.HEAPU8[base + offset]          (8-bit)
-//
-const N64_RAM_ADDR = {
-    // gMarioStates[0] fields (NTSC US)
-    MARIO_ACTION:    0x0033B17C,  // u32  — current action ID
-    MARIO_X:         0x0033B1AC,  // f32  — world X
-    MARIO_Y:         0x0033B1B0,  // f32  — world Y
-    MARIO_Z:         0x0033B1B4,  // f32  — world Z
-    MARIO_SPEED:     0x0033B1C4,  // f32  — horizontal speed
-    MARIO_COINS:     0x0033B218,  // s16  — coins
-    MARIO_STARS:     0x0033B21A,  // s16  — stars collected
-    MARIO_LIVES:     0x0033B21D,  // s8   — lives
-    MARIO_HEALTH:    0x0033B21E,  // s16  — health (upper byte = wedges, 0x0880 = full)
-    MARIO_CAP_TIMER: 0x0033B226,  // u16  — cap timer
-    MARIO_LEVEL:     0x0033B249,  // u8   — current level number
-    MARIO_AREA:      0x0033B24A,  // u8   — current area
-    // Camera
-    CAM_X:           0x0033C6A4,  // f32
-    CAM_Y:           0x0033C6A8,  // f32
-    CAM_Z:           0x0033C6AC,  // f32
-    CAM_H_ANGLE:     0x0033C6E4,  // s16  — horizontal angle
+// We locate the struct by scanning the heap for the well-known MarioState
+// layout. These offsets are struct-relative and stable across decomp builds
+// (wasm32 pointers are 4 bytes, same as N64, so the layout matches).
+const MS_OFF = {
+    ACTION:    0x0C,   // u32  current action id
+    FACE_YAW:  0x2E,   // s16  faceAngle[1] (yaw)
+    POS_X:     0x3C,   // f32
+    POS_Y:     0x40,   // f32
+    POS_Z:     0x44,   // f32
+    FWD_VEL:   0x54,   // f32  horizontal speed
+    COINS:     0xA8,   // s16
+    STARS:     0xAA,   // s16
+    LIVES:     0xAD,   // s8
+    HEALTH:    0xAE,   // u16  high byte = wedge count (0x0880 = full)
+    CAP_TIMER: 0xB6,   // u16
 };
 
-// Human-readable level names
-const LEVEL_NAMES = {
-    1:'Main Menu', 4:'Castle Grounds', 6:'Bob-omb Battlefield', 7:'Whomp\'s Fortress',
-    8:'Jolly Roger Bay', 9:'Cool Cool Mountain', 10:'Big Boo\'s Haunt', 11:'Hazy Maze Cave',
-    12:'Lethal Lava Land', 13:'Shifting Sand Land', 14:'Dire Dire Docks', 15:'Snowman\'s Land',
-    16:'Wet-Dry World', 17:'Tall Tall Mountain', 18:'Tiny-Huge Island', 19:'Tick Tock Clock',
-    20:'Rainbow Ride', 24:'Bowser in the Dark World', 27:'Bowser in the Fire Sea',
-    28:'Bowser in the Sky', 29:'Peach\'s Secret Slide', 30:'Cavern of the Metal Cap',
-    33:'Vanish Cap Under the Moat', 34:'Winged Mario Over the Rainbow',
-    36:'Castle Inside', 37:'Courtyard',
-};
+let _marioBase     = -1;     // byte offset of gMarioState in the heap
+let _gameState     = null;   // last successfully read state
+let _baseScanTries = 0;      // throttles re-scans when not yet found
 
-// Action ID → readable name (partial map for most common states)
-const ACTION_NAMES = {
-    0x00000000:'idle', 0x00000001:'start jump', 0x00000002:'jump', 0x00000004:'double jump',
-    0x00000008:'triple jump', 0x00000010:'backflip', 0x00000020:'steep jump',
-    0x00000040:'wall kick', 0x00000080:'side flip', 0x00000100:'long jump',
-    0x00000200:'water jump', 0x00000400:'dive', 0x00000800:'freefall',
-    0x00001000:'slide jump', 0x00002000:'air throw', 0x00004000:'twirl jump',
-    0x00008000:'ground pound', 0x00010000:'braking', 0x00020000:'crouching',
-    0x00040000:'crawling', 0x00080000:'stop slide', 0x00100000:'slide kick',
-    0x00200000:'hold braking', 0x00400000:'hold idle', 0x00800000:'hold heavy idle',
-    0x01000000:'walking', 0x02000000:'hold walking', 0x04000000:'turning',
-    0x08000000:'finish turning', 0x10000000:'sliding', 0x20000000:'hold sliding',
-    0x40000000:'riding shell', 0x80000000:'swimming',
-};
+function _looksLikeMario(b) {
+    const f = Module.HEAPF32, U16 = Module.HEAPU16, I16 = Module.HEAP16, I8 = Module.HEAP8, U32 = Module.HEAPU32;
+    if (!Module.HEAPU8 || b + 0xB8 > Module.HEAPU8.length) return false;
+    const health = U16[(b + MS_OFF.HEALTH) >> 1];
+    if (health < 0x0100 || health > 0x08FF) return false;          // 1..8 wedges
+    const lives = I8[b + MS_OFF.LIVES];
+    if (lives < 0 || lives > 100) return false;
+    const stars = I16[(b + MS_OFF.STARS) >> 1];
+    if (stars < 0 || stars > 120) return false;
+    const coins = I16[(b + MS_OFF.COINS) >> 1];
+    if (coins < 0 || coins > 1000) return false;
+    const action = U32[(b + MS_OFF.ACTION) >> 2];
+    if (action === 0 || action > 0x0FFFFFFF) return false;         // decomp action ids
+    const x = f[(b + MS_OFF.POS_X) >> 2], y = f[(b + MS_OFF.POS_Y) >> 2], z = f[(b + MS_OFF.POS_Z) >> 2];
+    if (!(Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z))) return false;
+    if (Math.abs(x) > 40000 || Math.abs(y) > 40000 || Math.abs(z) > 40000) return false;
+    return true;
+}
 
-// State of the memory reader
-let _wasmBase = -1;          // offset in HEAPU8 where N64 RAM starts
-let _gameState = null;       // last successfully read state object
-let _gameStateReady = false; // true once base is found
-
-function _findWasmBase() {
-    // Strategy: scan HEAPU8 for a pattern that looks like the Mario struct.
-    // The health field at 0x33B21E is typically 0x0880 (full health) on startup.
-    // We look for that 16-bit value at the expected offset from candidate bases.
-    // Emscripten typically places N64 RAM at a fixed offset (often 0x10000 or 0x20000).
-    // We try a range of likely bases.
-    if (!Module.HEAPU8) return -1;
-    const heap = Module.HEAPU8;
-    // Try common Emscripten base offsets for the N64 RAM region
-    const candidates = [];
-    for (let base = 0x10000; base < Math.min(heap.length, 0x800000); base += 0x10000) {
-        candidates.push(base);
-    }
-    for (const base of candidates) {
-        const healthOff = base + N64_RAM_ADDR.MARIO_HEALTH;
-        if (healthOff + 2 > heap.length) continue;
-        // Health should be between 0x0100 (1 wedge) and 0x0880 (full)
-        const health = (heap[healthOff] << 8) | heap[healthOff + 1];
-        if (health >= 0x0100 && health <= 0x0880) {
-            // Also check lives (should be 1-99)
-            const livesOff = base + N64_RAM_ADDR.MARIO_LIVES;
-            if (livesOff >= heap.length) continue;
-            const lives = heap[livesOff];
-            if (lives >= 1 && lives <= 99) {
-                console.log(`[SM64 Memory] Found WASM base at 0x${base.toString(16)} (health=0x${health.toString(16)}, lives=${lives})`);
-                return base;
-            }
+function _findMarioBase() {
+    const u8 = Module.HEAPU8;
+    if (!u8) return -1;
+    const end = Math.min(u8.length - 0xC0, 0x4000000); // scan up to 64 MB
+    for (let b = 0x400; b < end; b += 4) {
+        if (_looksLikeMario(b)) {
+            console.log(`[SM64] Found MarioState @ 0x${b.toString(16)}`);
+            return b;
         }
     }
     return -1;
 }
 
+function _actionLabel(a) {
+    if (!a) return 'idle';
+    if (a & 0x02000000) return 'swimming/in water';
+    if (a & 0x00800000) return 'airborne';
+    if (a & 0x00400000) return 'moving';
+    if (a & 0x00200000) return 'standing';
+    if (a & 0x00010000) return 'crouch/slide';
+    return 'action 0x' + (a >>> 0).toString(16);
+}
+
+function _yawToCompass(yaw) {
+    const deg = ((yaw & 0xFFFF) / 65536) * 360;
+    const dirs = ['S', 'SW', 'W', 'NW', 'N', 'NE', 'E', 'SE'];
+    return dirs[Math.round(deg / 45) % 8];
+}
+
 function readGameState() {
-    if (!_gameStateReady) {
-        // Try to find base if not yet found
-        if (_wasmBase === -1) {
-            _wasmBase = _findWasmBase();
-            if (_wasmBase === -1) return null;
-        }
-        _gameStateReady = true;
+    if (!Module.HEAPU8) return null;
+    if (_marioBase === -1 || !_looksLikeMario(_marioBase)) {
+        // Re-scan occasionally (not every frame — a full scan is ~tens of ms)
+        if (_baseScanTries++ % 6 === 0) _marioBase = _findMarioBase();
+        if (_marioBase === -1) return null;
     }
-
     try {
-        const heap8  = Module.HEAPU8;
-        const heap32 = Module.HEAP32;
-        if (!heap8 || !heap32) return null;
-
-        const b = _wasmBase;
-
-        // Helper: read float at N64 address
-        const readF32 = (addr) => {
-            const off = (b + addr) >> 2;
-            if (off * 4 + 4 > heap8.length) return 0;
-            // N64 is big-endian; WASM is little-endian — swap bytes
-            const raw = heap8.slice(b + addr, b + addr + 4);
-            const swapped = new Uint8Array([raw[3], raw[2], raw[1], raw[0]]);
-            return new DataView(swapped.buffer).getFloat32(0);
-        };
-
-        // Helper: read unsigned 16-bit big-endian
-        const readU16 = (addr) => {
-            const off = b + addr;
-            if (off + 2 > heap8.length) return 0;
-            return (heap8[off] << 8) | heap8[off + 1];
-        };
-
-        // Helper: read signed 16-bit big-endian
-        const readS16 = (addr) => {
-            const v = readU16(addr);
-            return v >= 0x8000 ? v - 0x10000 : v;
-        };
-
-        // Helper: read unsigned 8-bit
-        const readU8 = (addr) => {
-            const off = b + addr;
-            if (off >= heap8.length) return 0;
-            return heap8[off];
-        };
-
-        // Helper: read unsigned 32-bit big-endian
-        const readU32 = (addr) => {
-            const off = b + addr;
-            if (off + 4 > heap8.length) return 0;
-            return ((heap8[off] << 24) | (heap8[off+1] << 16) | (heap8[off+2] << 8) | heap8[off+3]) >>> 0;
-        };
-
-        const actionId = readU32(N64_RAM_ADDR.MARIO_ACTION);
-        const healthRaw = readU16(N64_RAM_ADDR.MARIO_HEALTH);
-        const healthWedges = (healthRaw >> 8) & 0xFF; // upper byte = wedge count (max 8)
-        const levelId = readU8(N64_RAM_ADDR.MARIO_LEVEL);
-
+        const f = Module.HEAPF32, U16 = Module.HEAPU16, I16 = Module.HEAP16, I8 = Module.HEAP8, U32 = Module.HEAPU32;
+        const b = _marioBase;
+        const action = U32[(b + MS_OFF.ACTION) >> 2];
+        const health = U16[(b + MS_OFF.HEALTH) >> 1];
+        const yaw    = I16[(b + MS_OFF.FACE_YAW) >> 1];
         const state = {
-            x:       Math.round(readF32(N64_RAM_ADDR.MARIO_X)),
-            y:       Math.round(readF32(N64_RAM_ADDR.MARIO_Y)),
-            z:       Math.round(readF32(N64_RAM_ADDR.MARIO_Z)),
-            speed:   Math.round(readF32(N64_RAM_ADDR.MARIO_SPEED) * 10) / 10,
-            coins:   readS16(N64_RAM_ADDR.MARIO_COINS),
-            stars:   readS16(N64_RAM_ADDR.MARIO_STARS),
-            lives:   readU8(N64_RAM_ADDR.MARIO_LIVES),
-            health:  healthWedges,  // 0-8 wedges
-            capTimer: readU16(N64_RAM_ADDR.MARIO_CAP_TIMER),
-            levelId,
-            levelName: LEVEL_NAMES[levelId] || `Level ${levelId}`,
-            area:    readU8(N64_RAM_ADDR.MARIO_AREA),
-            actionId,
-            actionName: ACTION_NAMES[actionId] || `action_0x${actionId.toString(16)}`,
-            camX:    Math.round(readF32(N64_RAM_ADDR.CAM_X)),
-            camY:    Math.round(readF32(N64_RAM_ADDR.CAM_Y)),
-            camZ:    Math.round(readF32(N64_RAM_ADDR.CAM_Z)),
-            camAngle: readS16(N64_RAM_ADDR.CAM_H_ANGLE),
+            x: Math.round(f[(b + MS_OFF.POS_X) >> 2]),
+            y: Math.round(f[(b + MS_OFF.POS_Y) >> 2]),
+            z: Math.round(f[(b + MS_OFF.POS_Z) >> 2]),
+            speed: Math.round(f[(b + MS_OFF.FWD_VEL) >> 2] * 10) / 10,
+            coins: I16[(b + MS_OFF.COINS) >> 1],
+            stars: I16[(b + MS_OFF.STARS) >> 1],
+            lives: I8[b + MS_OFF.LIVES],
+            health: (health >> 8) & 0xFF,
+            capTimer: U16[(b + MS_OFF.CAP_TIMER) >> 1],
+            yaw,
+            yawDeg: Math.round(((yaw & 0xFFFF) / 65536) * 360),
+            facing: _yawToCompass(yaw),
+            actionId: action,
+            actionName: _actionLabel(action),
+            inWater: !!(action & 0x02000000),
+            levelId: 0, area: 0, levelName: 'In game',
         };
-
-        // Sanity check: lives must be plausible
-        if (state.lives < 0 || state.lives > 99) return null;
-        if (state.stars < 0 || state.stars > 120) return null;
-
         _gameState = state;
         updateMemoryHUD(state);
         return state;
     } catch (err) {
-        console.warn('[SM64 Memory] Read error:', err);
+        console.warn('[SM64] read error:', err);
         return null;
     }
+}
+
+// Write Mario's position (+ optional yaw) back into RAM — used by the
+// savestate / loadstate "teleport" tools.
+function writeMarioPos(x, y, z, yaw) {
+    if (_marioBase === -1) return false;
+    try {
+        const f = Module.HEAPF32, I16 = Module.HEAP16, b = _marioBase;
+        f[(b + MS_OFF.POS_X) >> 2] = x;
+        f[(b + MS_OFF.POS_Y) >> 2] = y;
+        f[(b + MS_OFF.POS_Z) >> 2] = z;
+        if (typeof yaw === 'number') I16[(b + MS_OFF.FACE_YAW) >> 1] = yaw;
+        return true;
+    } catch { return false; }
 }
 
 function gameStateToText(state) {
     if (!state) return '';
     const hp = '❤'.repeat(Math.max(0, state.health)) + '🖤'.repeat(Math.max(0, 8 - state.health));
     return [
-        `LIVE GAME STATE (read from WASM memory):`,
-        `  Level: ${state.levelName} (area ${state.area})`,
-        `  Mario pos: X=${state.x}, Y=${state.y}, Z=${state.z}`,
-        `  Speed: ${state.speed} units/frame | Action: ${state.actionName}`,
-        `  Health: ${hp} (${state.health}/8 wedges)`,
-        `  Stars: ${state.stars} | Coins: ${state.coins} | Lives: ${state.lives}`,
-        `  Camera: X=${state.camX}, Y=${state.camY}, Z=${state.camZ} (angle ${state.camAngle})`,
-        state.capTimer > 0 ? `  Cap timer: ${state.capTimer} frames remaining` : '',
+        `LIVE GAME STATE (read from game memory):`,
+        `  Pos: X=${state.x}, Y=${state.y}, Z=${state.z}`,
+        `  Speed: ${state.speed} | Facing: ${state.facing} (${state.yawDeg}°) | Action: ${state.actionName}`,
+        state.inWater ? `  ⚠ Mario is IN WATER — swim up/forward to reach land.` : '',
+        `  Health: ${hp} (${state.health}/8) | Stars: ${state.stars} | Coins: ${state.coins} | Lives: ${state.lives}`,
+        state.capTimer > 0 ? `  Cap timer: ${state.capTimer}` : '',
     ].filter(Boolean).join('\n');
 }
 
@@ -621,20 +561,182 @@ async function callChatAPI(messages, opts = {}) {
     return data.choices?.[0]?.message?.content || '';
 }
 
-// ── Memory tool (OpenAI/function-calling) ────────────────────
-// The model can call this on demand to pull fresh RAM state instead of
-// relying solely on the snapshot injected into the prompt.
-const GAME_STATE_TOOL = {
-    type: 'function',
-    function: {
-        name: 'get_game_state',
-        description: 'Read live Super Mario 64 state directly from game RAM: ' +
-            'Mario position (x,y,z), facing/action, horizontal speed, health wedges, ' +
-            'stars, coins, lives, current level/area, and camera. Call this whenever you ' +
-            'need precise, up-to-the-moment numbers (e.g. to judge distance, height, or speed).',
-        parameters: { type: 'object', properties: {}, required: [] },
-    },
-};
+// ── Agentic tools (OpenAI/function-calling) ──────────────────
+// The model can call these on demand. get_game_state reads live RAM; the
+// others let it control the game, escape water, check if it's stuck/trapped,
+// teleport-save spots, navigate by coordinates, and slow time down.
+function _tool(name, description, properties = {}, required = []) {
+    return { type: 'function', function: { name, description,
+        parameters: { type: 'object', properties, required } } };
+}
+const AI_TOOLS = [
+    _tool('get_game_state', 'Read live SM64 RAM: Mario pos (x,y,z), facing/compass, action, speed, health, stars, coins, lives. Use for exact numbers.'),
+    _tool('set_game_speed', 'Change game speed. Use slow motion (e.g. 0.5) for precise platforming, faster for travel.',
+        { speed: { type: 'number', description: '0.5 (slow-mo) to 3 (fast)' } }, ['speed']),
+    _tool('de_water', 'EMERGENCY water-escape (rapid-fire toward shore). LOCKED until is_stuck or is_trapped confirms true.'),
+    _tool('is_stuck', 'Fresh check of the last few frames: is Mario stuck (position/camera not changing)? Returns true/false. A true result UNLOCKS the escape tools (de_water/load_state/reset_game) and starts rapid-fire recovery.'),
+    _tool('is_trapped', 'Analyze the last few frames: is Mario trapped with no way out? Returns true/false. A true result UNLOCKS the escape tools and starts rapid-fire recovery.'),
+    _tool('look_around', 'Rotate the camera to survey the surroundings (helps you see exits/paths you may be facing away from).'),
+    _tool('set_goal', 'Set a persistent short-term goal you will keep pursuing across turns.',
+        { goal: { type: 'string', description: 'e.g. "enter the castle door"' } }, ['goal']),
+    _tool('save_waypoint', 'Remember Mario\'s current position under a name, to navigate back to later.',
+        { name: { type: 'string' } }, ['name']),
+    _tool('waypoint_distance', 'Get distance and turn direction from Mario to a saved waypoint (uses real coordinates).',
+        { name: { type: 'string' } }, ['name']),
+    _tool('save_state', 'Save Mario\'s exact spot to a slot (a lightweight checkpoint you can teleport back to).',
+        { slot: { type: 'string', description: 'slot name, e.g. "a"' } }, ['slot']),
+    _tool('load_state', 'Teleport Mario back to a saved checkpoint slot. LOCKED until is_stuck or is_trapped confirms true.',
+        { slot: { type: 'string' } }, ['slot']),
+    _tool('reset_game', 'Last resort: restart to the intro (reloads, no progress saved). LOCKED until is_stuck or is_trapped confirms true.'),
+];
+
+// Lightweight stores for the tools
+let _waypoints  = {};
+let _saveStates = {};
+let _frameHistory = [];   // last few screenshots (data URLs) for is_stuck/is_trapped
+
+// ── Anti-cheat gate ──────────────────────────────────────────
+// The powerful "escape" tools (teleport / water-escape / reset) are LOCKED.
+// They only unlock after is_stuck or is_trapped confirms Mario is stuck/trapped
+// (returns true). That confirmation arms rapid-fire recovery; the cheats stay
+// usable for the whole rapid-fire window plus 5 extra turns afterward.
+const CHEAT_TOOLS = new Set(['load_state', 'de_water', 'reset_game']);
+let _escapeArmed      = false;   // a stuck/trapped check came back true this episode
+let _escapeExtraTurns = 0;       // unlocked turns remaining after rapid-fire ends
+
+function escapeUnlocked() {
+    return (_escapeArmed && _rapidFireActive) || _escapeExtraTurns > 0;
+}
+function armEscape(reason) {
+    _escapeArmed = true;
+    if (!_rapidFireActive) enterRapidFire();
+    updateAIStatus(`🔓 Escape tools unlocked (${reason})`);
+    if (typeof pushChatlog === 'function') pushChatlog(`<span class="cl-cmd">🔓 escape unlocked — ${_esc(reason)}</span>`, 'cl-tool');
+}
+
+// Execute a tool call and return a short text result (also shown in the chatlog)
+async function executeTool(name, args = {}) {
+    try {
+        // Anti-cheat: escape tools require a confirmed stuck/trapped verdict first
+        if (CHEAT_TOOLS.has(name) && !escapeUnlocked()) {
+            return `🔒 "${name}" is LOCKED. First call is_stuck or is_trapped — if it returns true, escape tools unlock during the rapid-fire recovery (plus 5 turns after). Do not try to ${name} otherwise.`;
+        }
+        switch (name) {
+            case 'get_game_state': {
+                const st = readGameState();
+                return st ? gameStateToText(st) : 'Game state not readable yet (still booting).';
+            }
+            case 'set_game_speed': {
+                let s = parseFloat(args.speed);
+                if (!Number.isFinite(s)) return 'Invalid speed.';
+                s = Math.max(0.5, Math.min(3, s));
+                _applyGameSpeed(s);
+                return `Game speed set to ${s}×.`;
+            }
+            case 'de_water': {   // only reachable when escape is unlocked
+                userInstruction = 'ESCAPE THE WATER NOW: swim toward the nearest shore/land and climb out at all costs, then continue. Press jump (X) while swimming to surface and move with the arrows toward dry ground.';
+                if (!_rapidFireActive) enterRapidFire();
+                return 'Water-escape engaged: rapid-fire on, focusing on reaching land.';
+            }
+            case 'is_stuck': {
+                const v = await _frameVerdict('stuck',
+                    'Look at these sequential frames (oldest→newest). Is Mario STUCK — i.e. NO real change in position or camera between them? Answer exactly "STUCK" or "MOVING", then one short reason.');
+                if (v.positive) armEscape('stuck confirmed');
+                return `is_stuck → ${v.positive} :: ${v.text}`;
+            }
+            case 'is_trapped': {
+                const v = await _frameVerdict('trapped',
+                    'Look at these sequential frames of Mario (oldest→newest). Is he TRAPPED with no visible way out, or is there an exit? Answer exactly "TRAPPED" or "EXIT: <direction>", then one short reason.');
+                if (v.positive) armEscape('trapped confirmed');
+                return `is_trapped → ${v.positive} :: ${v.text}`;
+            }
+            case 'look_around': {
+                for (let i = 0; i < 4 && aiPlayerActive; i++) { simulateKeyPress('KeyZ', 120); await delay(160); }
+                return 'Rotated the camera to survey the surroundings.';
+            }
+            case 'set_goal': {
+                userInstruction = String(args.goal || '').slice(0, 200);
+                return userInstruction ? `Goal set: ${userInstruction}` : 'No goal provided.';
+            }
+            case 'save_waypoint': {
+                const st = readGameState();
+                if (!st) return 'Cannot read position right now.';
+                _waypoints[args.name || 'wp'] = { x: st.x, y: st.y, z: st.z };
+                return `Waypoint "${args.name || 'wp'}" saved at (${st.x},${st.y},${st.z}).`;
+            }
+            case 'waypoint_distance': {
+                const wp = _waypoints[args.name];
+                const st = readGameState();
+                if (!wp) return `No waypoint named "${args.name}".`;
+                if (!st) return 'Cannot read position right now.';
+                const dx = wp.x - st.x, dz = wp.z - st.z;
+                const dist = Math.round(Math.hypot(dx, dz));
+                const targetYaw = Math.atan2(dx, dz) * 0x8000 / Math.PI;
+                let diff = ((targetYaw - st.yaw + 32768) & 0xFFFF) - 32768;
+                const turn = Math.abs(diff) < 4000 ? 'straight ahead'
+                           : diff > 0 ? 'to your right' : 'to your left';
+                return `Waypoint "${args.name}" is ${dist} units away, ${turn} (Δy ${wp.y - st.y}).`;
+            }
+            case 'save_state': {
+                const st = readGameState();
+                if (!st) return 'Cannot read position right now.';
+                _saveStates[args.slot || 'a'] = { x: st.x, y: st.y, z: st.z, yaw: st.yaw };
+                return `Checkpoint "${args.slot || 'a'}" saved.`;
+            }
+            case 'load_state': {
+                const ss = _saveStates[args.slot];
+                if (!ss) return `No checkpoint in slot "${args.slot}".`;
+                const ok = writeMarioPos(ss.x, ss.y, ss.z, ss.yaw);
+                return ok ? `Teleported back to checkpoint "${args.slot}".` : 'Teleport failed (memory not writable).';
+            }
+            case 'reset_game': {
+                tts.interrupt('Resetting the game.');
+                setTimeout(() => location.reload(), 600);
+                return 'Resetting to the intro now…';
+            }
+            default: return `Unknown tool: ${name}`;
+        }
+    } catch (err) {
+        return `Tool "${name}" error: ${err.message}`;
+    }
+}
+
+// Sub-call: ask the SAME model about the last few frames and parse a boolean
+// verdict. `kind` is 'stuck' or 'trapped'. Returns { positive, text }.
+async function _frameVerdict(kind, question) {
+    const frames = _frameHistory.slice(-5);
+    if (!providerHasVision() || frames.length < 2) {
+        // No vision (or not enough history) — judge from RAM motion instead
+        const positive = _stuckCount >= 2;
+        return { positive, text: positive
+            ? `position barely changed for ${_stuckCount} turns (RAM)`
+            : 'position is still changing (RAM)' };
+    }
+    try {
+        const content = [{ type: 'text', text: question }];
+        frames.forEach((f) => content.push({ type: 'image_url', image_url: { url: f } }));
+        const ans = ((await callChatAPI(
+            [{ role: 'system', content: 'You are a precise SM64 vision analyst. Be terse and decisive.' },
+             { role: 'user', content }],
+            { max_tokens: 50 })) || '').trim();
+        recordUsage();
+        const positive = kind === 'stuck'
+            ? /stuck/i.test(ans) && !/moving|not\s+stuck/i.test(ans)
+            : /trapped/i.test(ans) && !/exit|way\s*out/i.test(ans);
+        return { positive, text: ans.slice(0, 140) || 'no clear answer' };
+    } catch (err) {
+        return { positive: false, text: `check failed: ${err.message}` };
+    }
+}
+
+// Apply a game-speed change everywhere (slider, label, AI loop)
+function _applyGameSpeed(s) {
+    gameSpeed = s;
+    const sl = document.getElementById('speed-slider'); if (sl) sl.value = s;
+    const lb = document.getElementById('speed-label');  if (lb) lb.textContent = `${s}×`;
+    if (aiInterval) { clearInterval(aiInterval); aiInterval = null; }
+    if (aiPlayerActive && aiMode === 'auto' && !_rapidFireActive) scheduleAILoop();
+}
 
 // Providers whose chat endpoint accepts OpenAI-style `tools`
 const TOOL_CAPABLE_PROVIDERS = new Set(['pollinations', 'openai', 'openrouter', 'gemini', 'custom']);
@@ -661,31 +763,35 @@ async function callChatWithTools(messages, opts = {}) {
     try {
         const convo = [...messages];
         let rounds = 0;
-        while (rounds++ < 3) {
+        const MAX_ROUNDS = 2;           // cap tool rounds so it can't spam /get_game_state
+        let toolCallBudget = 4;         // hard cap on total tool calls per turn
+        while (rounds++ <= MAX_ROUNDS) {
+            // On the final allowed round, drop tools so the model MUST answer
+            const allowTools = rounds <= MAX_ROUNDS && toolCallBudget > 0;
             const msg = await callChatAPI(convo, {
-                ...opts, returnRaw: true, tools: [GAME_STATE_TOOL], tool_choice: 'auto',
+                ...opts, returnRaw: true,
+                ...(allowTools ? { tools: AI_TOOLS, tool_choice: 'auto' } : {}),
             });
             _modelToolSupport[model] = true; // it accepted the tools field
 
-            const calls = msg.tool_calls || [];
+            const calls = (allowTools && msg.tool_calls) ? msg.tool_calls : [];
             if (!calls.length) return msg.content || '';
 
             convo.push({ role: 'assistant', content: msg.content || '', tool_calls: calls });
             for (const call of calls) {
-                let result = 'No game state available yet.';
-                let summary = 'unavailable';
+                if (toolCallBudget-- <= 0) {
+                    convo.push({ role: 'tool', tool_call_id: call.id, content: 'Tool budget exhausted for this turn — answer now.' });
+                    continue;
+                }
                 let args = {};
                 try { args = JSON.parse(call.function?.arguments || '{}'); } catch {}
-                if (call.function?.name === 'get_game_state') {
-                    const st = readGameState();
-                    result = st ? gameStateToText(st) : 'Game state not readable yet (still booting).';
-                    summary = st ? `${st.levelName} ⭐${st.stars} ❤${st.health}/8 @(${st.x},${st.y},${st.z})` : 'booting…';
-                }
-                logToolCall(call.function?.name || 'tool', args, summary);  // show as a bot slash-command
+                const name   = call.function?.name || 'tool';
+                const result = await executeTool(name, args);
+                logToolCall(name, args, result.length > 70 ? result.slice(0, 70) + '…' : result);
                 convo.push({ role: 'tool', tool_call_id: call.id, content: result });
             }
         }
-        // Too many tool rounds — make a final plain pass
+        // Exhausted tool rounds — final plain pass with no tools
         return await callChatAPI(convo, opts);
     } catch (err) {
         // Most likely the model/provider doesn't accept tools — remember & retry plainly
@@ -2169,6 +2275,7 @@ const keyMap = {
     crouch:     'Space',
     action:     'KeyC',
     start:      'Enter',
+    cameraLeft: 'KeyZ',   // rotate camera (helps look around / re-orient)
 };
 
 let playerInputs = new Set();
@@ -2284,6 +2391,8 @@ async function aiThink() {
                 return null;
             }
             if (bridgeOK) updateAIStatus('🔭 Vision bridge: captioning screen…');
+            _frameHistory.push(screenshot);            // keep recent frames for is_stuck/is_trapped
+            if (_frameHistory.length > 6) _frameHistory.shift();
         } else {
             // Memory-only: a non-vision model plays purely from RAM state + game knowledge.
             if (!gameState) {
@@ -2354,7 +2463,14 @@ GAME OBJECTIVE:
 5. Jump into the painting to start the first level
 6. Collect stars to progress
 
-Controls: ArrowUp/Down/Left/Right = move, jump (X) = jump/skip dialog, start (Enter) = pause/skip dialog, crouch (Space) = duck, action (C) = dive/punch/grab
+Controls: ArrowUp/Down/Left/Right = move, jump (X) = jump/skip dialog, start (Enter) = pause/skip dialog, crouch (Space) = duck, action (C) = dive/punch/grab, cameraLeft (Z) = rotate camera to look around.
+
+KEY RULES:
+- Act on the CURRENT situation only. If two frames are shown, the RIGHT/CURRENT frame is reality NOW — the LEFT/PREVIOUS frame is ONLY to judge if you moved. NEVER walk toward something that is only in the previous frame.
+- To change direction you must TURN: hold ArrowLeft or ArrowRight to rotate Mario, or use cameraLeft to spin the camera and re-orient. Don't just push ArrowUp if you're facing the wrong way.
+- If Mario is in WATER, getting out is top priority: press jump (X) to surface and swim toward land. If you keep failing, call the de_water tool.
+- If your position barely changes across turns you are STUCK — do something different (turn around, back up, jump). The "escape" tools (de_water, load_state teleport, reset_game) are LOCKED: to use them you must FIRST call is_stuck or is_trapped, and only if it confirms true do they unlock (during rapid-fire recovery + 5 turns). Don't try to teleport/escape without confirming.
+- Prefer the live numbers in the game state over guessing. Use tools (get_game_state, waypoint_distance, set_game_speed for tricky jumps) when helpful, but don't call tools every turn.
 ${movementCtx}${memStateCtx}${motionCtx}${memoryCtx}${notesCtx}${instrCtx}${trainingCtx}
 
 Respond with ONLY valid JSON (no markdown fences):
@@ -2367,8 +2483,8 @@ Respond with ONLY valid JSON (no markdown fences):
   "rapid_fire": false
 }
 
-Set "rapid_fire": true ONLY when you need to make many fast decisions (e.g. mid-jump sequence, navigating a tight corridor, chasing a star). Set it back to false when the situation stabilises.
-Max 5 action groups. Valid names: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jump, start, crouch, action`;
+Set "rapid_fire": true ONLY when you need to make many fast decisions (e.g. mid-jump sequence, navigating a tight corridor, chasing a star, escaping water). Set it back to false when the situation stabilises.
+Max 5 action groups. Valid names: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jump, start, crouch, action, cameraLeft`;
 
         let userMessage;
         if (memoryOnly) {
@@ -2417,6 +2533,9 @@ Max 5 action groups. Valid names: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jum
         // Remember this turn so the next one can sense movement/direction.
         _prevScreenshot = screenshot;       // null in memory-only mode (fine)
         _prevGameState  = gameState;
+
+        // Burn down the post-rapid-fire escape-unlock window (one per normal turn)
+        if (!_rapidFireActive && _escapeExtraTurns > 0) _escapeExtraTurns--;
 
         if (response.mistake && response.mistake !== 'null' && response.mistake !== null) {
             aiMemory.push(response.mistake);
@@ -2532,6 +2651,9 @@ function exitRapidFire() {
 
     if (_rapidFireInterval) { clearInterval(_rapidFireInterval); _rapidFireInterval = null; }
 
+    // If this rapid-fire was an escape recovery, keep cheats unlocked 5 more turns
+    if (_escapeArmed) { _escapeExtraTurns = 5; _escapeArmed = false; }
+
     // Hide indicator
     const ind = document.getElementById('rapid-fire-indicator');
     if (ind) ind.classList.remove('active');
@@ -2606,6 +2728,9 @@ async function toggleAIPlayer() {
         _prevScreenshot = null;
         _prevGameState  = null;
         _stuckCount     = 0;
+        _frameHistory   = [];
+        _escapeArmed      = false;
+        _escapeExtraTurns = 0;
         clearChatlog();
         aiStream.getVideoTracks()[0].addEventListener('ended', stopAIPlayer);
 
@@ -2674,6 +2799,11 @@ function stopAIPlayer() {
     if (aiInterval)    { clearInterval(aiInterval); aiInterval = null; }
     if (_captureVideo) { _captureVideo.srcObject = null; }
     if (!buddyActive)  stopBridgeCaptionLoop();
+    // Free frame buffers so a long session doesn't pile up base64 strings
+    _frameHistory = [];
+    _prevScreenshot = null;
+    _escapeArmed      = false;
+    _escapeExtraTurns = 0;
     aiManualState    = 'idle';
     aiPlannedActions = null;
     aiBtn.textContent = '🤖 AI Play';
@@ -3048,7 +3178,7 @@ function _esc(s) {
 }
 function pushChatlog(html, cls) {
     _chatlogItems.push({ html, cls });
-    while (_chatlogItems.length > 14) _chatlogItems.shift();
+    while (_chatlogItems.length > 10) _chatlogItems.shift();   // hard cap — never grows unbounded
     renderChatlog();
 }
 function renderChatlog() {
