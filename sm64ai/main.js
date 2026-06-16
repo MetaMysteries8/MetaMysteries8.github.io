@@ -575,9 +575,12 @@ async function callChatAPI(messages, opts = {}) {
 // Provides callLocalVision(screenshotDataUrl, prompt) → string
 //
 
-let _localVLMPipe   = null;   // Transformers.js pipeline once loaded
-let _localVLMState  = 'idle'; // 'idle' | 'loading' | 'ready' | 'error'
-let _localVLMError  = null;
+// SmolVLM uses the low-level AutoProcessor + AutoModelForVision2Seq API,
+// NOT the pipeline() API (which doesn't support image-text-to-text in v3).
+let _localVLMProcessor = null;  // AutoProcessor instance
+let _localVLMModel     = null;  // AutoModelForVision2Seq instance
+let _localVLMState     = 'idle'; // 'idle' | 'loading' | 'ready' | 'error'
+let _localVLMError     = null;
 
 // Check if current provider has vision
 function providerHasVision() {
@@ -587,25 +590,32 @@ function providerHasVision() {
 }
 
 // Dynamically load Transformers.js CDN script once
+// SmolVLM needs AutoProcessor + AutoModelForVision2Seq (not pipeline)
 function loadTransformersJS() {
     return new Promise((resolve, reject) => {
         if (window.__transformers__) { resolve(window.__transformers__); return; }
         if (document.getElementById('transformers-js-script')) {
-            // Already injecting — wait
+            // Already injecting — wait for it to finish
             const wait = setInterval(() => {
                 if (window.__transformers__) { clearInterval(wait); resolve(window.__transformers__); }
             }, 200);
             return;
         }
         const s = document.createElement('script');
-        s.id  = 'transformers-js-script';
+        s.id   = 'transformers-js-script';
         s.type = 'module';
+        // Import the full set of classes needed for SmolVLM
         s.textContent = `
-            import { pipeline, env } from '${LOCAL_VLM_CDN}';
+            import {
+                AutoProcessor,
+                AutoModelForVision2Seq,
+                RawImage,
+                env
+            } from '${LOCAL_VLM_CDN}';
             env.allowLocalModels = false;
-            window.__transformers__ = { pipeline, env };
+            window.__transformers__ = { AutoProcessor, AutoModelForVision2Seq, RawImage, env };
         `;
-        s.onerror = () => reject(new Error('Failed to load Transformers.js'));
+        s.onerror = () => reject(new Error('Failed to load Transformers.js from CDN'));
         document.head.appendChild(s);
         const wait = setInterval(() => {
             if (window.__transformers__) { clearInterval(wait); resolve(window.__transformers__); }
@@ -622,44 +632,47 @@ async function initLocalVLM(onProgress) {
 
     try {
         onProgress?.('Loading Transformers.js…', 5);
-        const { pipeline, env } = await loadTransformersJS();
+        const { AutoProcessor, AutoModelForVision2Seq, env } = await loadTransformersJS();
 
         // Use WebGPU if available, fall back to WASM
         const device = (typeof navigator !== 'undefined' && navigator.gpu) ? 'webgpu' : 'wasm';
         onProgress?.(`Downloading SmolVLM-256M (~400 MB) via ${device.toUpperCase()}…`, 10);
 
-        // dtype: fp16 for WebGPU, q4 for WASM (quantised for speed/memory)
-        // Fall back to fp32 if q4 not supported
-        let dtype = device === 'webgpu' ? 'fp16' : 'q4';
-
-        const tryLoad = async (dtypeAttempt) => pipeline(
-            'image-text-to-text',
-            LOCAL_VLM_MODEL,
-            {
-                device,
-                dtype: dtypeAttempt,
-                progress_callback: (info) => {
-                    // Transformers.js v3: info.progress is already 0–100
-                    if (info.status === 'progress' && typeof info.progress === 'number') {
-                        const pct = Math.round(10 + info.progress * 0.88);
-                        onProgress?.(`Downloading… ${Math.round(info.progress)}%`, pct);
-                    } else if (info.status === 'initiate') {
-                        onProgress?.(`Fetching ${info.file || 'model files'}…`, 12);
-                    } else if (info.status === 'done') {
-                        onProgress?.(`Loaded ${info.file || 'file'}`, 95);
-                    }
-                },
+        const progressCb = (info) => {
+            if (info.status === 'progress' && typeof info.progress === 'number') {
+                const pct = Math.round(10 + info.progress * 0.85);
+                onProgress?.(`Downloading… ${Math.round(info.progress)}%`, pct);
+            } else if (info.status === 'initiate') {
+                onProgress?.(`Fetching ${info.file || 'model files'}…`, 12);
+            } else if (info.status === 'done') {
+                onProgress?.(`Loaded ${info.file || 'file'}`, 90);
             }
+        };
+
+        // Load processor (tokenizer + image processor)
+        onProgress?.('Loading processor…', 8);
+        _localVLMProcessor = await AutoProcessor.from_pretrained(LOCAL_VLM_MODEL, {
+            progress_callback: progressCb,
+        });
+
+        // Load model with per-component dtypes for best compat
+        // embed_tokens: fp32 avoids NaN on devices with limited fp16 support
+        // vision_encoder + decoder: q4 for WASM (small/fast), fp16 for WebGPU
+        const dtype = device === 'webgpu'
+            ? { embed_tokens: 'fp16', vision_encoder: 'fp16', decoder_model_merged: 'fp16' }
+            : { embed_tokens: 'fp32', vision_encoder: 'q4',   decoder_model_merged: 'q4'   };
+
+        const tryLoadModel = async (dtypeArg) => AutoModelForVision2Seq.from_pretrained(
+            LOCAL_VLM_MODEL,
+            { dtype: dtypeArg, device, progress_callback: progressCb }
         );
 
         try {
-            _localVLMPipe = await tryLoad(dtype);
+            _localVLMModel = await tryLoadModel(dtype);
         } catch (dtypeErr) {
-            // dtype not supported — retry with fp32
-            console.warn(`[SmolVLM] dtype=${dtype} failed, retrying with fp32:`, dtypeErr.message);
-            onProgress?.('Retrying with fp32 (may be slower)…', 15);
-            dtype = 'fp32';
-            _localVLMPipe = await tryLoad('fp32');
+            console.warn('[SmolVLM] dtype failed, retrying with fp32 everywhere:', dtypeErr.message);
+            onProgress?.('Retrying with fp32 (broader compat)…', 20);
+            _localVLMModel = await tryLoadModel('fp32');
         }
 
         _localVLMState = 'ready';
@@ -675,20 +688,46 @@ async function initLocalVLM(onProgress) {
 }
 
 async function callLocalVision(screenshotDataUrl, textPrompt) {
-    if (_localVLMState !== 'ready' || !_localVLMPipe) {
+    if (_localVLMState !== 'ready' || !_localVLMProcessor || !_localVLMModel) {
         throw new Error('Local vision model not ready');
     }
+    const { RawImage } = window.__transformers__;
+
+    // Load the screenshot into a RawImage
+    const image = await RawImage.fromURL(screenshotDataUrl);
+
+    // Build chat-style message for SmolVLM
     const messages = [
         {
             role: 'user',
             content: [
-                { type: 'image', url: screenshotDataUrl },
-                { type: 'text',  text: textPrompt },
+                { type: 'image' },
+                { type: 'text', text: textPrompt },
             ],
         },
     ];
-    const result = await _localVLMPipe(messages, { max_new_tokens: 200 });
-    return result?.[0]?.generated_text?.at(-1)?.content || '';
+
+    // Apply chat template to get the prompt string
+    const prompt = _localVLMProcessor.apply_chat_template(messages, {
+        add_generation_prompt: true,
+    });
+
+    // Tokenise + process image
+    const inputs = await _localVLMProcessor(prompt, [image], {
+        do_image_splitting: false,
+    });
+
+    // Generate
+    const generatedIds = await _localVLMModel.generate({
+        ...inputs,
+        max_new_tokens: 120,
+    });
+
+    // Decode only the newly generated tokens (strip the input prefix)
+    const inputLen = inputs.input_ids.dims.at(-1);
+    const newIds   = generatedIds.slice(null, [inputLen, null]);
+    const decoded  = _localVLMProcessor.batch_decode(newIds, { skip_special_tokens: true });
+    return (decoded[0] || '').trim();
 }
 
 // ── Non-vision warning modal ──────────────────────────────
