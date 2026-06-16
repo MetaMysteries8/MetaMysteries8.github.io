@@ -208,10 +208,17 @@
 
     <script>
       // Wire up auth-panel "Use my own API key" button
+      // Delay until main.js (module) has loaded and openProviderPanel is defined
       document.getElementById('auth-provider-btn')?.addEventListener('click', () => {
           document.getElementById('auth-overlay').classList.add('hidden');
-          // provider panel opened by main.js after it loads
-          setTimeout(() => document.getElementById('provider-btn')?.click(), 200);
+          const tryOpen = (attempts) => {
+              if (typeof openProviderPanel === 'function') {
+                  openProviderPanel('custom');
+              } else if (attempts > 0) {
+                  setTimeout(() => tryOpen(attempts - 1), 150);
+              }
+          };
+          tryOpen(20);
       });
     </script>
 </body>

@@ -779,7 +779,7 @@ document.getElementById('vision-required-backdrop')?.addEventListener('click', h
 
 document.getElementById('vision-req-connect-btn')?.addEventListener('click', () => {
     hideVisionRequiredModal();
-    openProviderPanel();
+    openProviderPanel('custom');
 });
 document.getElementById('vision-req-local-btn')?.addEventListener('click', () => {
     if (_localVLMState === 'ready') {
@@ -1180,11 +1180,18 @@ function buildProviderPanel() {
     });
 }
 
-function openProviderPanel() {
+function openProviderPanel(preselect) {
+    // If called from auth screen with no provider set, pre-select custom
+    if (preselect) {
+        const p = PROVIDERS[preselect];
+        if (p) activeProvider = p;
+    }
     buildProviderPanel();
     document.getElementById('provider-modal').classList.add('open');
     document.getElementById('provider-backdrop').classList.add('open');
 }
+// Expose globally so inline scripts (non-module) can call it
+window.openProviderPanel = openProviderPanel;
 
 function closeProviderPanel() {
     document.getElementById('provider-modal').classList.remove('open');
@@ -1834,7 +1841,7 @@ async function toggleAIPlayer() {
             document.getElementById('auth-overlay').classList.remove('hidden');
         } else {
             tts.interrupt(`Please add your ${activeProvider.label} API key in API Settings.`);
-            openProviderPanel();
+            openProviderPanel(activeProvider.id);
         }
         return;
     }
@@ -1997,7 +2004,7 @@ async function toggleBuddy() {
     const key = getActiveKey();
     if (!key) {
         if (activeProvider.id === 'pollinations') document.getElementById('auth-overlay').classList.remove('hidden');
-        else openProviderPanel();
+        else openProviderPanel(activeProvider.id);
         return;
     }
 
@@ -2080,7 +2087,7 @@ document.getElementById('memory-backdrop').addEventListener('click', () => {
 document.getElementById('pregame-notes-btn').addEventListener('click', async () => {
     if (!getActiveKey()) {
         if (activeProvider.id === 'pollinations') document.getElementById('auth-overlay').classList.remove('hidden');
-        else openProviderPanel();
+        else openProviderPanel(activeProvider.id);
         return;
     }
 
