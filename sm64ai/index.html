@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>SM64 AI Player Improved</title>
+    <title>SM64 AI Player</title>
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="./styles.css">
 </head>
@@ -18,6 +18,13 @@
                 <div id="loading-bar-wrap"><div id="loading-bar"></div></div>
                 <p id="loading-msg">Loading game engine…</p>
             </div>
+        </div>
+
+        <!-- Honesty warning (shown every load) -->
+        <div id="suck-warning">
+            <span class="suck-icon">⚠️</span>
+            <span class="suck-text">Warning: Current AI models absolutely <strong>SUCK</strong> at playing Mario</span>
+            <button id="suck-warning-close" aria-label="Dismiss">✕</button>
         </div>
 
         <!-- Game canvas -->
@@ -38,6 +45,7 @@
                 <button id="help-btn"            class="hud-icon-btn" title="Tutorial / Help">❓</button>
                 <button id="streamer-toggle-btn" class="hud-icon-btn" title="Streamer mode (Shift+S)">🎥</button>
                 <button id="energy-config-btn"   class="hud-icon-btn" title="AI energy bar settings">⚡</button>
+                <button id="turbo-btn"           class="hud-icon-btn" title="Consistent rapid fire / turbo">⚡⚡</button>
                 <button id="disconnect-btn"      class="hud-icon-btn danger" title="Disconnect account" style="display:none">🔌</button>
             </div>
 
@@ -199,6 +207,37 @@
         </div>
         <div id="energy-backdrop" class="modal-backdrop"></div>
 
+        <!-- Turbo / consistent rapid-fire settings -->
+        <div id="turbo-modal" role="dialog" aria-modal="true" aria-label="Turbo Settings">
+            <div id="turbo-panel">
+                <button id="turbo-close-btn" class="modal-close-btn" aria-label="Close">✕</button>
+                <h3>⚡⚡ Consistent Rapid Fire</h3>
+                <p class="turbo-warn">⚠ This makes the AI think &amp; act as fast as it possibly can. It will <strong>burn pollen very quickly</strong>, and while it's ON the AI <strong>cannot turn it off itself</strong>. Only you can.</p>
+                <label class="energy-field turbo-master-field">
+                    <input type="checkbox" id="turbo-master">
+                    <span><strong>Enable consistent rapid fire</strong></span>
+                </label>
+                <div class="turbo-subs">
+                    <label class="energy-field">
+                        <input type="checkbox" id="turbo-frames">
+                        <span>🎞️ Consistent frame updates<br><small>Feeds current + 3 previous frames (more motion context)</small></span>
+                    </label>
+                    <label class="energy-field">
+                        <input type="checkbox" id="turbo-multi">
+                        <span>🔀 Multi-request gameplay <em>(experimental)</em><br><small>One action per think, re-thinks constantly so it can correct mid-move</small></span>
+                    </label>
+                    <label class="energy-field">
+                        <input type="checkbox" id="turbo-advanced">
+                        <span>🚀 Advanced — Max Overdrive<br><small>No frame-skip, no cooldowns, smallest action windows — fastest &amp; most expensive</small></span>
+                    </label>
+                </div>
+                <div class="energy-btn-row">
+                    <button id="turbo-save-btn" class="hud-btn green">✓ Save</button>
+                </div>
+            </div>
+        </div>
+        <div id="turbo-backdrop" class="modal-backdrop"></div>
+
         <!-- Auth overlay -->
         <div id="auth-overlay">
             <div id="auth-panel">
@@ -222,7 +261,7 @@
 
         <!-- Persistent original-project credit -->
         <a id="origin-credit" href="https://websim.com/@Tenslant/super-mario-64-web" target="_blank" rel="noopener"
-           title="Original SM64 Web project by Tenslant on websim">SM64 Web AI Player by Tenslant ↗</a>
+           title="Original SM64 Web project by Tenslant on websim">SM64 Web by Tenslant ↗</a>
 
         <!-- ── Streamer mode: broadcast overlay + AI vision view ─────── -->
         <div id="streamer-overlay">
@@ -267,6 +306,7 @@
                 <button id="so-buddy-btn" class="so-ctrl orange" title="Start/stop the AI buddy coach">🧡 Buddy</button>
                 <button id="so-study-btn" class="so-ctrl cyan"   title="AI studies the SM64 guide">📚 Study</button>
                 <button id="so-memory-btn" class="so-ctrl purple" title="View AI memory & notes">🧠 Memory</button>
+                <button id="so-turbo-btn" class="so-ctrl" title="Consistent rapid fire (AI can't disable it)">⚡ Turbo</button>
                 <button id="so-mute-btn"  class="so-ctrl" title="Mute game audio">🔊</button>
             </div>
         </div>

@@ -993,6 +993,71 @@ body {
 /* Streamer toggle button stays reachable when not in streamer mode */
 #streamer-toggle-btn.active { background: rgba(142,36,170,0.30); color: #ce93d8; }
 
+/* Turbo button active glow (HUD + streamer dock) */
+#turbo-btn.active { background: rgba(229,34,19,0.30); color: #ff7a6b; box-shadow: 0 0 10px rgba(229,34,19,0.5); }
+.so-ctrl.active { /* already styled red via .so-ctrl.active above */ }
+
+/* ── Honesty warning banner ──────────────────────────────── */
+#suck-warning {
+    position: fixed;
+    top: calc(var(--hud-h) + 10px); left: 50%;
+    transform: translateX(-50%);
+    z-index: 500;
+    display: flex; align-items: center; gap: 10px;
+    max-width: 92vw;
+    background: linear-gradient(90deg, #b71c1c, #e53935);
+    color: #fff;
+    border: 1px solid rgba(255,255,255,0.25);
+    border-radius: 10px;
+    padding: 10px 14px;
+    box-shadow: 0 6px 30px rgba(0,0,0,0.55);
+    font-size: 14px; font-weight: 600;
+    animation: suckIn 0.4s ease;
+    transition: opacity 0.4s ease, transform 0.4s ease;
+}
+#suck-warning.hidden { opacity: 0; transform: translateX(-50%) translateY(-12px); pointer-events: none; }
+.suck-icon { font-size: 18px; }
+.suck-text strong { text-decoration: underline; }
+#suck-warning-close {
+    background: rgba(0,0,0,0.25); border: none; color: #fff;
+    width: 22px; height: 22px; border-radius: 50%; cursor: pointer;
+    font-size: 12px; flex-shrink: 0;
+}
+#suck-warning-close:hover { background: rgba(0,0,0,0.45); }
+@keyframes suckIn { from { opacity: 0; transform: translateX(-50%) translateY(-12px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+#app.streamer-mode #suck-warning { display: none; }
+
+/* ── Turbo modal ─────────────────────────────────────────── */
+#turbo-modal {
+    display: none;
+    position: fixed; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 1001; width: 440px; max-width: 94vw;
+    max-height: 90vh; overflow-y: auto;
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 22px;
+}
+#turbo-modal.open { display: block; }
+#turbo-panel { position: relative; }
+#turbo-modal h3 { margin-bottom: 10px; }
+.turbo-warn {
+    font-size: 13px; line-height: 1.5;
+    color: #ffcdd2;
+    background: rgba(229,34,19,0.14);
+    border: 1px solid rgba(229,34,19,0.4);
+    border-radius: 8px; padding: 10px 12px; margin-bottom: 14px;
+}
+.turbo-master-field { font-size: 14px; padding: 8px 0; border-bottom: 1px solid var(--panel-border); justify-content: flex-start; gap: 10px; }
+.turbo-subs { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.turbo-subs .energy-field { align-items: flex-start; justify-content: flex-start; gap: 10px; }
+.turbo-subs small { color: rgba(255,255,255,0.45); font-size: 11px; }
+.turbo-subs em { color: #ffd54f; font-style: italic; }
+.turbo-subs input:disabled + span { opacity: 0.4; }
+.turbo-subs input[type="checkbox"] { margin-top: 3px; width: 16px; height: 16px; accent-color: var(--red); flex-shrink: 0; }
+
 /* ── Credits ─────────────────────────────────────────────── */
 #auth-credit {
     margin-top: 16px;

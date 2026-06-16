@@ -37,7 +37,7 @@ const STORAGE_KEY        = 'pollinations_api_key';
 const MODEL_STORAGE_KEY  = 'sm64_selected_model';
 const PROVIDER_STORAGE   = 'sm64_provider';
 const CONTROLS_CACHE_KEY = 'sm64_controls_guide';
-const DEFAULT_MODEL      = 'openai';
+const DEFAULT_MODEL      = 'openai-large';
 
 // Minimum ms between AI inference calls (prevents runaway spending)
 const MIN_THINK_INTERVAL_MS = 5000;
@@ -2209,6 +2209,43 @@ async function composeComparisonImage(prevUrl, curUrl) {
     return _composeCanvas.toDataURL('image/jpeg', 0.72);
 }
 
+// Stitch N frames (oldest→newest) into one labelled strip — used by turbo's
+// "consistent frame updates" so the model sees current + several previous frames.
+async function composeFrameStrip(urls) {
+    const imgs = await Promise.all(urls.map(_loadImage));
+    const n = imgs.length;
+    const h = Math.max(...imgs.map(i => i.height)) || 480;
+    const labelH = 24, div = 6;
+    const widths = imgs.map(i => Math.round((i.width / (i.height || 1)) * h));
+    const W = widths.reduce((a, b) => a + b, 0) + div * (n - 1);
+    const H = h + labelH;
+
+    if (!_composeCanvas) {
+        _composeCanvas = document.createElement('canvas');
+        _composeCtx    = _composeCanvas.getContext('2d', { alpha: false });
+    }
+    _composeCanvas.width = W;
+    _composeCanvas.height = H;
+    const ctx = _composeCtx;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+    ctx.font = 'bold 15px sans-serif';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+
+    let x = 0;
+    for (let i = 0; i < n; i++) {
+        ctx.drawImage(imgs[i], x, labelH, widths[i], h);
+        if (i > 0) { ctx.fillStyle = '#ff3b30'; ctx.fillRect(x - div, 0, div, H); }
+        const isNow = i === n - 1;
+        ctx.fillStyle = isNow ? '#43e660' : '#fff';
+        const label = isNow ? 'NOW ▶' : `−${n - 1 - i}`;
+        ctx.fillText(label, x + widths[i] / 2, labelH / 2);
+        x += widths[i] + div;
+    }
+    return _composeCanvas.toDataURL('image/jpeg', 0.68);
+}
+
 // ── Vision source: capture the game canvas directly (no screen-share popup) ──
 // 'canvas' = MediaStream straight off the game <canvas> (default, zero prompts).
 // 'screen' = legacy getDisplayMedia screen-share (fallback / multi-window setups).
@@ -2311,6 +2348,53 @@ let _rapidFireActive = false;
 let _rapidFireTurns  = 0;
 let _rapidFireInterval = null;
 
+// ── Consistent Rapid Fire / TURBO (user-forced; the AI cannot disable it) ──
+// Runs the think→act loop as fast as the model can answer. Burns pollen FAST.
+let _turboMode = (() => { try { return localStorage.getItem('sm64_turbo') === '1'; } catch { return false; } })();
+let _turboCfg  = (() => { try { return JSON.parse(localStorage.getItem('sm64_turbo_cfg')) || {}; } catch { return {}; } })();
+if (typeof _turboCfg.frames   === 'undefined') _turboCfg.frames   = false; // current + 3 previous frames
+if (typeof _turboCfg.multi    === 'undefined') _turboCfg.multi    = false; // 1 action/think, re-think constantly
+if (typeof _turboCfg.advanced === 'undefined') _turboCfg.advanced = false; // max overdrive (no skips/floors)
+let _turboLoop = null;
+
+function saveTurboState() {
+    try {
+        localStorage.setItem('sm64_turbo', _turboMode ? '1' : '0');
+        localStorage.setItem('sm64_turbo_cfg', JSON.stringify(_turboCfg));
+    } catch {}
+}
+
+function startTurboLoop() {
+    if (_turboLoop) return;
+    const floor = _turboCfg.advanced ? 60 : 200;   // Advanced = absolute max rate
+    _turboLoop = setInterval(() => {
+        if (!aiPlayerActive || !_turboMode || _isThinking || _rapidFireActive) return;
+        aiThinkAndAct();
+    }, floor);
+}
+function stopTurboLoop() { if (_turboLoop) { clearInterval(_turboLoop); _turboLoop = null; } }
+
+function setTurboMode(on) {
+    _turboMode = !!on;
+    saveTurboState();
+    updateTurboUI();
+    if (_turboMode) {
+        if (aiPlayerActive) { if (aiInterval) { clearInterval(aiInterval); aiInterval = null; } startTurboLoop(); }
+        tts.interrupt('Consistent rapid fire on. I will play as fast as I can — this burns pollen quickly.');
+    } else {
+        stopTurboLoop();
+        if (aiPlayerActive && aiMode === 'auto' && !_rapidFireActive) scheduleAILoop();
+        tts.interrupt('Consistent rapid fire off.');
+    }
+}
+
+function updateTurboUI() {
+    const b = document.getElementById('turbo-btn');
+    if (b) b.classList.toggle('active', _turboMode);
+    const sb = document.getElementById('so-turbo-btn');
+    if (sb) { sb.classList.toggle('active', _turboMode); sb.textContent = _turboMode ? '⚡ Turbo ON' : '⚡ Turbo'; }
+}
+
 const aiBtn    = document.getElementById('ai-player-btn');
 const aiStatus = document.getElementById('ai-status');
 
@@ -2401,10 +2485,11 @@ function updateAIStatus(message) {
 async function aiThink() {
     if (_isThinking) return null;
 
-    // Throttle: enforce minimum interval
+    // Throttle: enforce minimum interval (bypassed in turbo / rapid-fire)
     const now = Date.now();
+    const fastMode = _turboMode || _rapidFireActive;
     const minInterval = MIN_THINK_INTERVAL_MS * (1 + _consecutiveErrors * 0.5);
-    if (now - _lastThinkTime < minInterval) {
+    if (!fastMode && now - _lastThinkTime < minInterval) {
         updateAIStatus(`⏳ Cooling down (${Math.ceil((minInterval - (now - _lastThinkTime)) / 1000)}s)…`);
         return null;
     }
@@ -2432,8 +2517,10 @@ async function aiThink() {
         if (!memoryOnly) {
             screenshot = await captureScreen(aiStream);
             if (!screenshot) { updateAIStatus('❌ Failed to capture game view'); _isThinking = false; return null; }
-            // Skip if the frame is identical to recent ones (nothing changed)
-            if (isFrameIdentical(screenshot)) {
+            // Skip if the frame is identical to recent ones (nothing changed).
+            // Advanced turbo (max overdrive) never skips — it always re-thinks.
+            const skipIdentical = !(_turboMode && _turboCfg.advanced);
+            if (skipIdentical && isFrameIdentical(screenshot)) {
                 updateAIStatus('💤 Screen unchanged — skipping inference');
                 _isThinking = false;
                 return null;
@@ -2584,14 +2671,18 @@ Max 5 action groups. Valid names: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jum
             // so the model can see whether its last move actually moved Mario (and
             // which way) without confusing the two frames or paying for two images.
             let visionImg = screenshot, promptText = 'What should I do?';
-            if (_prevScreenshot) {
-                try {
+            const multiFrames = _turboMode && _turboCfg.frames && _frameHistory.length >= 2;
+            try {
+                if (multiFrames) {
+                    const frames = _frameHistory.slice(-4);   // current + up to 3 previous
+                    visionImg = await composeFrameStrip(frames);
+                    promptText = `This image shows the last ${frames.length} frames left→right (oldest→newest; the rightmost labelled NOW is the CURRENT frame). Judge Mario's motion across them, then act on the CURRENT (rightmost) frame.`;
+                } else if (_prevScreenshot) {
                     visionImg = await composeComparisonImage(_prevScreenshot, screenshot);
                     promptText = 'This image shows TWO frames side by side: the LEFT half is the PREVIOUS TURN (before my last action) and the RIGHT half is the CURRENT TURN (now), split by a red divider. Compare them to judge whether I moved the right way, then decide the next action.';
-                } catch (e) {
-                    // Compose failed — fall back to the single current frame
-                    visionImg = screenshot;
                 }
+            } catch (e) {
+                visionImg = screenshot;   // compose failed — fall back to single current frame
             }
             setAIVisionFrame(visionImg);   // mirror exactly what the AI sees into streamer mode
             userMessage = {
@@ -2637,11 +2728,13 @@ Max 5 action groups. Valid names: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jum
             while (aiNotes.length > 30) aiNotes.shift();
         }
 
-        // Handle rapid-fire mode toggle
-        if (response.rapid_fire === true && !_rapidFireActive) {
-            enterRapidFire();
-        } else if (response.rapid_fire === false && _rapidFireActive) {
-            exitRapidFire();
+        // Handle rapid-fire mode toggle — ignored while the user forces turbo
+        if (!_turboMode) {
+            if (response.rapid_fire === true && !_rapidFireActive) {
+                enterRapidFire();
+            } else if (response.rapid_fire === false && _rapidFireActive) {
+                exitRapidFire();
+            }
         }
 
         // AI speech: skip in rapid-fire mode, otherwise queue without overlap
@@ -2675,11 +2768,15 @@ Max 5 action groups. Valid names: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jum
 // ────────────────────────────────────────────────────────────
 async function aiExecute(response) {
     if (!response?.actions?.length) return;
-    const groups = response.actions;
+    let groups = response.actions;
+    // Turbo "multi-request gameplay": execute only the FIRST action group, then
+    // re-think immediately so the AI can correct itself mid-sequence.
+    if (_turboMode && _turboCfg.multi) groups = groups.slice(0, 1);
     updateAIStatus(`🎮 Executing ${groups.length} action group${groups.length > 1 ? 's' : ''}…`);
 
-    const windowMs       = 4000 / gameSpeed;
-    const actionDuration = Math.max(120, windowMs / groups.length);
+    const fast           = _turboMode || _rapidFireActive;
+    const windowMs       = (fast ? 1200 : 4000) / gameSpeed;
+    const actionDuration = Math.max(fast ? 80 : 120, windowMs / groups.length);
 
     for (let i = 0; i < groups.length; i++) {
         if (!aiPlayerActive) break;
@@ -2751,6 +2848,7 @@ function exitRapidFire() {
 }
 
 function scheduleAILoop() {
+    if (_turboMode) { startTurboLoop(); return; }   // turbo replaces the normal loop
     const cycle = Math.max(MIN_THINK_INTERVAL_MS, 8000 / gameSpeed);
     aiInterval  = setInterval(async () => {
         if (!aiPlayerActive || _isThinking || _rapidFireActive) return;
@@ -2829,9 +2927,9 @@ async function toggleAIPlayer() {
         if (aiMode === 'auto') {
             aiBtn.textContent = '⏹ Stop AI';
             aiBtn.classList.add('active');
-            updateAIStatus('🤖 AI Player Active');
-            tts.speak('AI player activated. Analyzing the screen now.');
-            scheduleAILoop();
+            updateAIStatus(_turboMode ? '⚡ Turbo AI — going as fast as possible' : '🤖 AI Player Active');
+            tts.speak(_turboMode ? 'Turbo AI active. Going as fast as I can.' : 'AI player activated. Analyzing the screen now.');
+            scheduleAILoop();   // routes to turbo loop if turbo is on
             aiThinkAndAct();
         } else {
             aiManualState = 'idle';
@@ -2889,6 +2987,7 @@ function stopAIPlayer() {
 
     if (aiStream)      { aiStream.getTracks().forEach(t => t.stop()); aiStream = null; }
     if (aiInterval)    { clearInterval(aiInterval); aiInterval = null; }
+    stopTurboLoop();
     if (_captureVideo) { _captureVideo.srcObject = null; }
     if (!buddyActive)  stopBridgeCaptionLoop();
     // Free frame buffers so a long session doesn't pile up base64 strings
@@ -3205,6 +3304,8 @@ function updateStreamerControls() {
     if (buB) { buB.classList.toggle('active', buddyActive); buB.textContent = buddyActive ? '⏹ Stop' : '🧡 Buddy'; }
     const mB = document.getElementById('so-mute-btn');
     if (mB) mB.textContent = isMuted ? '🔇' : '🔊';
+    const tB = document.getElementById('so-turbo-btn');
+    if (tB) { tB.classList.toggle('active', _turboMode); tB.textContent = _turboMode ? '⚡ Turbo ON' : '⚡ Turbo'; }
 }
 
 function updateStreamerOverlay(state) {
@@ -3478,6 +3579,73 @@ document.getElementById('energy-reset-btn')?.addEventListener('click', () => {
 });
 
 // ────────────────────────────────────────────────────────────
+// 21d. TURBO (consistent rapid fire) MODAL + WARNING + MEM DEBUG
+// ────────────────────────────────────────────────────────────
+function _syncTurboSubs() {
+    const on = document.getElementById('turbo-master')?.checked;
+    ['turbo-frames', 'turbo-multi', 'turbo-advanced'].forEach(id => {
+        const e = document.getElementById(id); if (e) e.disabled = !on;
+    });
+}
+function openTurboModal() {
+    const m = id => document.getElementById(id);
+    if (m('turbo-master'))   m('turbo-master').checked   = _turboMode;
+    if (m('turbo-frames'))   m('turbo-frames').checked   = !!_turboCfg.frames;
+    if (m('turbo-multi'))    m('turbo-multi').checked     = !!_turboCfg.multi;
+    if (m('turbo-advanced')) m('turbo-advanced').checked  = !!_turboCfg.advanced;
+    _syncTurboSubs();
+    m('turbo-modal')?.classList.add('open');
+    m('turbo-backdrop')?.classList.add('open');
+}
+function closeTurboModal() {
+    document.getElementById('turbo-modal')?.classList.remove('open');
+    document.getElementById('turbo-backdrop')?.classList.remove('open');
+}
+document.getElementById('turbo-btn')?.addEventListener('click', openTurboModal);
+document.getElementById('turbo-close-btn')?.addEventListener('click', closeTurboModal);
+document.getElementById('turbo-backdrop')?.addEventListener('click', closeTurboModal);
+document.getElementById('turbo-master')?.addEventListener('change', _syncTurboSubs);
+document.getElementById('turbo-save-btn')?.addEventListener('click', () => {
+    _turboCfg.frames   = document.getElementById('turbo-frames').checked;
+    _turboCfg.multi    = document.getElementById('turbo-multi').checked;
+    _turboCfg.advanced = document.getElementById('turbo-advanced').checked;
+    setTurboMode(document.getElementById('turbo-master').checked);   // also saves + restarts loop
+    closeTurboModal();
+});
+// Quick toggle (streamer-mode dock)
+document.getElementById('so-turbo-btn')?.addEventListener('click', () => setTurboMode(!_turboMode));
+
+// Big honesty warning, shown on every page load
+(function showSuckWarning() {
+    const w = document.getElementById('suck-warning');
+    if (!w) return;
+    const hide = () => w.classList.add('hidden');
+    document.getElementById('suck-warning-close')?.addEventListener('click', hide);
+    setTimeout(hide, 9000);   // auto-dismiss
+})();
+
+// ── Light memory debugging ──────────────────────────────────
+// Logs MarioState candidates so you can compare against the on-screen HUD and
+// figure out the real struct base, then run sm64Memory(true) to trust it.
+window.sm64MemDebug = (limit = 12) => {
+    const u8 = Module?.HEAPU8;
+    if (!u8) return 'heap not ready yet — start the game first';
+    const f = Module.HEAPF32, U16 = Module.HEAPU16, I16 = Module.HEAP16, I8 = Module.HEAP8, U32 = Module.HEAPU32;
+    const end = Math.min(u8.length - 0xC0, 0x4000000);
+    let found = 0;
+    console.log('[SM64 mem] scanning for MarioState candidates…');
+    for (let b = 0x400; b < end && found < limit; b += 4) {
+        if (_looksLikeMario(b)) {
+            console.log(`#${found} @0x${b.toString(16)} pos(${f[(b+MS_OFF.POS_X)>>2]|0},${f[(b+MS_OFF.POS_Y)>>2]|0},${f[(b+MS_OFF.POS_Z)>>2]|0}) ` +
+                `spd=${f[(b+MS_OFF.FWD_VEL)>>2].toFixed(1)} act=0x${U32[(b+MS_OFF.ACTION)>>2].toString(16)} ` +
+                `stars=${I16[(b+MS_OFF.STARS)>>1]} coins=${I16[(b+MS_OFF.COINS)>>1]} lives=${I8[b+MS_OFF.LIVES]} hp=0x${U16[(b+MS_OFF.HEALTH)>>1].toString(16)}`);
+            found++;
+        }
+    }
+    return `${found} candidate(s) logged. Compare with the on-screen HUD (real stars/coins/lives); once one matches, run sm64Memory(true).`;
+};
+
+// ────────────────────────────────────────────────────────────
 // 22. BOOT
 // ────────────────────────────────────────────────────────────
 restoreProviderState();
@@ -3498,6 +3666,9 @@ initAuth();
 renderControlsGuide(null);   // show static controls immediately
 // Voices may not be loaded yet — wait for them then re-render tutorial if open
 window.speechSynthesis?.addEventListener('voiceschanged', () => {});
+
+// Reflect persisted turbo state on the buttons
+updateTurboUI();
 
 // Restore streamer mode if it was on last session
 if (_streamerMode) setStreamerMode(true);
