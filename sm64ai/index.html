@@ -36,6 +36,7 @@
                 <div class="hud-divider"></div>
                 <button id="controls-toggle-btn" class="hud-icon-btn" title="Controls guide">🎮</button>
                 <button id="help-btn"            class="hud-icon-btn" title="Tutorial / Help">❓</button>
+                <button id="streamer-toggle-btn" class="hud-icon-btn" title="Streamer mode (Shift+S)">🎥</button>
                 <button id="disconnect-btn"      class="hud-icon-btn danger" title="Disconnect account" style="display:none">🔌</button>
             </div>
 
@@ -55,6 +56,7 @@
                 </label>
                 <div class="hud-divider"></div>
                 <button id="provider-btn" class="hud-icon-btn" title="API provider settings">⚙ API</button>
+                <span id="pollen-chip" class="hud-chip" title="Your Pollinations pollen balance" style="display:none"></span>
             </div>
 
             <!-- Right: AI action buttons -->
@@ -177,6 +179,35 @@
                 </div>
             </div>
         </div>
+
+        <!-- ── Streamer mode: broadcast overlay + AI vision view ─────── -->
+        <div id="streamer-overlay">
+            <div id="so-statbar">
+                <div class="so-stat"><span class="so-ico">⭐</span><span id="so-stars">0</span></div>
+                <div class="so-stat"><span class="so-ico">🪙</span><span id="so-coins">0</span></div>
+                <div class="so-stat"><span class="so-ico">🍄</span><span id="so-lives">0</span></div>
+                <div class="so-health-wrap"><div id="so-health"></div></div>
+                <div class="so-stat so-level-stat"><span id="so-level">—</span></div>
+                <div id="so-ai-badge" class="so-badge">🎮 MANUAL</div>
+            </div>
+            <div id="so-meta">
+                <span id="so-action">—</span>
+                <span class="so-sep">·</span>
+                <span>speed <b id="so-speed">0</b></span>
+                <span class="so-sep">·</span>
+                <span id="so-pos">X 0   Y 0   Z 0</span>
+            </div>
+
+            <!-- What the AI actually sees (prev|current composite) -->
+            <div id="so-vision">
+                <div class="so-vision-title">👁️ WHAT THE AI SEES</div>
+                <img id="so-vision-img" alt="AI vision frame">
+                <div id="so-vision-ph">Waiting for the AI to look…</div>
+            </div>
+        </div>
+
+        <!-- Watermark — also the exit-streamer-mode button -->
+        <button id="streamer-watermark" title="Exit streamer mode">Made by Endoxidev/MetaMysteries8</button>
 
     </div><!-- #app -->
 

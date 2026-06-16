@@ -19,6 +19,16 @@ const POLLINATIONS_AUTH_URL   = 'https://enter.pollinations.ai/authorize';
 const POLLINATIONS_API_BASE   = 'https://gen.pollinations.ai';
 const POLLINATIONS_MODELS_URL = 'https://gen.pollinations.ai/text/models';
 
+// Publishable App Key (BYOP client_id). Safe to ship client-side. Passed as
+// `client_id` on the authorize URL so the consent screen shows this app's name
+// and author, attributes traffic for tier upgrades, and credits developer
+// earnings on inference users spend. NOT used as a standalone API key.
+const POLLINATIONS_APP_KEY    = 'pk_JBemDN4TzwP8Ls2v';
+
+// OpenRouter — OpenAI-compatible aggregator
+const OPENROUTER_API_BASE     = 'https://openrouter.ai/api/v1';
+const OPENROUTER_MODELS_URL   = 'https://openrouter.ai/api/v1/models';
+
 const STORAGE_KEY        = 'pollinations_api_key';
 const MODEL_STORAGE_KEY  = 'sm64_selected_model';
 const PROVIDER_STORAGE   = 'sm64_provider';
@@ -249,10 +259,13 @@ function gameStateToText(state) {
 
 function updateMemoryHUD(state) {
     const chip = document.getElementById('memory-hud-chip');
-    if (!chip || !state) return;
-    chip.textContent = `⭐${state.stars} ❤${state.health}/8 🪙${state.coins} 🍄${state.lives} | ${state.levelName}`;
-    chip.title = gameStateToText(state);
-    chip.style.display = 'block';
+    if (chip && state) {
+        chip.textContent = `⭐${state.stars} ❤${state.health}/8 🪙${state.coins} 🍄${state.lives} | ${state.levelName}`;
+        chip.title = gameStateToText(state);
+        chip.style.display = 'block';
+    }
+    // Feed the broadcast-style streamer overlay too (cheap, only paints when visible)
+    if (typeof updateStreamerOverlay === 'function') updateStreamerOverlay(state);
 }
 
 // ────────────────────────────────────────────────────────────
@@ -361,7 +374,8 @@ const PROVIDERS = {
                 url: `${POLLINATIONS_API_BASE}/v1/chat/completions`,
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
                 body: { model, messages, max_tokens: opts.max_tokens || 800,
-                    ...(opts.json ? { response_format: { type: 'json_object' } } : {}) },
+                    ...(opts.tools ? { tools: opts.tools, tool_choice: opts.tool_choice || 'auto' } : {}),
+                    ...(opts.json && !opts.tools ? { response_format: { type: 'json_object' } } : {}) },
             };
         },
     },
@@ -379,7 +393,35 @@ const PROVIDERS = {
                 url: 'https://api.openai.com/v1/chat/completions',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
                 body: { model, messages, max_tokens: opts.max_tokens || 800,
-                    ...(opts.json ? { response_format: { type: 'json_object' } } : {}) },
+                    ...(opts.tools ? { tools: opts.tools, tool_choice: opts.tool_choice || 'auto' } : {}),
+                    ...(opts.json && !opts.tools ? { response_format: { type: 'json_object' } } : {}) },
+            };
+        },
+    },
+    openrouter: {
+        id:    'openrouter',
+        label: 'OpenRouter',
+        icon:  '🛰️',
+        hasVision: true,           // gated per-model; vision list fetched live
+        keyLabel: 'OpenRouter API Key',
+        keyPlaceholder: 'sk-or-…',
+        modelsUrl: OPENROUTER_MODELS_URL,
+        defaultModel: 'openai/gpt-4o-mini',
+        visionModels: ['openai/gpt-4o', 'openai/gpt-4o-mini', 'anthropic/claude-3.5-sonnet',
+                       'google/gemini-2.0-flash-001', 'x-ai/grok-2-vision-1212',
+                       'qwen/qwen2.5-vl-72b-instruct', 'meta-llama/llama-3.2-90b-vision-instruct'],
+        buildRequest(messages, model, key, opts) {
+            return {
+                url: `${OPENROUTER_API_BASE}/chat/completions`,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${key}`,
+                    'HTTP-Referer': location.origin,
+                    'X-Title': 'SM64 AI Player',
+                },
+                body: { model, messages, max_tokens: opts.max_tokens || 800,
+                    ...(opts.tools ? { tools: opts.tools, tool_choice: opts.tool_choice || 'auto' } : {}),
+                    ...(opts.json && !opts.tools ? { response_format: { type: 'json_object' } } : {}) },
             };
         },
     },
@@ -437,7 +479,8 @@ const PROVIDERS = {
                 url: `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`,
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
                 body: { model, messages, max_tokens: opts.max_tokens || 800,
-                    ...(opts.json ? { response_format: { type: 'json_object' } } : {}) },
+                    ...(opts.tools ? { tools: opts.tools, tool_choice: opts.tool_choice || 'auto' } : {}),
+                    ...(opts.json && !opts.tools ? { response_format: { type: 'json_object' } } : {}) },
             };
         },
     },
@@ -455,7 +498,8 @@ const PROVIDERS = {
                 url: `${base}/v1/chat/completions`,
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
                 body: { model, messages, max_tokens: opts.max_tokens || 800,
-                    ...(opts.json ? { response_format: { type: 'json_object' } } : {}) },
+                    ...(opts.tools ? { tools: opts.tools, tool_choice: opts.tool_choice || 'auto' } : {}),
+                    ...(opts.json && !opts.tools ? { response_format: { type: 'json_object' } } : {}) },
             };
         },
     },
@@ -572,7 +616,81 @@ async function callChatAPI(messages, opts = {}) {
 
     // Allow provider to define custom response extraction
     if (req.responseExtract) return req.responseExtract(data);
+    // Tool-calling callers need the full assistant message (tool_calls + content)
+    if (opts.returnRaw) return data.choices?.[0]?.message || {};
     return data.choices?.[0]?.message?.content || '';
+}
+
+// ── Memory tool (OpenAI/function-calling) ────────────────────
+// The model can call this on demand to pull fresh RAM state instead of
+// relying solely on the snapshot injected into the prompt.
+const GAME_STATE_TOOL = {
+    type: 'function',
+    function: {
+        name: 'get_game_state',
+        description: 'Read live Super Mario 64 state directly from game RAM: ' +
+            'Mario position (x,y,z), facing/action, horizontal speed, health wedges, ' +
+            'stars, coins, lives, current level/area, and camera. Call this whenever you ' +
+            'need precise, up-to-the-moment numbers (e.g. to judge distance, height, or speed).',
+        parameters: { type: 'object', properties: {}, required: [] },
+    },
+};
+
+// Providers whose chat endpoint accepts OpenAI-style `tools`
+const TOOL_CAPABLE_PROVIDERS = new Set(['pollinations', 'openai', 'openrouter', 'gemini', 'custom']);
+
+// Per-model tool support (populated from model metadata when available).
+// null = unknown (we optimistically try once, then remember the result).
+const _modelToolSupport = {};
+
+function modelMaySupportTools(model) {
+    if (!TOOL_CAPABLE_PROVIDERS.has(activeProvider.id)) return false;
+    if (activeProvider.id === 'local') return false;
+    const known = _modelToolSupport[model];
+    return known !== false; // try when true or unknown
+}
+
+// Run one chat turn that may use the get_game_state tool.
+// Falls back transparently to a plain call if the provider/model rejects tools.
+async function callChatWithTools(messages, opts = {}) {
+    const model = opts.model || getSelectedModel();
+    if (!modelMaySupportTools(model)) {
+        return await callChatAPI(messages, opts);
+    }
+
+    try {
+        const convo = [...messages];
+        let rounds = 0;
+        while (rounds++ < 3) {
+            const msg = await callChatAPI(convo, {
+                ...opts, returnRaw: true, tools: [GAME_STATE_TOOL], tool_choice: 'auto',
+            });
+            _modelToolSupport[model] = true; // it accepted the tools field
+
+            const calls = msg.tool_calls || [];
+            if (!calls.length) return msg.content || '';
+
+            convo.push({ role: 'assistant', content: msg.content || '', tool_calls: calls });
+            for (const call of calls) {
+                let result = 'No game state available yet.';
+                if (call.function?.name === 'get_game_state') {
+                    const st = readGameState();
+                    result = st ? gameStateToText(st) : 'Game state not readable yet (still booting).';
+                }
+                convo.push({ role: 'tool', tool_call_id: call.id, content: result });
+            }
+        }
+        // Too many tool rounds — make a final plain pass
+        return await callChatAPI(convo, opts);
+    } catch (err) {
+        // Most likely the model/provider doesn't accept tools — remember & retry plainly
+        if (/tool|function|unsupported|invalid|400/i.test(err.message || '')) {
+            _modelToolSupport[model] = false;
+            console.warn(`[Tools] ${model} rejected tools — falling back to injection:`, err.message);
+            return await callChatAPI(messages, opts);
+        }
+        throw err;
+    }
 }
 
 // ────────────────────────────────────────────────────────────
@@ -595,6 +713,8 @@ let _localVLMError     = null;
 function providerHasVision() {
     if (activeProvider.id === 'local') return true;  // local IS vision
     if (activeProvider.id === 'custom') return PROVIDERS.custom.hasVision === true;
+    // OpenRouter: vision depends on the specific model the user picked
+    if (activeProvider.id === 'openrouter') return openrouterSelectedHasVision();
     return activeProvider.hasVision === true;
 }
 
@@ -906,6 +1026,7 @@ document.getElementById('vision-req-local-btn')?.addEventListener('click', () =>
 });
 
 let _pendingAIStart = false;
+let _memoryOnlyNoticeShown = false;
 
 // ────────────────────────────────────────────────────────────
 // 4. AUTH (Pollinations OAuth)
@@ -915,7 +1036,12 @@ const storeKey       = k  => { try { localStorage.setItem(STORAGE_KEY, k); } cat
 const clearStoredKey = () => { try { localStorage.removeItem(STORAGE_KEY); } catch {} };
 
 function buildAuthUrl() {
-    const params = new URLSearchParams({ redirect_uri: location.href.split('#')[0] });
+    // client_id = our publishable App Key, so the consent screen shows the app
+    // name + author and inference users spend credits developer earnings to us.
+    const params = new URLSearchParams({
+        redirect_uri: location.href.split('#')[0],
+        client_id:    POLLINATIONS_APP_KEY,
+    });
     return `${POLLINATIONS_AUTH_URL}?${params}`;
 }
 
@@ -1016,6 +1142,91 @@ async function fetchVisionModels() {
         populateModelDropdown();
         if (statusSpan) statusSpan.textContent = '⚠ offline';
     }
+}
+
+// Live model list from OpenRouter (/models needs no auth). We read each model's
+// capabilities so the app knows, per model, whether it supports vision (image
+// input) and tool-calling — then picks the right perception mode automatically.
+let _openrouterModelsCache = null;
+// Per-model capability map: { [id]: { vision: bool, tools: bool, name } }
+const _openrouterModelMeta = {};
+
+async function fetchOpenRouterModels() {
+    const select     = document.getElementById('model-select');
+    const statusSpan = document.getElementById('model-status');
+    if (!select) return;
+
+    if (_openrouterModelsCache) { renderOpenRouterModels(_openrouterModelsCache); return; }
+
+    select.innerHTML = '<option value="">Loading models…</option>';
+    select.disabled  = true;
+    if (statusSpan) statusSpan.textContent = 'fetching…';
+
+    try {
+        const res  = await fetch(OPENROUTER_MODELS_URL);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const models = (data.data || []).map(m => {
+            const vision = (m.architecture?.input_modalities || []).includes('image');
+            const tools  = (m.supported_parameters || []).includes('tools');
+            const meta   = { id: m.id, name: m.name || m.id, vision, tools };
+            _openrouterModelMeta[m.id] = meta;
+            // Pre-seed tool support so we don't waste a probe call
+            _modelToolSupport[m.id] = tools;
+            return meta;
+        }).sort((a, b) => a.id.localeCompare(b.id));
+
+        _openrouterModelsCache = models.length ? models : null;
+        PROVIDERS.openrouter.visionModels = models.filter(m => m.vision).map(m => m.id);
+        renderOpenRouterModels(models);
+    } catch (err) {
+        console.warn('[OpenRouter] model fetch failed, using static list:', err);
+        renderOpenRouterModels((PROVIDERS.openrouter.visionModels || [])
+            .map(id => ({ id, name: id, vision: true, tools: true })));
+        if (statusSpan) statusSpan.textContent = '⚠ offline list';
+    }
+}
+
+function renderOpenRouterModels(models) {
+    const select     = document.getElementById('model-select');
+    const statusSpan = document.getElementById('model-status');
+    if (!select) return;
+    select.innerHTML = '';
+
+    const vision = models.filter(m => m.vision);
+    const text   = models.filter(m => !m.vision);
+    const saved  = localStorage.getItem(MODEL_STORAGE_KEY) || PROVIDERS.openrouter.defaultModel;
+
+    const addGroup = (label, list) => {
+        if (!list.length) return;
+        const grp = document.createElement('optgroup');
+        grp.label = label;
+        for (const m of list) {
+            const opt = document.createElement('option');
+            opt.value = m.id;
+            // Tag capabilities so the user can see them at a glance
+            const tags = `${m.vision ? ' 👁️' : ''}${m.tools ? ' 🛠️' : ''}`;
+            opt.textContent = `${m.name}${tags}`;
+            if (m.id === saved) opt.selected = true;
+            grp.appendChild(opt);
+        }
+        select.appendChild(grp);
+    };
+
+    // Vision models first (recommended), then text-only (memory-only / bridge play)
+    addGroup('👁️ Vision models (see the screen)', vision);
+    addGroup('🧠 Text-only models (memory-only / bridge)', text);
+
+    select.disabled = false;
+    if (statusSpan) statusSpan.textContent = `${vision.length} vision · ${text.length} text-only`;
+}
+
+// Does the currently-selected OpenRouter model support image input?
+function openrouterSelectedHasVision() {
+    const model = getSelectedModel();
+    const meta  = _openrouterModelMeta[model];
+    if (!meta) return true;          // unknown — assume vision (safe default for cloud)
+    return meta.vision === true;
 }
 
 // Debounce to prevent rapid successive calls
@@ -1159,6 +1370,12 @@ function populateModelDropdown() {
         return;
     }
 
+    // OpenRouter — fetch vision models live (cached)
+    if (activeProvider.id === 'openrouter') {
+        fetchOpenRouterModels();
+        return;
+    }
+
     // Named providers (openai, anthropic, gemini) — show static vision model list
     if (activeProvider.id !== 'pollinations') {
         const models = activeProvider.visionModels || [];
@@ -1254,6 +1471,23 @@ function buildProviderPanel() {
     }
     row.appendChild(sel);
     panel.appendChild(row);
+
+    // Vision source row (applies to every provider) — canvas grab vs screen-share
+    const visRow = document.createElement('div');
+    visRow.className = 'provider-row';
+    const visLabel = document.createElement('label');
+    visLabel.className = 'provider-label';
+    visLabel.textContent = 'AI vision source';
+    const visSel = document.createElement('select');
+    visSel.className = 'provider-select';
+    visSel.innerHTML = `
+        <option value="canvas">🎯 Game canvas (no popup, recommended)</option>
+        <option value="screen">🖥️ Screen share (window/tab)</option>`;
+    visSel.value = _visionSource;
+    visSel.addEventListener('change', () => setVisionSource(visSel.value));
+    visRow.appendChild(visLabel);
+    visRow.appendChild(visSel);
+    panel.appendChild(visRow);
 
     // Key input (hidden for Pollinations OAuth)
     const keyRow = document.createElement('div');
@@ -1728,6 +1962,18 @@ async function captureScreen(stream) {
                 _captureVideo.onloadedmetadata = resolve;
             });
         }
+        // Force a *freshly presented* frame so the model never reasons about a
+        // stale image (the bug where it thinks it's still at the castle entrance).
+        // requestVideoFrameCallback fires only when a new frame is composited.
+        if (typeof _captureVideo.requestVideoFrameCallback === 'function') {
+            await new Promise((resolve) => {
+                let settled = false;
+                const done = () => { if (!settled) { settled = true; resolve(); } };
+                try { _captureVideo.requestVideoFrameCallback(done); } catch { done(); return; }
+                setTimeout(done, 200); // safety: never hang if no new frame arrives
+            });
+        }
+
         const w = _captureVideo.videoWidth  || 640;
         const h = _captureVideo.videoHeight || 480;
         const targetW = Math.min(w, 1280);
@@ -1746,6 +1992,97 @@ async function captureScreen(stream) {
         console.error('Screen capture error:', err);
         return null;
     }
+}
+
+// Load a data URL / URL into an Image element
+function _loadImage(src) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload  = () => resolve(img);
+        img.onerror = reject;
+        img.src = src;
+    });
+}
+
+// Stitch the previous and current frame into ONE side-by-side image with a bold
+// labelled divider, so the model gets temporal context in a single image and
+// can't confuse the two frames. Returns a JPEG data URL.
+let _composeCanvas = null, _composeCtx = null;
+async function composeComparisonImage(prevUrl, curUrl) {
+    const [imgA, imgB] = await Promise.all([_loadImage(prevUrl), _loadImage(curUrl)]);
+    const h    = Math.max(imgA.height, imgB.height) || 480;
+    const wA   = Math.round((imgA.width / (imgA.height || 1)) * h);
+    const wB   = Math.round((imgB.width / (imgB.height || 1)) * h);
+    const div  = 10;   // divider width
+    const labelH = 28;
+    const W = wA + div + wB;
+    const H = h + labelH;
+
+    if (!_composeCanvas) {
+        _composeCanvas = document.createElement('canvas');
+        _composeCtx    = _composeCanvas.getContext('2d', { alpha: false });
+    }
+    _composeCanvas.width  = W;
+    _composeCanvas.height = H;
+    const ctx = _composeCtx;
+
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+
+    // Frames
+    ctx.drawImage(imgA, 0,         labelH, wA, h);
+    ctx.drawImage(imgB, wA + div,  labelH, wB, h);
+
+    // Red divider bar between them
+    ctx.fillStyle = '#ff3b30';
+    ctx.fillRect(wA, 0, div, H);
+
+    // Labels
+    ctx.fillStyle    = '#fff';
+    ctx.font         = 'bold 18px sans-serif';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign    = 'center';
+    ctx.fillText('◀ PREVIOUS TURN', wA / 2, labelH / 2);
+    ctx.fillText('CURRENT TURN ▶',  wA + div + wB / 2, labelH / 2);
+
+    return _composeCanvas.toDataURL('image/jpeg', 0.72);
+}
+
+// ── Vision source: capture the game canvas directly (no screen-share popup) ──
+// 'canvas' = MediaStream straight off the game <canvas> (default, zero prompts).
+// 'screen' = legacy getDisplayMedia screen-share (fallback / multi-window setups).
+let _visionSource = (() => { try { return localStorage.getItem('sm64_vision_source') || 'canvas'; } catch { return 'canvas'; } })();
+let _canvasStream = null;
+
+function setVisionSource(src) {
+    _visionSource = src;
+    try { localStorage.setItem('sm64_vision_source', src); } catch {}
+}
+
+function getCanvasStream(fps = 5) {
+    if (_canvasStream && _canvasStream.active) return _canvasStream;
+    try {
+        if (typeof canvas.captureStream !== 'function') return null;
+        _canvasStream = canvas.captureStream(fps);
+        return _canvasStream;
+    } catch (err) {
+        console.warn('[Vision] canvas.captureStream failed:', err);
+        return null;
+    }
+}
+
+// Acquire a stream for the AI/buddy to "see". Prefers the direct canvas grab so
+// the connected model can see the game with no screen-share prompt; falls back
+// to screen-share only if canvas capture is unavailable or explicitly chosen.
+async function acquireVisionStream(fps = 5) {
+    if (_visionSource === 'canvas') {
+        const s = getCanvasStream(fps);
+        if (s) return s;
+        console.warn('[Vision] canvas capture unavailable — falling back to screen share');
+    }
+    return await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: { ideal: fps, max: fps * 2 } }, audio: false,
+    });
 }
 
 // Quick perceptual hash of a data URL — sample every 1KB for robust change detection
@@ -1770,6 +2107,19 @@ function isFrameIdentical(dataUrl) {
     return false;
 }
 
+// Same idea as isFrameIdentical, but keyed on RAM state — used by memory-only play
+let _lastStateHash = null;
+let _identicalStateCount = 0;
+function isStateIdentical(stateHash) {
+    if (stateHash === _lastStateHash) {
+        _identicalStateCount++;
+        return _identicalStateCount >= IDLE_FRAME_SKIP;
+    }
+    _lastStateHash = stateHash;
+    _identicalStateCount = 0;
+    return false;
+}
+
 // ────────────────────────────────────────────────────────────
 // 13. AI PLAYER STATE & THROTTLING
 // ────────────────────────────────────────────────────────────
@@ -1789,6 +2139,11 @@ let playerMovementDetected = false;
 let _lastThinkTime   = 0;
 let _consecutiveErrors = 0;
 let _isThinking      = false;   // prevent concurrent calls
+
+// Temporal context — lets the AI sense motion between decisions
+let _prevScreenshot  = null;    // data URL from the previous think
+let _prevGameState   = null;    // RAM state from the previous think
+let _stuckCount      = 0;       // consecutive near-zero-movement decisions
 
 // Rapid-fire mode state
 let _rapidFireActive = false;
@@ -1903,27 +2258,69 @@ async function aiThink() {
     updateAIStatus('🤔 Thinking…');
 
     try {
-        const screenshot = await captureScreen(aiStream);
-        if (!screenshot) { updateAIStatus('❌ Failed to capture screen'); _isThinking = false; return null; }
+        // How will the model perceive the game this turn?
+        const visionOK   = providerHasVision();                       // model accepts images
+        const bridgeOK   = !visionOK && _localVLMState === 'ready';    // SmolVLM captions for it
+        const memoryOnly = !visionOK && !bridgeOK;                     // play from RAM alone
 
-        // Skip if frame is identical to recent ones (nothing changed)
-        if (isFrameIdentical(screenshot)) {
-            updateAIStatus('💤 Screen unchanged — skipping inference');
-            _isThinking = false;
-            return null;
+        // Live game state from WASM memory — our ground truth, always read
+        const gameState = readGameState();
+
+        let screenshot = null;
+        if (!memoryOnly) {
+            screenshot = await captureScreen(aiStream);
+            if (!screenshot) { updateAIStatus('❌ Failed to capture game view'); _isThinking = false; return null; }
+            // Skip if the frame is identical to recent ones (nothing changed)
+            if (isFrameIdentical(screenshot)) {
+                updateAIStatus('💤 Screen unchanged — skipping inference');
+                _isThinking = false;
+                return null;
+            }
+            if (bridgeOK) updateAIStatus('🔭 Vision bridge: captioning screen…');
+        } else {
+            // Memory-only: a non-vision model plays purely from RAM state + game knowledge.
+            if (!gameState) {
+                updateAIStatus('⏳ Waiting for game memory (no vision)…');
+                _isThinking = false;
+                return null;
+            }
+            const sHash = `${gameState.x},${gameState.y},${gameState.z},${gameState.actionId},${gameState.stars},${gameState.coins}`;
+            if (isStateIdentical(sHash)) {
+                updateAIStatus('💤 Game state unchanged — skipping inference');
+                _isThinking = false;
+                return null;
+            }
+            updateAIStatus('🧠 Memory-only play (no vision)…');
         }
 
         const { t1, t2 } = await loadTrainingData();
 
-        // Read live game state from WASM memory
-        const gameState = readGameState();
         const memStateCtx = gameState
             ? `\n\n${gameStateToText(gameState)}`
             : '';
 
-        // Vision-bridge status
-        const isBridgeMode = !providerHasVision() && _localVLMState === 'ready';
-        if (isBridgeMode) updateAIStatus('🔭 Vision bridge: captioning screen…');
+        // Movement since the previous decision — gives the model a sense of motion,
+        // and catches the "stuck repeating the same wrong move" failure mode.
+        let motionCtx = '';
+        if (_prevGameState && gameState) {
+            const dx = gameState.x - _prevGameState.x;
+            const dy = gameState.y - _prevGameState.y;
+            const dz = gameState.z - _prevGameState.z;
+            const dist = Math.round(Math.hypot(dx, dz));
+            if (dist + Math.abs(dy) < 8) _stuckCount++; else _stuckCount = 0;
+            motionCtx = `\n\nMOVEMENT SINCE LAST DECISION: Δx=${dx}, Δy=${dy}, Δz=${dz} (moved ${dist} units horizontally).`;
+            if (_stuckCount >= 2) {
+                motionCtx += `\n⚠ YOU APPEAR STUCK — your position has barely changed for ${_stuckCount} turns, so your last move is NOT working. Do something DIFFERENT: turn to face a new direction, back up, jump over the obstacle, or pick another path. Do not repeat the previous action.`;
+            }
+            if (_prevGameState.stars < gameState.stars) motionCtx += `\n🌟 You just collected a STAR — nice! Keep progressing.`;
+            if (_prevGameState.levelId !== gameState.levelId) motionCtx += `\n📍 The level/area just changed to ${gameState.levelName}. Re-orient before acting.`;
+        }
+
+        const perceptionNote = memoryOnly
+            ? 'IMPORTANT: You CANNOT see the screen. Play entirely from the LIVE GAME STATE (RAM) below plus your knowledge of Super Mario 64. Reason from Mario\'s position (x,y,z), action, speed and camera angle. Call the get_game_state tool whenever you need exact, fresh numbers.'
+            : (bridgeOK
+                ? 'A local vision model describes the screen for you (see the SCREEN DESCRIPTION). You may also call the get_game_state tool for exact RAM values.'
+                : 'Analyze the screenshot together with the LIVE GAME STATE below. You may call the get_game_state tool any time for exact, fresh RAM values.');
 
         const movementCtx = '\n\nNOTE: The player is idle (no input detected).';
         const memoryCtx   = aiMemory.length > 0
@@ -1939,7 +2336,8 @@ async function aiThink() {
             ? `\n\nTRAINING DATA:\n=== SET 1 ===\n${t1.slice(0, 3500)}\n\n=== SET 2 ===\n${t2.slice(0, 3500)}`
             : '';
 
-        const systemPrompt = `You are an AI playing Super Mario 64. Analyze the screenshot and decide what actions to take.
+        const systemPrompt = `You are an AI playing Super Mario 64. Decide what actions to take.
+${perceptionNote}
 
 GAME OBJECTIVE:
 1. Start outside the castle — head to the entrance bridge and go inside
@@ -1950,7 +2348,7 @@ GAME OBJECTIVE:
 6. Collect stars to progress
 
 Controls: ArrowUp/Down/Left/Right = move, jump (X) = jump/skip dialog, start (Enter) = pause/skip dialog, crouch (Space) = duck, action (C) = dive/punch/grab
-${movementCtx}${memStateCtx}${memoryCtx}${notesCtx}${instrCtx}${trainingCtx}
+${movementCtx}${memStateCtx}${motionCtx}${memoryCtx}${notesCtx}${instrCtx}${trainingCtx}
 
 Respond with ONLY valid JSON (no markdown fences):
 {
@@ -1958,24 +2356,47 @@ Respond with ONLY valid JSON (no markdown fences):
   "thought": "brief strategy",
   "speech": "short streamer commentary (max 15 words) — omit if rapid_fire is true",
   "mistake": "error noticed or null",
+  "notes": ["optional NEW strategy insight worth remembering for later — omit or [] if nothing new"],
   "rapid_fire": false
 }
 
 Set "rapid_fire": true ONLY when you need to make many fast decisions (e.g. mid-jump sequence, navigating a tight corridor, chasing a star). Set it back to false when the situation stabilises.
 Max 5 action groups. Valid names: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jump, start, crouch, action`;
 
-        const base64Image = screenshot.replace(/^data:image\/(png|jpeg);base64,/, '');
-        const mimeType    = screenshot.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png';
-
-        const rawContent = await callChatAPI([
-            { role: 'system', content: systemPrompt },
-            {
+        let userMessage;
+        if (memoryOnly) {
+            setAIVisionFrame(null);   // streamer overlay shows "no vision" placeholder
+            userMessage = {
+                role: 'user',
+                content: 'Based on the live game state, what should I do next? Call get_game_state first if you need exact numbers. Respond with ONLY the JSON.',
+            };
+        } else {
+            // Vision: stitch PREVIOUS + CURRENT into one labelled side-by-side image
+            // so the model can see whether its last move actually moved Mario (and
+            // which way) without confusing the two frames or paying for two images.
+            let visionImg = screenshot, promptText = 'What should I do?';
+            if (_prevScreenshot) {
+                try {
+                    visionImg = await composeComparisonImage(_prevScreenshot, screenshot);
+                    promptText = 'This image shows TWO frames side by side: the LEFT half is the PREVIOUS TURN (before my last action) and the RIGHT half is the CURRENT TURN (now), split by a red divider. Compare them to judge whether I moved the right way, then decide the next action.';
+                } catch (e) {
+                    // Compose failed — fall back to the single current frame
+                    visionImg = screenshot;
+                }
+            }
+            setAIVisionFrame(visionImg);   // mirror exactly what the AI sees into streamer mode
+            userMessage = {
                 role: 'user',
                 content: [
-                    { type: 'text', text: 'What should I do?' },
-                    { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64Image}` } },
+                    { type: 'text', text: promptText },
+                    { type: 'image_url', image_url: { url: visionImg } },
                 ],
-            },
+            };
+        }
+
+        const rawContent = await callChatWithTools([
+            { role: 'system', content: systemPrompt },
+            userMessage,
         ], { json: true, max_tokens: 400 });
 
         const clean    = rawContent.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
@@ -1984,9 +2405,22 @@ Max 5 action groups. Valid names: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jum
         updateAIStatus(`💭 ${response.thought}`);
         _consecutiveErrors = 0;
 
+        // Remember this turn so the next one can sense movement/direction.
+        _prevScreenshot = screenshot;       // null in memory-only mode (fine)
+        _prevGameState  = gameState;
+
         if (response.mistake && response.mistake !== 'null' && response.mistake !== null) {
             aiMemory.push(response.mistake);
             if (aiMemory.length > 20) aiMemory.shift();
+        }
+
+        // Live study notes the AI jots down mid-play (deduped, capped)
+        if (Array.isArray(response.notes)) {
+            for (const note of response.notes) {
+                const n = (note || '').trim();
+                if (n && n.length > 4 && !aiNotes.includes(n)) aiNotes.push(n);
+            }
+            while (aiNotes.length > 30) aiNotes.shift();
         }
 
         // Handle rapid-fire mode toggle
@@ -2111,14 +2545,19 @@ function scheduleAILoop() {
 // 17. TOGGLE AI PLAYER
 // ────────────────────────────────────────────────────────────
 async function toggleAIPlayer() {
-    // Vision-bridge check: if provider has no vision but SmolVLM is ready, allow it
+    // Perception modes:
+    //  • vision model            → sees the canvas directly
+    //  • SmolVLM bridge ready     → local model captions for a non-vision model
+    //  • neither                  → memory-only play (reads RAM, no vision needed)
     const bridgeMode = !providerHasVision() && _localVLMState === 'ready';
-
-    // Check vision capability — block only if no vision AND no bridge
-    if (!providerHasVision() && !bridgeMode) {
-        _pendingAIStart = true;
-        showVisionRequiredModal();
-        return;
+    const memoryOnly = !providerHasVision() && !bridgeMode;
+    if (memoryOnly && !aiPlayerActive) {
+        // No longer a hard block — the AI can play blind from game memory.
+        // Offer vision as an optional upgrade the first time only.
+        if (!_memoryOnlyNoticeShown) {
+            _memoryOnlyNoticeShown = true;
+            tts.interrupt('This model can\'t see the screen, so I\'ll play from game memory. For sharper play, connect a vision model or load the local one.');
+        }
     }
     // Local provider: ensure model is loaded
     if (activeProvider.id === 'local' && _localVLMState !== 'ready') {
@@ -2140,12 +2579,12 @@ async function toggleAIPlayer() {
 
     if (!aiPlayerActive) {
         try {
-            aiStream = await navigator.mediaDevices.getDisplayMedia({
-                video: { frameRate: { ideal: 5, max: 10 } },
-                audio: false,
-            });
+            aiStream = await acquireVisionStream(5);
+            if (!aiStream) throw new Error('no stream');
         } catch {
-            tts.interrupt('Screen sharing was denied. Please try again and select the window showing the game.');
+            tts.interrupt(_visionSource === 'screen'
+                ? 'Screen sharing was denied. Please try again and select the window showing the game.'
+                : 'Could not capture the game canvas. Try switching the vision source to screen-share in API settings.');
             return;
         }
 
@@ -2153,6 +2592,11 @@ async function toggleAIPlayer() {
         _consecutiveErrors = 0;
         _lastFrameHash = null;
         _identicalFrameCount = 0;
+        _lastStateHash = null;
+        _identicalStateCount = 0;
+        _prevScreenshot = null;
+        _prevGameState  = null;
+        _stuckCount     = 0;
         aiStream.getVideoTracks()[0].addEventListener('ended', stopAIPlayer);
 
         if (aiMode === 'auto') {
@@ -2257,30 +2701,41 @@ async function buddyAdvise() {
     if (!buddyActive) return;
     buddyText.textContent = '🤔 Analyzing…';
 
-    const streamToUse = aiStream || buddyStream;
-    if (!streamToUse) { buddyText.textContent = '❌ No screen share active!'; return; }
+    const visionOK   = providerHasVision();
+    const bridgeOK   = !visionOK && _localVLMState === 'ready';
+    const memoryOnly = !visionOK && !bridgeOK;
+
+    const gameState = readGameState();
+    const stateCtx  = gameState ? `\n\n${gameStateToText(gameState)}` : '';
 
     try {
-        const screenshot = await captureScreen(streamToUse);
-        if (!screenshot) { buddyText.textContent = '❌ Could not capture screen'; return; }
-
-        const base64Image = screenshot.replace(/^data:image\/(png|jpeg);base64,/, '');
-        const mimeType    = screenshot.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png';
-
-        const rawContent = await callChatAPI([
-            {
-                role: 'system',
-                content: `You are an AI Buddy Coach for Super Mario 64. Give helpful, friendly advice in 2 sentences max.
+        const sysPrompt = `You are an AI Buddy Coach for Super Mario 64. Give helpful, friendly advice in 2 sentences max.${
+            memoryOnly ? ' You cannot see the screen — coach using the LIVE GAME STATE below.' : ''}${stateCtx}
 Respond with ONLY valid JSON (no markdown fences):
-{"text": "advice", "speech": "conversational version (max 20 words)"}`,
-            },
-            {
+{"text": "advice", "speech": "conversational version (max 20 words)"}`;
+
+        let userMessage;
+        if (memoryOnly) {
+            userMessage = { role: 'user', content: 'Based on the live game state, what advice do you have?' };
+        } else {
+            const streamToUse = aiStream || buddyStream;
+            if (!streamToUse) { buddyText.textContent = '❌ No game view active!'; return; }
+            const screenshot = await captureScreen(streamToUse);
+            if (!screenshot) { buddyText.textContent = '❌ Could not capture game view'; return; }
+            const base64Image = screenshot.replace(/^data:image\/(png|jpeg);base64,/, '');
+            const mimeType    = screenshot.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png';
+            userMessage = {
                 role: 'user',
                 content: [
                     { type: 'text', text: 'What advice do you have?' },
                     { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64Image}` } },
                 ],
-            },
+            };
+        }
+
+        const rawContent = await callChatAPI([
+            { role: 'system', content: sysPrompt },
+            userMessage,
         ], { json: true, max_tokens: 200 });
 
         const clean  = rawContent.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
@@ -2304,13 +2759,13 @@ async function toggleBuddy() {
     if (!buddyActive) {
         if (!aiStream && !buddyStream) {
             try {
-                buddyStream = await navigator.mediaDevices.getDisplayMedia({
-                    video: { frameRate: { ideal: 3, max: 5 } },
-                    audio: false,
-                });
+                buddyStream = await acquireVisionStream(3);
+                if (!buddyStream) throw new Error('no stream');
                 buddyStream.getVideoTracks()[0].addEventListener('ended', stopBuddy);
             } catch {
-                tts.interrupt('Screen sharing was denied. Please try again.');
+                tts.interrupt(_visionSource === 'screen'
+                    ? 'Screen sharing was denied. Please try again.'
+                    : 'Could not capture the game canvas.');
                 return;
             }
         }
@@ -2472,6 +2927,101 @@ Module.onRuntimeInitialized = function () {
 };
 
 // ────────────────────────────────────────────────────────────
+// 21b. STREAMER MODE + BROADCAST OVERLAY
+// ────────────────────────────────────────────────────────────
+//
+// Streamer mode hides all the app chrome and shows only:
+//   • a clean broadcast-style stats overlay fed from game RAM
+//   • a live view of what the AI actually sees (the side-by-side frame)
+//   • a single text watermark ("Made by Endoxidev/MetaMysteries8") that
+//     doubles as the exit button.
+//
+let _streamerMode  = (() => { try { return localStorage.getItem('sm64_streamer_mode') === '1'; } catch { return false; } })();
+let _aiVisionFrame = null;  // last image the AI was actually shown
+
+function setStreamerMode(on) {
+    _streamerMode = on;
+    document.getElementById('app')?.classList.toggle('streamer-mode', on);
+    try { localStorage.setItem('sm64_streamer_mode', on ? '1' : '0'); } catch {}
+    if (on) {
+        if (_gameState) updateStreamerOverlay(_gameState);
+        updateStreamerVision(_aiVisionFrame);
+    }
+}
+function toggleStreamerMode() { setStreamerMode(!_streamerMode); }
+
+function updateStreamerOverlay(state) {
+    if (!_streamerMode || !state) return;
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+    set('so-stars',  state.stars);
+    set('so-coins',  state.coins);
+    set('so-lives',  state.lives);
+    set('so-level',  state.levelName);
+    set('so-action', state.actionName);
+    set('so-speed',  `${state.speed}`);
+    set('so-pos',    `X ${state.x}   Y ${state.y}   Z ${state.z}`);
+    const hp = document.getElementById('so-health');
+    if (hp) {
+        hp.innerHTML = Array.from({ length: 8 }, (_, i) =>
+            `<span class="so-wedge${i < state.health ? ' on' : ''}"></span>`).join('');
+    }
+    // Reflect whether the AI is currently playing
+    const badge = document.getElementById('so-ai-badge');
+    if (badge) badge.textContent = aiPlayerActive ? '🤖 AI PLAYING' : (buddyActive ? '🧡 BUDDY COACH' : '🎮 MANUAL');
+}
+
+// Mirror exactly what the AI "sees" into the streamer overlay
+function setAIVisionFrame(dataUrl) {
+    _aiVisionFrame = dataUrl;
+    updateStreamerVision(dataUrl);
+}
+function updateStreamerVision(dataUrl) {
+    if (!_streamerMode) return;
+    const img = document.getElementById('so-vision-img');
+    const ph  = document.getElementById('so-vision-ph');
+    if (!img) return;
+    if (dataUrl) {
+        img.src = dataUrl;
+        img.style.display = 'block';
+        if (ph) ph.style.display = 'none';
+    } else {
+        img.removeAttribute('src');
+        img.style.display = 'none';
+        if (ph) ph.style.display = 'flex';
+    }
+}
+
+// The watermark IS the exit button
+document.getElementById('streamer-watermark')?.addEventListener('click', () => setStreamerMode(false));
+document.getElementById('streamer-toggle-btn')?.addEventListener('click', () => setStreamerMode(true));
+
+// Hotkey: Shift+S toggles streamer mode (Shift avoids the game's movement keys)
+document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.shiftKey && e.code === 'KeyS') { e.preventDefault(); toggleStreamerMode(); }
+});
+
+// ────────────────────────────────────────────────────────────
+// 21c. POLLEN BALANCE CHIP (Pollinations)
+// ────────────────────────────────────────────────────────────
+async function refreshPollenBalance() {
+    const chip = document.getElementById('pollen-chip');
+    if (!chip) return;
+    if (activeProvider.id !== 'pollinations' || !pollinationsKey) { chip.style.display = 'none'; return; }
+    try {
+        const res = await fetch(`${POLLINATIONS_API_BASE}/account/balance`, {
+            headers: { 'Authorization': `Bearer ${pollinationsKey}` },
+        });
+        if (!res.ok) { chip.style.display = 'none'; return; }
+        const data = await res.json();
+        const bal = data.balance ?? data.pollen ?? data.budget;
+        if (bal === undefined || bal === null) { chip.style.display = 'none'; return; }
+        chip.textContent = `🌸 ${typeof bal === 'number' ? bal.toFixed(2) : bal} pollen`;
+        chip.style.display = '';
+    } catch { chip.style.display = 'none'; }
+}
+
+// ────────────────────────────────────────────────────────────
 // 22. BOOT
 // ────────────────────────────────────────────────────────────
 restoreProviderState();
@@ -2492,3 +3042,10 @@ initAuth();
 renderControlsGuide(null);   // show static controls immediately
 // Voices may not be loaded yet — wait for them then re-render tutorial if open
 window.speechSynthesis?.addEventListener('voiceschanged', () => {});
+
+// Restore streamer mode if it was on last session
+if (_streamerMode) setStreamerMode(true);
+
+// Pollen balance chip — refresh now and every 60s
+refreshPollenBalance();
+setInterval(refreshPollenBalance, 60000);

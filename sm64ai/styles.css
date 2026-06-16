@@ -704,3 +704,161 @@ body {
 }
 .provider-load-local-btn:hover:not(:disabled) { filter: brightness(1.15); }
 .provider-load-local-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── Pollen balance chip ─────────────────────────────────── */
+.hud-chip {
+    font-size: 11px; font-weight: 600;
+    color: #ffd54f;
+    background: rgba(255,213,79,0.10);
+    border: 1px solid rgba(255,213,79,0.25);
+    border-radius: 99px;
+    padding: 3px 9px; white-space: nowrap; flex-shrink: 0;
+}
+
+/* ════════════════════════════════════════════════════════════
+   STREAMER MODE
+   ════════════════════════════════════════════════════════════ */
+
+/* Default: overlay + watermark hidden until streamer mode is on */
+#streamer-overlay  { display: none; }
+#streamer-watermark { display: none; }
+
+/* When streamer mode is active, hide all the app chrome */
+#app.streamer-mode #hud-bar,
+#app.streamer-mode #ai-status,
+#app.streamer-mode #memory-hud-chip,
+#app.streamer-mode #controls-panel,
+#app.streamer-mode #buddy-panel,
+#app.streamer-mode #instruction-panel,
+#app.streamer-mode #rapid-fire-indicator {
+    display: none !important;
+}
+
+/* Game fills the whole screen in streamer mode */
+#app.streamer-mode #canvas {
+    top: 0;
+    height: 100vh;
+}
+
+/* ── Broadcast overlay ───────────────────────────────────── */
+#app.streamer-mode #streamer-overlay {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    position: fixed;
+    top: 16px; left: 16px;
+    z-index: 200;
+    pointer-events: none;
+    font-family: "Noto Sans", sans-serif;
+}
+
+#so-statbar {
+    display: flex; align-items: center; gap: 14px;
+    background: rgba(8,8,14,0.82);
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 12px;
+    padding: 10px 16px;
+    backdrop-filter: blur(10px);
+    box-shadow: var(--shadow);
+}
+.so-stat { display: flex; align-items: center; gap: 6px; font-size: 22px; font-weight: 700; }
+.so-ico  { font-size: 20px; }
+.so-level-stat {
+    font-family: "Mario64", "Noto Sans", sans-serif;
+    font-size: 16px; color: var(--red);
+    text-shadow: 1px 1px 0 #000;
+    padding-left: 4px;
+}
+.so-badge {
+    margin-left: auto;
+    font-size: 12px; font-weight: 700; letter-spacing: 0.04em;
+    color: #fff;
+    background: rgba(67,160,71,0.30);
+    border: 1px solid rgba(67,160,71,0.5);
+    border-radius: 99px;
+    padding: 4px 10px; white-space: nowrap;
+}
+
+/* Health wedges */
+.so-health-wrap { display: flex; align-items: center; }
+#so-health { display: flex; gap: 3px; }
+.so-wedge {
+    width: 11px; height: 18px;
+    border-radius: 3px;
+    background: rgba(255,255,255,0.14);
+    transition: background 0.2s;
+}
+.so-wedge.on { background: linear-gradient(180deg, #ff5252, #c62828); }
+
+#so-meta {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 13px; color: rgba(255,255,255,0.85);
+    background: rgba(8,8,14,0.78);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px;
+    padding: 7px 14px;
+    backdrop-filter: blur(10px);
+    width: fit-content;
+}
+#so-meta b { color: var(--cyan); }
+.so-sep { color: rgba(255,255,255,0.25); }
+
+/* ── AI vision view (prev | current composite) ───────────── */
+#so-vision {
+    width: 340px;
+    background: rgba(8,8,14,0.85);
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 12px;
+    padding: 8px;
+    backdrop-filter: blur(10px);
+    box-shadow: var(--shadow);
+}
+.so-vision-title {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.06em;
+    color: rgba(255,255,255,0.55);
+    margin-bottom: 6px;
+}
+#so-vision-img {
+    width: 100%; display: none;
+    border-radius: 7px;
+    image-rendering: auto;
+}
+#so-vision-ph {
+    display: flex; align-items: center; justify-content: center;
+    height: 90px; border-radius: 7px;
+    font-size: 12px; color: rgba(255,255,255,0.40);
+    background: rgba(255,255,255,0.04);
+    border: 1px dashed rgba(255,255,255,0.12);
+    text-align: center;
+}
+
+/* ── Watermark / exit button ─────────────────────────────── */
+#app.streamer-mode #streamer-watermark {
+    display: block;
+    position: fixed;
+    bottom: 14px; right: 16px;
+    z-index: 250;
+    pointer-events: auto;
+    font-family: "Mario64", "Noto Sans", sans-serif;
+    font-size: 15px;
+    color: rgba(255,255,255,0.85);
+    text-shadow: 2px 2px 0 #000, 0 0 10px rgba(0,0,0,0.7);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    letter-spacing: 0.02em;
+    transition: color 0.15s, transform 0.15s;
+}
+#app.streamer-mode #streamer-watermark:hover {
+    color: var(--red);
+    transform: scale(1.04);
+}
+#app.streamer-mode #streamer-watermark::after {
+    content: "  ✕ exit";
+    font-family: "Noto Sans", sans-serif;
+    font-size: 11px;
+    color: rgba(255,255,255,0.45);
+}
+
+/* Streamer toggle button stays reachable when not in streamer mode */
+#streamer-toggle-btn.active { background: rgba(142,36,170,0.30); color: #ce93d8; }
