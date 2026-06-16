@@ -37,7 +37,7 @@ const STORAGE_KEY        = 'pollinations_api_key';
 const MODEL_STORAGE_KEY  = 'sm64_selected_model';
 const PROVIDER_STORAGE   = 'sm64_provider';
 const CONTROLS_CACHE_KEY = 'sm64_controls_guide';
-const DEFAULT_MODEL      = 'openai-large';
+const DEFAULT_MODEL      = 'openai';
 
 // Minimum ms between AI inference calls (prevents runaway spending)
 const MIN_THINK_INTERVAL_MS = 5000;
