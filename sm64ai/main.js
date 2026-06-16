@@ -2946,12 +2946,36 @@ function setStreamerMode(on) {
     if (on) {
         if (_gameState) updateStreamerOverlay(_gameState);
         updateStreamerVision(_aiVisionFrame);
+        updateStreamerControls();
     }
 }
 function toggleStreamerMode() { setStreamerMode(!_streamerMode); }
 
+// Streamer-mode AI controls proxy the real HUD buttons so all logic/state is reused
+function _proxyClick(targetId) {
+    document.getElementById(targetId)?.click();
+    setTimeout(updateStreamerControls, 60);  // reflect new state after the toggle settles
+}
+document.getElementById('so-ai-btn')?.addEventListener('click',     () => _proxyClick('ai-player-btn'));
+document.getElementById('so-buddy-btn')?.addEventListener('click',  () => _proxyClick('ai-buddy-btn'));
+document.getElementById('so-study-btn')?.addEventListener('click',  () => _proxyClick('pregame-notes-btn'));
+document.getElementById('so-memory-btn')?.addEventListener('click', () => _proxyClick('view-memory-btn'));
+document.getElementById('so-mute-btn')?.addEventListener('click',   () => _proxyClick('mute-btn'));
+
+// Keep the streamer-mode control dock in sync with real AI/buddy/mute state
+function updateStreamerControls() {
+    const aiB = document.getElementById('so-ai-btn');
+    if (aiB) { aiB.classList.toggle('active', aiPlayerActive); aiB.textContent = aiPlayerActive ? '⏹ Stop AI' : '🤖 AI Play'; }
+    const buB = document.getElementById('so-buddy-btn');
+    if (buB) { buB.classList.toggle('active', buddyActive); buB.textContent = buddyActive ? '⏹ Stop' : '🧡 Buddy'; }
+    const mB = document.getElementById('so-mute-btn');
+    if (mB) mB.textContent = isMuted ? '🔇' : '🔊';
+}
+
 function updateStreamerOverlay(state) {
-    if (!_streamerMode || !state) return;
+    if (!_streamerMode) return;
+    updateStreamerControls();
+    if (!state) return;
     const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
     set('so-stars',  state.stars);
     set('so-coins',  state.coins);

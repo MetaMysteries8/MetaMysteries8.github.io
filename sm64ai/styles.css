@@ -832,6 +832,39 @@ body {
     text-align: center;
 }
 
+/* ── Streamer-mode AI control dock ───────────────────────── */
+#so-controls {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    pointer-events: auto;       /* overlay is click-through; this dock is not */
+    background: rgba(8,8,14,0.82);
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 12px;
+    padding: 10px;
+    backdrop-filter: blur(10px);
+    box-shadow: var(--shadow);
+    width: fit-content;
+}
+.so-ctrl {
+    font-size: 13px; font-weight: 600;
+    color: #fff;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 8px;
+    padding: 8px 12px; cursor: pointer;
+    white-space: nowrap;
+    transition: filter 0.15s, background 0.15s, transform 0.1s;
+}
+.so-ctrl:hover  { background: rgba(255,255,255,0.16); }
+.so-ctrl:active { transform: scale(0.96); }
+.so-ctrl.green  { background: rgba(67,160,71,0.28);  border-color: rgba(67,160,71,0.5); }
+.so-ctrl.orange { background: rgba(251,140,0,0.26);  border-color: rgba(251,140,0,0.5); }
+.so-ctrl.cyan   { background: rgba(0,172,193,0.26);  border-color: rgba(0,172,193,0.5); }
+.so-ctrl.purple { background: rgba(142,36,170,0.28); border-color: rgba(142,36,170,0.5); }
+.so-ctrl.active {
+    background: var(--red); border-color: var(--red);
+    box-shadow: 0 0 12px rgba(229,34,19,0.5);
+}
+
 /* ── Watermark / exit button ─────────────────────────────── */
 #app.streamer-mode #streamer-watermark {
     display: block;
