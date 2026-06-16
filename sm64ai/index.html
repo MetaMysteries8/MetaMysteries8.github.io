@@ -3,56 +3,213 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>Super Mario 64 Web</title>
+    <title>SM64 AI Player</title>
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
     <div id="app">
-        <canvas id="canvas" tabindex="0" aria-label="Super Mario 64 canvas"></canvas>
-        <button id="ai-player-btn">AI Player</button>
-        <div id="ai-status"></div>
-        <div id="controls-panel">
-            <button id="mute-btn" title="Mute game audio">🔊</button>
-            <label>Speed: <input type="range" id="speed-slider" min="0.5" max="3" step="0.5" value="1"><span id="speed-label">1x</span></label>
+
+        <!-- Loading screen -->
+        <div id="loading-screen">
+            <div id="loading-inner">
+                <div id="loading-logo">🍄</div>
+                <h1 id="loading-title">SM64 AI Player</h1>
+                <div id="loading-bar-wrap"><div id="loading-bar"></div></div>
+                <p id="loading-msg">Loading game engine…</p>
+            </div>
         </div>
+
+        <!-- Game canvas -->
+        <canvas id="canvas" tabindex="0" aria-label="Super Mario 64 canvas"></canvas>
+
+        <!-- ── Top HUD bar ─────────────────────────────── -->
+        <div id="hud-bar">
+            <!-- Left: audio + speed + help + disconnect -->
+            <div id="hud-left">
+                <button id="mute-btn" title="Mute game audio">🔊</button>
+                <div class="hud-divider"></div>
+                <label class="hud-label">Speed
+                    <input type="range" id="speed-slider" min="0.5" max="3" step="0.5" value="1">
+                    <span id="speed-label">1×</span>
+                </label>
+                <div class="hud-divider"></div>
+                <button id="controls-toggle-btn" class="hud-icon-btn" title="Controls guide">🎮</button>
+                <button id="help-btn"            class="hud-icon-btn" title="Tutorial / Help">❓</button>
+                <button id="disconnect-btn"      class="hud-icon-btn danger" title="Disconnect account" style="display:none">🔌</button>
+            </div>
+
+            <!-- Centre: model picker + paid toggle -->
+            <div id="hud-centre">
+                <span class="hud-label">Model</span>
+                <div id="model-select-wrap">
+                    <select id="model-select" title="AI vision model to use">
+                        <option value="">Loading models…</option>
+                    </select>
+                    <span id="model-status" title=""></span>
+                </div>
+                <label class="hud-toggle" title="Show paid-only models">
+                    <input type="checkbox" id="show-paid-toggle">
+                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                    <span class="hud-label">Paid</span>
+                </label>
+                <div class="hud-divider"></div>
+                <button id="provider-btn" class="hud-icon-btn" title="API provider settings">⚙ API</button>
+            </div>
+
+            <!-- Right: AI action buttons -->
+            <div id="hud-right">
+                <button id="pregame-notes-btn" class="hud-btn cyan"   title="AI studies the SM64 guide">📚 Study</button>
+                <button id="view-memory-btn"   class="hud-btn purple" title="View AI memory & notes">🧠 Memory</button>
+                <button id="ai-buddy-btn"      class="hud-btn orange">🧡 Buddy</button>
+                <button id="ai-player-btn"     class="hud-btn green">🤖 AI Play</button>
+            </div>
+        </div>
+
+        <!-- AI status ticker -->
+        <div id="ai-status"></div>
+
+        <!-- Controls guide panel (toggleable, anchored bottom-left) -->
+        <div id="controls-panel"></div>
+
+        <!-- Buddy coach panel -->
+        <div id="buddy-panel">
+            <div id="buddy-text">👋 Hey! I'm watching your gameplay!</div>
+        </div>
+
+        <!-- Instruction input -->
         <div id="instruction-panel">
-            <input type="text" id="ai-instruction" placeholder="Tell AI what to do...">
+            <input type="text" id="ai-instruction" placeholder="Tell AI what to do… (e.g. go find a star)">
             <button id="send-instruction">Send</button>
         </div>
-        <button id="ai-buddy-btn">AI Buddy Coach</button>
-        <div id="buddy-panel">
-            <div id="buddy-text"></div>
-        </div>
-        <button id="view-memory-btn">View AI Memory</button>
-        <div id="memory-panel">
-            <h3>AI Memory & Notes</h3>
+
+        <!-- Memory modal -->
+        <div id="memory-panel" role="dialog" aria-modal="true" aria-label="AI Memory">
+            <h3>🧠 AI Memory &amp; Notes</h3>
             <div id="memory-content"></div>
             <button id="close-memory-btn">Close</button>
         </div>
-        <button id="pregame-notes-btn">AI Study Notes</button>
+        <div id="memory-backdrop" class="modal-backdrop"></div>
+
+        <!-- Provider / API settings modal -->
+        <div id="provider-modal" role="dialog" aria-modal="true" aria-label="API Provider Settings">
+            <div id="provider-panel-wrap">
+                <button id="close-provider-btn" class="modal-close-btn" aria-label="Close">✕</button>
+                <h3>⚙ API Provider Settings</h3>
+                <p class="provider-desc">Choose which AI service powers the player and buddy coach. Only vision-capable providers are supported.</p>
+                <div id="provider-panel"></div>
+            </div>
+        </div>
+        <div id="provider-backdrop" class="modal-backdrop"></div>
+
+        <!-- Tutorial modal -->
+        <div id="tutorial-modal" role="dialog" aria-modal="true" aria-label="Tutorial">
+            <div id="tutorial-panel">
+                <button id="tutorial-close-btn" aria-label="Close tutorial">✕</button>
+                <div id="tutorial-progress"></div>
+                <div id="tutorial-icon"></div>
+                <h2 id="tutorial-title"></h2>
+                <p id="tutorial-body"></p>
+                <div id="tutorial-nav">
+                    <button id="tutorial-prev-btn">← Back</button>
+                    <button id="tutorial-next-btn">Next →</button>
+                </div>
+                <div id="tutorial-audio-indicator" title="Narration playing">🔊</div>
+            </div>
+        </div>
+        <div id="tutorial-backdrop" class="modal-backdrop"></div>
+
+        <!-- Rapid-fire indicator (shown when AI is in rapid-fire mode) -->
+        <div id="rapid-fire-indicator" aria-live="assertive">
+            <span class="rf-bolt">⚡</span>
+            <span class="rf-label">RAPID FIRE</span>
+            <span class="rf-turns">0/30</span>
+            <button id="rf-exit-btn" title="Exit rapid fire mode">Exit</button>
+        </div>
+
+        <!-- Vision-required modal -->
+        <div id="vision-required-modal" role="dialog" aria-modal="true" aria-label="Vision Required">
+            <div id="vision-required-panel">
+                <div class="modal-icon">👁️</div>
+                <h3>Vision Required</h3>
+                <p>The selected provider or model does not support image input (vision). The AI player needs to <em>see</em> the game screen to make decisions.</p>
+                <p>You can either connect a vision-capable API provider, or run a small vision model directly in your browser (no account needed).</p>
+                <div class="vision-req-btns">
+                    <button id="vision-req-connect-btn" class="hud-btn green">🔑 Connect Vision Provider</button>
+                    <button id="vision-req-local-btn"   class="hud-btn cyan">💻 Run Local Model</button>
+                </div>
+                <button class="modal-close-btn" onclick="document.getElementById('vision-required-modal').classList.remove('open');document.getElementById('vision-required-backdrop').classList.remove('open');">Cancel</button>
+            </div>
+        </div>
+        <div id="vision-required-backdrop" class="modal-backdrop"></div>
+
+        <!-- Local model loader modal -->
+        <div id="local-model-modal" role="dialog" aria-modal="true" aria-label="Load Local Vision Model">
+            <div id="local-model-panel">
+                <div class="modal-icon">💻</div>
+                <h3>Local Vision Model</h3>
+                <p>This will download <strong>SmolVLM-256M-Instruct</strong> (~400 MB) and run it entirely in your browser using WebGPU or WASM. No API key needed. The model is cached after first download.</p>
+                <div id="local-model-bar-wrap"><div id="local-model-bar"></div></div>
+                <p id="local-model-status" class="local-model-status-text">Click Load to begin download</p>
+                <div class="vision-req-btns">
+                    <button id="local-model-load-btn" class="hud-btn green">⬇ Load Model</button>
+                    <button id="local-model-cancel-btn" class="hud-btn">Cancel</button>
+                </div>
+            </div>
+        </div>
+        <div id="local-model-backdrop" class="modal-backdrop"></div>
 
         <!-- Auth overlay -->
         <div id="auth-overlay">
             <div id="auth-panel">
                 <div id="auth-logo">🍄</div>
                 <h2>SM64 AI Player</h2>
-                <p id="auth-desc">This app uses Pollinations AI to watch and play Super Mario 64. Connect your Pollinations account to get started — your Pollen, your usage.</p>
+                <p id="auth-desc">Watch an AI play Super Mario 64 in real time, get coached by your AI buddy, and give live instructions — powered by Pollinations AI or your own API key.</p>
                 <button id="auth-btn">🔑 Connect Pollinations Account</button>
                 <div id="auth-status"></div>
-                <p id="auth-note">You'll be redirected to Pollinations to authorize. The key stays in your browser only.</p>
+                <p id="auth-note">You'll be redirected to Pollinations to authorize. Your key is stored only in this browser.</p>
+                <div id="auth-alt-row">
+                    <button id="auth-tutorial-btn">❓ How does this work?</button>
+                    <button id="auth-provider-btn">⚙ Use my own API key</button>
+                </div>
             </div>
         </div>
-    </div>
+
+    </div><!-- #app -->
 
     <script>
       window.Module = window.Module || {};
       Module.canvas = document.getElementById('canvas');
       Module.locateFile = (path) => (path.endsWith('.wasm') ? './sm64.wasm' : path);
-      Module.preRun = [];
-      Module.postRun = [];
+      Module.preRun  = Module.preRun  || [];
+      Module.postRun = Module.postRun || [];
+
+      Module.setStatus = function(text) {
+          const msg = document.getElementById('loading-msg');
+          const bar = document.getElementById('loading-bar');
+          if (!msg) return;
+          if (text) {
+              msg.textContent = text;
+              const m = text.match(/(\d+)\/(\d+)/);
+              if (m) bar.style.width = Math.round(parseInt(m[1]) / parseInt(m[2]) * 100) + '%';
+          } else {
+              const ls = document.getElementById('loading-screen');
+              if (ls) { ls.style.opacity = '0'; setTimeout(() => ls.remove(), 600); }
+          }
+      };
+      Module.print    = (t) => console.log(t);
+      Module.printErr = (t) => console.warn(t);
     </script>
     <script src="./sm64.js"></script>
     <script type="module" src="./main.js"></script>
+
+    <script>
+      // Wire up auth-panel "Use my own API key" button
+      document.getElementById('auth-provider-btn')?.addEventListener('click', () => {
+          document.getElementById('auth-overlay').classList.add('hidden');
+          // provider panel opened by main.js after it loads
+          setTimeout(() => document.getElementById('provider-btn')?.click(), 200);
+      });
+    </script>
 </body>
 </html>
