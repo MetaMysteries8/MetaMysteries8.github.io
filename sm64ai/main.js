@@ -441,71 +441,6 @@ const PROVIDERS = {
             };
         },
     },
-    groq: {
-        id:    'groq',
-        label: 'Groq (Free Tier)',
-        icon:  '⚡',
-        hasVision: true,
-        freeTier: true,
-        keyLabel: 'Groq API Key',
-        keyPlaceholder: 'gsk_…',
-        defaultModel: 'llama-3.2-11b-vision-preview',
-        visionModels: ['llama-3.2-11b-vision-preview','llama-3.2-90b-vision-preview'],
-        buildRequest(messages, model, key, opts) {
-            return {
-                url: 'https://api.groq.com/openai/v1/chat/completions',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
-                body: { model, messages, max_tokens: opts.max_tokens || 800,
-                    ...(opts.json ? { response_format: { type: 'json_object' } } : {}) },
-            };
-        },
-    },
-    openrouter: {
-        id:    'openrouter',
-        label: 'OpenRouter (Free Models)',
-        icon:  '🌐',
-        hasVision: true,
-        freeTier: true,
-        keyLabel: 'OpenRouter Key',
-        keyPlaceholder: 'sk-or-…',
-        defaultModel: 'meta-llama/llama-3.2-11b-vision-instruct:free',
-        visionModels: [
-            'meta-llama/llama-3.2-11b-vision-instruct:free',
-            'google/gemini-2.0-flash-exp:free',
-            'qwen/qwen2.5-vl-72b-instruct:free',
-        ],
-        buildRequest(messages, model, key, opts) {
-            return {
-                url: 'https://openrouter.ai/api/v1/chat/completions',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${key}`,
-                    'HTTP-Referer': location.origin,
-                    'X-Title': 'SM64 AI Player',
-                },
-                body: { model, messages, max_tokens: opts.max_tokens || 800,
-                    ...(opts.json ? { response_format: { type: 'json_object' } } : {}) },
-            };
-        },
-    },
-    fireworks: {
-        id:    'fireworks',
-        label: 'Fireworks AI',
-        icon:  '🎆',
-        hasVision: true,
-        keyLabel: 'Fireworks Key',
-        keyPlaceholder: 'fw_…',
-        defaultModel: 'accounts/fireworks/models/llama-v3p2-11b-vision-instruct',
-        visionModels: ['accounts/fireworks/models/llama-v3p2-11b-vision-instruct'],
-        buildRequest(messages, model, key, opts) {
-            return {
-                url: 'https://api.fireworks.ai/inference/v1/chat/completions',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
-                body: { model, messages, max_tokens: opts.max_tokens || 800,
-                    ...(opts.json ? { response_format: { type: 'json_object' } } : {}) },
-            };
-        },
-    },
     custom: {
         id:    'custom',
         label: 'Custom (OpenAI-compat)',
@@ -1224,13 +1159,12 @@ function populateModelDropdown() {
         return;
     }
 
-    // Named providers (openai, anthropic, gemini, groq, openrouter, fireworks) — show static vision model list
+    // Named providers (openai, anthropic, gemini) — show static vision model list
     if (activeProvider.id !== 'pollinations') {
         const models = activeProvider.visionModels || [];
         select.innerHTML = '';
         const grp = document.createElement('optgroup');
-        const freeBadge = activeProvider.freeTier ? ' 🆓' : '';
-        grp.label = `${activeProvider.icon} ${activeProvider.label} Vision Models${freeBadge}`;
+        grp.label = `${activeProvider.icon} ${activeProvider.label} Vision Models`;
         const saved = localStorage.getItem(MODEL_STORAGE_KEY) || activeProvider.defaultModel;
         for (const m of models) {
             const opt = document.createElement('option');
@@ -1241,7 +1175,7 @@ function populateModelDropdown() {
         }
         select.appendChild(grp);
         select.disabled = false;
-        if (statusSpan) statusSpan.textContent = `${models.length} models${freeBadge}`;
+        if (statusSpan) statusSpan.textContent = `${models.length} models`;
         return;
     }
 
