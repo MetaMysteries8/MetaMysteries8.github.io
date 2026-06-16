@@ -944,11 +944,22 @@ async function fetchVisionModels() {
     }
 }
 
+// Debounce to prevent rapid successive calls
+let _customModelsFetchPending = false;
+let _customModelsLastFetch = 0;
+
 // Fetch models from a custom OpenAI-compatible endpoint via /v1/models
 async function fetchCustomModels() {
     const select     = document.getElementById('model-select');
     const statusSpan = document.getElementById('model-status');
     if (!select) return;
+
+    // Debounce: skip if already fetching or fetched < 2s ago
+    if (_customModelsFetchPending) return;
+    const now = Date.now();
+    if (now - _customModelsLastFetch < 2000) return;
+    _customModelsFetchPending = true;
+    _customModelsLastFetch = now;
 
     // Read base URL from memory or localStorage, strip trailing slash
     const base = (window._customApiBase || localStorage.getItem('sm64_custom_base') || '').trim().replace(/\/+$/, '');
@@ -956,6 +967,7 @@ async function fetchCustomModels() {
         select.innerHTML = '<option value="">⚙️ Set Base URL in API Settings first</option>';
         select.disabled = true;
         if (statusSpan) statusSpan.textContent = 'no URL';
+        _customModelsFetchPending = false;
         return;
     }
 
@@ -1041,6 +1053,8 @@ async function fetchCustomModels() {
         select.innerHTML = `<option value="">⚠ ${err.message} — check ⚙️ API Settings</option>`;
         select.disabled = true;
         if (statusSpan) statusSpan.textContent = '⚠ error';
+    } finally {
+        _customModelsFetchPending = false;
     }
 }
 
@@ -1128,8 +1142,8 @@ function populateModelDropdown() {
 function getSelectedModel() {
     const sel = document.getElementById('model-select');
     const val = sel?.value;
-    if (val) return val;
-    return activeProvider.defaultModel || DEFAULT_MODEL;
+    if (val && val !== 'Loading models…' && val !== 'Loading…') return val;
+    return activeProvider?.defaultModel || DEFAULT_MODEL;
 }
 
 document.getElementById('model-select').addEventListener('change', (e) => {
@@ -1619,6 +1633,8 @@ async function loadTrainingData() {
 // 12. SCREEN CAPTURE (single persistent video element)
 // ────────────────────────────────────────────────────────────
 let _captureVideo = null;
+let _captureCanvas = null;
+let _captureCtx = null;
 let _lastFrameHash = null;
 let _identicalFrameCount = 0;
 
@@ -1640,21 +1656,33 @@ async function captureScreen(stream) {
         }
         const w = _captureVideo.videoWidth  || 640;
         const h = _captureVideo.videoHeight || 480;
-        const tmp = document.createElement('canvas');
-        tmp.width  = Math.min(w, 1280);
-        tmp.height = Math.round(h * (tmp.width / w));
-        tmp.getContext('2d').drawImage(_captureVideo, 0, 0, tmp.width, tmp.height);
-        return tmp.toDataURL('image/jpeg', 0.72);
+        const targetW = Math.min(w, 1280);
+        const targetH = Math.round(h * (targetW / w));
+
+        // Reuse canvas to avoid GC pressure
+        if (!_captureCanvas) {
+            _captureCanvas = document.createElement('canvas');
+            _captureCtx = _captureCanvas.getContext('2d', { alpha: false });
+        }
+        _captureCanvas.width  = targetW;
+        _captureCanvas.height = targetH;
+        _captureCtx.drawImage(_captureVideo, 0, 0, targetW, targetH);
+        return _captureCanvas.toDataURL('image/jpeg', 0.72);
     } catch (err) {
         console.error('Screen capture error:', err);
         return null;
     }
 }
 
-// Quick perceptual hash of a data URL (sample 16 pixels)
+// Quick perceptual hash of a data URL — sample every 1KB for robust change detection
 function quickHash(dataUrl) {
     if (!dataUrl) return '';
-    return dataUrl.slice(dataUrl.length - 200);
+    const step = Math.max(1, Math.floor(dataUrl.length / 16));
+    let hash = '';
+    for (let i = 0; i < 16; i++) {
+        hash += dataUrl.charCodeAt(i * step).toString(36);
+    }
+    return hash;
 }
 
 function isFrameIdentical(dataUrl) {
