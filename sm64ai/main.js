@@ -1041,6 +1041,8 @@ function buildAuthUrl() {
     const params = new URLSearchParams({
         redirect_uri: location.href.split('#')[0],
         client_id:    POLLINATIONS_APP_KEY,
+        // usage scope → lets us read balance + per-request cost for the energy bar
+        scope:        'usage',
     });
     return `${POLLINATIONS_AUTH_URL}?${params}`;
 }
@@ -2404,6 +2406,7 @@ Max 5 action groups. Valid names: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jum
 
         updateAIStatus(`💭 ${response.thought}`);
         _consecutiveErrors = 0;
+        recordUsage();   // sample pollen spend for the energy bar / usage log
 
         // Remember this turn so the next one can sense movement/direction.
         _prevScreenshot = screenshot;       // null in memory-only mode (fine)
@@ -2742,6 +2745,7 @@ Respond with ONLY valid JSON (no markdown fences):
         const advice = JSON.parse(clean);
         buddyText.textContent = `💬 ${advice.text}`;
         if (advice.speech) tts.speak(advice.speech);
+        recordUsage();   // log buddy-coach pollen spend too
 
     } catch (err) {
         buddyText.textContent = `❌ ${err.message}`;
@@ -2947,6 +2951,7 @@ function setStreamerMode(on) {
         if (_gameState) updateStreamerOverlay(_gameState);
         updateStreamerVision(_aiVisionFrame);
         updateStreamerControls();
+        if (typeof updateEnergyUI === 'function') updateEnergyUI();
     }
 }
 function toggleStreamerMode() { setStreamerMode(!_streamerMode); }
@@ -3026,24 +3031,176 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ────────────────────────────────────────────────────────────
-// 21c. POLLEN BALANCE CHIP (Pollinations)
+// 21c. POLLEN BALANCE + AI ENERGY / USAGE TRACKING (Pollinations)
 // ────────────────────────────────────────────────────────────
-async function refreshPollenBalance() {
-    const chip = document.getElementById('pollen-chip');
-    if (!chip) return;
-    if (activeProvider.id !== 'pollinations' || !pollinationsKey) { chip.style.display = 'none'; return; }
+//
+// Energy bar = how much "AI power" is left, based on pollen balance.
+//   full  = balance at page load (auto) OR a user-set maximum
+//   empty = 0 (auto) OR a user-set minimum
+// Per-prompt cost is derived from the drop in balance between checks, and the
+// last few costs are shown in a mini usage log on the streamer overlay.
+//
+let _pollenStart = null;   // balance when we first read it (auto "full")
+let _pollenLast  = null;   // balance at the previous usage check
+let _pollenNow   = null;   // most recent balance
+let _usageLog    = [];     // recent per-prompt costs (pollen)
+let _lastUsageCheck = 0;
+
+// User-configurable energy bounds
+let _energyCfg = (() => {
+    try { return JSON.parse(localStorage.getItem('sm64_energy_cfg')) || {}; } catch { return {}; }
+})();
+if (typeof _energyCfg.auto === 'undefined') _energyCfg.auto = true;
+if (typeof _energyCfg.min  === 'undefined') _energyCfg.min  = 0;
+if (typeof _energyCfg.max  === 'undefined') _energyCfg.max  = null;
+if (typeof _energyCfg.unit === 'undefined') _energyCfg.unit = 'usd'; // 'usd' | 'poll' | 'cu'
+
+function saveEnergyCfg() {
+    try { localStorage.setItem('sm64_energy_cfg', JSON.stringify(_energyCfg)); } catch {}
+}
+
+// Pollinations bills in pollen, and 1 pollen = $1.00 exactly, so we can show the
+// same number as dollars. Compute Units are a friendlier label: 0.01 pollen =
+// 1000 CU  →  1 pollen = 100,000 CU.
+function fmtAmount(pollen) {
+    const p = Math.max(0, pollen || 0);
+    const unit = _energyCfg.unit || 'usd';
+    if (unit === 'cu')   return `${Math.round(p * 100000).toLocaleString()} CU`;
+    if (unit === 'poll') return `${p.toFixed(p < 0.01 ? 5 : 4)} 🌸`;
+    return `$${p.toFixed(p < 0.01 ? 5 : 4)}`;   // usd (default)
+}
+
+async function fetchBalanceValue() {
+    if (activeProvider.id !== 'pollinations' || !pollinationsKey) return null;
     try {
         const res = await fetch(`${POLLINATIONS_API_BASE}/account/balance`, {
             headers: { 'Authorization': `Bearer ${pollinationsKey}` },
         });
-        if (!res.ok) { chip.style.display = 'none'; return; }
+        if (!res.ok) return null;
         const data = await res.json();
-        const bal = data.balance ?? data.pollen ?? data.budget;
-        if (bal === undefined || bal === null) { chip.style.display = 'none'; return; }
-        chip.textContent = `🌸 ${typeof bal === 'number' ? bal.toFixed(2) : bal} pollen`;
-        chip.style.display = '';
-    } catch { chip.style.display = 'none'; }
+        const bal  = data.balance ?? data.pollen ?? data.budget;
+        const num  = typeof bal === 'number' ? bal : (bal != null ? parseFloat(bal) : null);
+        return Number.isFinite(num) ? num : null;
+    } catch { return null; }
 }
+
+async function refreshPollenBalance() {
+    const chip = document.getElementById('pollen-chip');
+    const bal  = await fetchBalanceValue();
+    if (bal == null) { if (chip) chip.style.display = 'none'; return; }
+    if (_pollenStart == null) { _pollenStart = bal; _pollenLast = bal; }
+    _pollenNow = bal;
+    if (chip) {
+        chip.textContent = fmtAmount(bal);
+        chip.style.display = '';
+    }
+    updateEnergyUI();
+}
+
+// Sample balance after an AI call and log the cost (debounced)
+async function recordUsage(force = false) {
+    if (activeProvider.id !== 'pollinations' || !pollinationsKey) return;
+    const now = Date.now();
+    if (!force && now - _lastUsageCheck < 2000) return;
+    _lastUsageCheck = now;
+    const bal = await fetchBalanceValue();
+    if (bal == null) return;
+    if (_pollenStart == null) { _pollenStart = bal; _pollenLast = bal; }
+    if (_pollenLast != null) {
+        const cost = _pollenLast - bal;
+        if (cost > 1e-7) {
+            _usageLog.push(cost);
+            if (_usageLog.length > 50) _usageLog.shift();   // keep total accurate, display only last 4
+        }
+    }
+    _pollenLast = bal;
+    _pollenNow  = bal;
+    updateEnergyUI();
+}
+
+function energyBounds() {
+    const max = (_energyCfg.auto || _energyCfg.max == null)
+        ? (_pollenStart ?? _pollenNow ?? 0)
+        : _energyCfg.max;
+    const min = _energyCfg.min ?? 0;
+    return { max, min };
+}
+
+function updateEnergyUI() {
+    const wrap = document.getElementById('so-energy');
+    if (!wrap) return;
+    const isPoll = activeProvider.id === 'pollinations' && pollinationsKey;
+    wrap.style.display = (_streamerMode && isPoll && _pollenNow != null) ? 'block' : 'none';
+    if (!(_streamerMode && isPoll && _pollenNow != null)) return;
+
+    const { max, min } = energyBounds();
+    const span = Math.max(1e-9, max - min);
+    const pct  = Math.max(0, Math.min(100, ((_pollenNow - min) / span) * 100));
+
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+    set('so-energy-model', getSelectedModel());
+    set('so-energy-total', fmtAmount(Math.max(0, (_pollenStart ?? _pollenNow) - _pollenNow)));
+    set('so-energy-left',  fmtAmount(Math.max(0, _pollenNow - min)));
+
+    const bar = document.getElementById('so-energy-bar');
+    if (bar) {
+        bar.style.width = pct + '%';
+        // green → amber → red as it drains
+        bar.style.background = pct > 50 ? 'linear-gradient(90deg,#43a047,#7cb342)'
+                              : pct > 20 ? 'linear-gradient(90deg,#fb8c00,#fdd835)'
+                                         : 'linear-gradient(90deg,#e53935,#ff7043)';
+    }
+
+    const log = document.getElementById('so-energy-log');
+    if (log) {
+        const last4 = _usageLog.slice(-4);
+        log.innerHTML = last4.length
+            ? last4.map(c => `<div class="so-uselog-row">AI Used: ${fmtAmount(c)}</div>`).join('')
+            : '<div class="so-uselog-row dim">No AI usage yet…</div>';
+    }
+}
+
+// ── Energy config box (openable via HUD button, works outside streamer mode) ──
+function openEnergyConfig() {
+    const modal = document.getElementById('energy-modal');
+    const back  = document.getElementById('energy-backdrop');
+    document.getElementById('energy-auto').checked = !!_energyCfg.auto;
+    document.getElementById('energy-max').value    = _energyCfg.max ?? (_pollenStart ?? '');
+    document.getElementById('energy-min').value    = _energyCfg.min ?? 0;
+    document.getElementById('energy-max').disabled = !!_energyCfg.auto;
+    const unitSel = document.getElementById('energy-unit');
+    if (unitSel) unitSel.value = _energyCfg.unit || 'usd';
+    modal?.classList.add('open');
+    back?.classList.add('open');
+}
+function closeEnergyConfig() {
+    document.getElementById('energy-modal')?.classList.remove('open');
+    document.getElementById('energy-backdrop')?.classList.remove('open');
+}
+document.getElementById('energy-config-btn')?.addEventListener('click', openEnergyConfig);
+document.getElementById('energy-backdrop')?.addEventListener('click', closeEnergyConfig);
+document.getElementById('energy-close-btn')?.addEventListener('click', closeEnergyConfig);
+document.getElementById('energy-auto')?.addEventListener('change', (e) => {
+    document.getElementById('energy-max').disabled = e.target.checked;
+});
+document.getElementById('energy-save-btn')?.addEventListener('click', () => {
+    _energyCfg.auto = document.getElementById('energy-auto').checked;
+    _energyCfg.min  = parseFloat(document.getElementById('energy-min').value) || 0;
+    const maxV      = parseFloat(document.getElementById('energy-max').value);
+    _energyCfg.max  = Number.isFinite(maxV) ? maxV : null;
+    _energyCfg.unit = document.getElementById('energy-unit')?.value || 'usd';
+    saveEnergyCfg();
+    refreshPollenBalance();   // re-render chip + energy in the new unit
+    updateEnergyUI();
+    closeEnergyConfig();
+});
+document.getElementById('energy-reset-btn')?.addEventListener('click', () => {
+    // Re-baseline "full" to the current balance
+    _pollenStart = _pollenNow;
+    _pollenLast  = _pollenNow;
+    _usageLog    = [];
+    updateEnergyUI();
+});
 
 // ────────────────────────────────────────────────────────────
 // 22. BOOT

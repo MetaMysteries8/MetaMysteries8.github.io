@@ -37,6 +37,7 @@
                 <button id="controls-toggle-btn" class="hud-icon-btn" title="Controls guide">🎮</button>
                 <button id="help-btn"            class="hud-icon-btn" title="Tutorial / Help">❓</button>
                 <button id="streamer-toggle-btn" class="hud-icon-btn" title="Streamer mode (Shift+S)">🎥</button>
+                <button id="energy-config-btn"   class="hud-icon-btn" title="AI energy bar settings">⚡</button>
                 <button id="disconnect-btn"      class="hud-icon-btn danger" title="Disconnect account" style="display:none">🔌</button>
             </div>
 
@@ -164,6 +165,40 @@
         </div>
         <div id="local-model-backdrop" class="modal-backdrop"></div>
 
+        <!-- Energy bar config -->
+        <div id="energy-modal" role="dialog" aria-modal="true" aria-label="AI Energy Settings">
+            <div id="energy-panel">
+                <button id="energy-close-btn" class="modal-close-btn" aria-label="Close">✕</button>
+                <h3>⚡ AI Energy Bar</h3>
+                <p class="provider-desc">The energy bar shows how much AI power (pollen) is left. Auto mode uses your balance at page load as "full". Set it manually if you've budgeted a fixed amount.</p>
+                <label class="energy-field">
+                    <span>Show amounts as</span>
+                    <select id="energy-unit">
+                        <option value="usd">💵 Dollars ($)</option>
+                        <option value="poll">🌸 Pollen</option>
+                        <option value="cu">⚙️ Compute Units</option>
+                    </select>
+                </label>
+                <label class="energy-field">
+                    <input type="checkbox" id="energy-auto">
+                    <span>Auto — use balance at page load as full</span>
+                </label>
+                <label class="energy-field">
+                    <span>Full (max pollen)</span>
+                    <input type="number" id="energy-max" step="0.01" min="0" placeholder="e.g. 10">
+                </label>
+                <label class="energy-field">
+                    <span>Empty (min pollen)</span>
+                    <input type="number" id="energy-min" step="0.01" min="0" value="0">
+                </label>
+                <div class="energy-btn-row">
+                    <button id="energy-reset-btn" class="hud-btn">↺ Re-baseline to now</button>
+                    <button id="energy-save-btn"  class="hud-btn green">✓ Save</button>
+                </div>
+            </div>
+        </div>
+        <div id="energy-backdrop" class="modal-backdrop"></div>
+
         <!-- Auth overlay -->
         <div id="auth-overlay">
             <div id="auth-panel">
@@ -203,6 +238,15 @@
                 <div class="so-vision-title">👁️ WHAT THE AI SEES</div>
                 <img id="so-vision-img" alt="AI vision frame">
                 <div id="so-vision-ph">Waiting for the AI to look…</div>
+            </div>
+
+            <!-- AI energy bar + live usage log -->
+            <div id="so-energy">
+                <div class="so-energy-head">Current Model: <span id="so-energy-model">—</span></div>
+                <div class="so-energy-bar-wrap"><div id="so-energy-bar"></div></div>
+                <div class="so-energy-row"><span>Total AI Usage</span><span id="so-energy-total">—</span></div>
+                <div id="so-energy-log"></div>
+                <div class="so-energy-row strong"><span>AI Usage Left</span><span id="so-energy-left">—</span></div>
             </div>
 
             <!-- AI controls (usable while the rest of the chrome is hidden) -->
