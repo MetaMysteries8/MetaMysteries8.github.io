@@ -242,7 +242,10 @@
 
             <!-- AI energy bar + live usage log -->
             <div id="so-energy">
-                <div class="so-energy-head">Current Model: <span id="so-energy-model">—</span></div>
+                <div class="so-energy-head">
+                    <span>Current Model: <span id="so-energy-model">—</span></span>
+                    <button id="so-energy-cfg-btn" title="Energy / unit settings">⚙</button>
+                </div>
                 <div class="so-energy-bar-wrap"><div id="so-energy-bar"></div></div>
                 <div class="so-energy-row"><span>Total AI Usage</span><span id="so-energy-total">—</span></div>
                 <div id="so-energy-log"></div>
@@ -257,6 +260,12 @@
                 <button id="so-memory-btn" class="so-ctrl purple" title="View AI memory & notes">🧠 Memory</button>
                 <button id="so-mute-btn"  class="so-ctrl" title="Mute game audio">🔊</button>
             </div>
+        </div>
+
+        <!-- Mini terminal: last AI call costs (streamer mode, opposite corner) -->
+        <div id="ai-terminal">
+            <div id="ai-terminal-head">▌ AI CALL LOG</div>
+            <div id="ai-terminal-log"></div>
         </div>
 
         <!-- Watermark — also the exit-streamer-mode button -->
