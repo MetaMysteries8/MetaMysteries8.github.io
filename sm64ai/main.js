@@ -3154,30 +3154,11 @@ function updateEnergyUI() {
 
     const log = document.getElementById('so-energy-log');
     if (log) {
-        const last4 = _usageLog.slice(-4);
-        log.innerHTML = last4.length
-            ? last4.map(c => `<div class="so-uselog-row">AI Used: ${fmtAmount(c)}</div>`).join('')
+        const last5 = _usageLog.slice(-5);   // never show more than the last 5 calls
+        log.innerHTML = last5.length
+            ? last5.map(c => `<div class="so-uselog-row">AI Used: ${fmtAmount(c)}</div>`).join('')
             : '<div class="so-uselog-row dim">No AI usage yet…</div>';
     }
-
-    updateAITerminal();
-}
-
-// Mini terminal log (top-right corner in streamer mode) — last 5 AI call costs
-function updateAITerminal() {
-    const term = document.getElementById('ai-terminal');
-    if (!term) return;
-    const isPoll = activeProvider.id === 'pollinations' && pollinationsKey;
-    const show   = _streamerMode && isPoll && _usageLog.length > 0;
-    term.style.display = show ? 'block' : 'none';
-    if (!show) return;
-    const body = document.getElementById('ai-terminal-log');
-    if (!body) return;
-    const last5 = _usageLog.slice(-5);
-    body.innerHTML = last5.map((c, i) => {
-        const n = _usageLog.length - last5.length + i + 1;
-        return `<div class="ai-term-row"><span class="ai-term-idx">#${n}</span> <span class="ai-term-cost">${fmtAmount(c)}</span></div>`;
-    }).join('');
 }
 
 // ── Energy config box (openable via HUD button, works outside streamer mode) ──

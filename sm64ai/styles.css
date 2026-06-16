@@ -992,35 +992,3 @@ body {
 
 /* Streamer toggle button stays reachable when not in streamer mode */
 #streamer-toggle-btn.active { background: rgba(142,36,170,0.30); color: #ce93d8; }
-
-/* ── Mini AI call-cost terminal (top-right, streamer mode) ── */
-#ai-terminal {
-    display: none;            /* shown via JS in streamer mode when usage exists */
-    position: fixed;
-    top: 12px; right: 12px;
-    z-index: 200;
-    width: 190px;
-    background: rgba(2,6,4,0.86);
-    border: 1px solid rgba(60,220,120,0.30);
-    border-radius: 8px;
-    box-shadow: 0 4px 24px rgba(0,0,0,0.6), 0 0 0 1px rgba(60,220,120,0.05) inset;
-    padding: 8px 10px;
-    font-family: "Consolas", "SF Mono", "Menlo", monospace;
-    backdrop-filter: blur(6px);
-    pointer-events: none;
-}
-#app.streamer-mode #ai-terminal { /* only relevant in streamer mode */ }
-#ai-terminal-head {
-    font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
-    color: #3cdc78;
-    margin-bottom: 6px;
-    text-shadow: 0 0 8px rgba(60,220,120,0.4);
-}
-.ai-term-row {
-    display: flex; justify-content: space-between;
-    font-size: 11px; padding: 1.5px 0;
-    color: rgba(120,255,170,0.85);
-    font-variant-numeric: tabular-nums;
-}
-.ai-term-idx  { color: rgba(120,255,170,0.45); }
-.ai-term-cost { color: #9dffc4; }
