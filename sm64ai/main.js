@@ -673,10 +673,15 @@ async function callChatWithTools(messages, opts = {}) {
             convo.push({ role: 'assistant', content: msg.content || '', tool_calls: calls });
             for (const call of calls) {
                 let result = 'No game state available yet.';
+                let summary = 'unavailable';
+                let args = {};
+                try { args = JSON.parse(call.function?.arguments || '{}'); } catch {}
                 if (call.function?.name === 'get_game_state') {
                     const st = readGameState();
                     result = st ? gameStateToText(st) : 'Game state not readable yet (still booting).';
+                    summary = st ? `${st.levelName} ⭐${st.stars} ❤${st.health}/8 @(${st.x},${st.y},${st.z})` : 'booting…';
                 }
+                logToolCall(call.function?.name || 'tool', args, summary);  // show as a bot slash-command
                 convo.push({ role: 'tool', tool_call_id: call.id, content: result });
             }
         }
@@ -2405,6 +2410,7 @@ Max 5 action groups. Valid names: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jum
         const response = JSON.parse(clean);
 
         updateAIStatus(`💭 ${response.thought}`);
+        logReasoning(response.thought, response.speech);   // feed the streamer thought-stream
         _consecutiveErrors = 0;
         recordUsage();   // sample pollen spend for the energy bar / usage log
 
@@ -2600,6 +2606,7 @@ async function toggleAIPlayer() {
         _prevScreenshot = null;
         _prevGameState  = null;
         _stuckCount     = 0;
+        clearChatlog();
         aiStream.getVideoTracks()[0].addEventListener('ended', stopAIPlayer);
 
         if (aiMode === 'auto') {
@@ -2952,8 +2959,9 @@ function setStreamerMode(on) {
         updateStreamerVision(_aiVisionFrame);
         updateStreamerControls();
     }
-    // Always refresh energy bar + terminal so they show/hide with the mode
+    // Always refresh energy bar + chatlog so they show/hide with the mode
     if (typeof updateEnergyUI === 'function') updateEnergyUI();
+    if (typeof renderChatlog  === 'function') renderChatlog();
 }
 function toggleStreamerMode() { setStreamerMode(!_streamerMode); }
 
@@ -3030,6 +3038,41 @@ document.addEventListener('keydown', (e) => {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
     if (e.shiftKey && e.code === 'KeyS') { e.preventDefault(); toggleStreamerMode(); }
 });
+
+// ── AI thought-stream chatlog ────────────────────────────────
+// Left side = the AI's reasoning + spoken output. Right side = its tool calls,
+// rendered like slash-commands fired at a Discord/Telegram bot.
+let _chatlogItems = [];
+function _esc(s) {
+    return String(s ?? '').replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+}
+function pushChatlog(html, cls) {
+    _chatlogItems.push({ html, cls });
+    while (_chatlogItems.length > 14) _chatlogItems.shift();
+    renderChatlog();
+}
+function renderChatlog() {
+    const el   = document.getElementById('ai-chatlog');
+    const body = document.getElementById('ai-chatlog-body');
+    if (!el || !body) return;
+    const show = _streamerMode && _chatlogItems.length > 0;
+    el.style.display = show ? 'flex' : 'none';
+    if (!show) return;
+    body.innerHTML = _chatlogItems.map(it => `<div class="cl-item ${it.cls}">${it.html}</div>`).join('');
+    body.scrollTop = body.scrollHeight;
+}
+function logReasoning(thought, speech) {
+    if (thought) pushChatlog(_esc(thought), 'cl-reason');
+    if (speech)  pushChatlog('🗣 ' + _esc(speech), 'cl-speech');
+}
+function logToolCall(name, args, result) {
+    const argStr = args && Object.keys(args).length
+        ? ' ' + Object.entries(args).map(([k, v]) => `${k}:${v}`).join(' ')
+        : '';
+    pushChatlog(`<span class="cl-cmd">/${_esc(name)}${_esc(argStr)}</span>`, 'cl-tool');
+    if (result) pushChatlog(`<span class="cl-cmd-res">↳ ${_esc(result)}</span>`, 'cl-tool');
+}
+function clearChatlog() { _chatlogItems = []; renderChatlog(); }
 
 // ────────────────────────────────────────────────────────────
 // 21c. POLLEN BALANCE + AI ENERGY / USAGE TRACKING (Pollinations)

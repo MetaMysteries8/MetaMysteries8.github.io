@@ -992,3 +992,70 @@ body {
 
 /* Streamer toggle button stays reachable when not in streamer mode */
 #streamer-toggle-btn.active { background: rgba(142,36,170,0.30); color: #ce93d8; }
+
+/* ── AI thought-stream chatlog (top-right, streamer mode) ──── */
+#ai-chatlog {
+    display: none;            /* set to flex via JS in streamer mode */
+    position: fixed;
+    top: 12px; right: 12px;
+    z-index: 200;
+    width: 300px;
+    max-height: calc(100vh - 24px);
+    flex-direction: column;
+    background: rgba(8,8,14,0.84);
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 10px;
+    backdrop-filter: blur(10px);
+    box-shadow: var(--shadow);
+    pointer-events: none;
+    overflow: hidden;
+}
+#ai-chatlog-head {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+    color: rgba(255,255,255,0.6);
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(255,255,255,0.10);
+}
+#ai-chatlog-body {
+    display: flex; flex-direction: column; gap: 5px;
+    padding: 8px;
+    overflow-y: auto;
+    max-height: 48vh;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,0.2) transparent;
+}
+#ai-chatlog-body::-webkit-scrollbar { width: 6px; }
+#ai-chatlog-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.18); border-radius: 99px; }
+
+.cl-item {
+    max-width: 84%;
+    font-size: 11.5px; line-height: 1.35;
+    padding: 5px 8px; border-radius: 9px;
+    word-break: break-word;
+}
+/* Reasoning + speech sit on the LEFT */
+.cl-reason {
+    align-self: flex-start;
+    background: rgba(255,255,255,0.07);
+    color: rgba(255,255,255,0.82);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-bottom-left-radius: 2px;
+}
+.cl-speech {
+    align-self: flex-start;
+    background: rgba(0,172,193,0.16);
+    color: #b3ecf5;
+    border: 1px solid rgba(0,172,193,0.28);
+    border-bottom-left-radius: 2px;
+}
+/* Tool calls sit on the RIGHT, styled like a bot slash-command */
+.cl-tool {
+    align-self: flex-end;
+    background: rgba(88,101,242,0.16);   /* discord blurple */
+    border: 1px solid rgba(88,101,242,0.35);
+    border-bottom-right-radius: 2px;
+    font-family: "Consolas", "Menlo", monospace;
+    text-align: left;
+}
+.cl-cmd     { color: #aab2ff; font-weight: 600; }
+.cl-cmd-res { color: rgba(255,255,255,0.5); font-size: 10.5px; }
