@@ -503,7 +503,7 @@ async function callChatAPI(messages, opts = {}) {
     }
 
     // Vision-bridge mode: provider has no vision, but SmolVLM is loaded
-    // SmolVLM captions the screenshot; that text is sent to the cloud LLM
+    // Use the cached background caption (updated every 2.5s) instead of blocking
     if (!providerHasVision() && _localVLMState === 'ready' && !opts._bridgeCaption) {
         // Extract image from messages
         const userMsg = messages.find(m => m.role === 'user');
@@ -516,9 +516,18 @@ async function callChatAPI(messages, opts = {}) {
             }
         }
         if (imageUrl) {
-            // Step 1: SmolVLM captions the screen (fast, short)
-            const captionPrompt = 'Describe this Super Mario 64 screenshot in 1-2 sentences. Include: what Mario is doing, where he is, any enemies or obstacles nearby, and the current HUD values (stars, coins, health) if visible.';
-            const caption = await callLocalVision(imageUrl, captionPrompt);
+            // Use cached bridge caption if available, otherwise fallback to live
+            let caption = _bridgeCaption;
+            if (!caption) {
+                // First call or cache missed — do one live caption (still slow, but only once)
+                const prompt = buildBridgePrompt();
+                const base64 = imageUrl.replace(/^data:image\/(png|jpeg);base64,/, '');
+                const mime = imageUrl.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png';
+                const dataUrl = `data:${mime};base64,${base64}`;
+                caption = await callLocalVision(dataUrl, prompt, { maxTokens: 60, downscale: 384 });
+                _bridgeCaption = caption;
+                _bridgeCaptionHash = quickHash(imageUrl);
+            }
 
             // Step 2: Replace image with caption text in messages for cloud LLM
             const bridgedMessages = messages.map(m => {
@@ -677,6 +686,22 @@ async function initLocalVLM(onProgress) {
 
         _localVLMState = 'ready';
         onProgress?.('Local vision model ready! ✅', 100);
+
+        // Warmup: do a dummy inference so the first real caption isn't laggy
+        try {
+            const { RawImage } = window.__transformers__;
+            const warmImg = new RawImage(new Uint8ClampedArray(224 * 224 * 4), 224, 224);
+            const warmMsgs = [{ role: 'user', content: [{ type: 'image' }, { type: 'text', text: 'hi' }] }];
+            const warmPrompt = _localVLMProcessor.apply_chat_template(warmMsgs, { add_generation_prompt: true });
+            const warmInputs = await _localVLMProcessor(warmPrompt, [warmImg], { do_image_splitting: false });
+            await _localVLMModel.generate({ ...warmInputs, max_new_tokens: 1 });
+        } catch (warmErr) {
+            console.warn('[SmolVLM] Warmup failed (non-critical):', warmErr.message);
+        }
+
+        // Start background captioning loop for bridge mode
+        startBridgeCaptionLoop();
+
         return true;
     } catch (err) {
         console.error('Local VLM init error:', err);
@@ -687,14 +712,62 @@ async function initLocalVLM(onProgress) {
     }
 }
 
-async function callLocalVision(screenshotDataUrl, textPrompt) {
+// ── Background bridge captioning ─────────────────────────────
+let _bridgeCaption = null;
+let _bridgeCaptionHash = null;
+let _bridgeCaptionLoopId = null;
+
+function startBridgeCaptionLoop() {
+    if (_bridgeCaptionLoopId) return;
+    _bridgeCaptionLoopId = setInterval(async () => {
+        if (!aiPlayerActive && !buddyActive) return;
+        if (!aiStream && !buddyStream) return;
+        try {
+            const stream = aiStream || buddyStream;
+            const screenshot = await captureScreen(stream);
+            if (!screenshot) return;
+            const hash = quickHash(screenshot);
+            if (hash === _bridgeCaptionHash) return; // unchanged
+            _bridgeCaptionHash = hash;
+            const prompt = buildBridgePrompt();
+            const base64 = screenshot.replace(/^data:image\/(png|jpeg);base64,/, '');
+            const mime = screenshot.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png';
+            const dataUrl = `data:${mime};base64,${base64}`;
+            _bridgeCaption = await callLocalVision(dataUrl, prompt, { maxTokens: 60, downscale: 384 });
+        } catch (err) {
+            // Silent fail — bridge is best-effort
+        }
+    }, 2500); // refresh every 2.5s
+}
+
+function stopBridgeCaptionLoop() {
+    if (_bridgeCaptionLoopId) { clearInterval(_bridgeCaptionLoopId); _bridgeCaptionLoopId = null; }
+    _bridgeCaption = null;
+    _bridgeCaptionHash = null;
+}
+
+function buildBridgePrompt() {
+    const state = _gameState;
+    const ctx = state
+        ? `Mario is at ${state.levelName}, pos(${state.x},${state.y},${state.z}), action:${state.actionName}, speed:${state.speed}, health:${state.health}/8, stars:${state.stars}, coins:${state.coins}`
+        : '';
+    return `Describe this SM64 screenshot in ONE sentence. ${ctx} Focus: Mario's action, nearby enemies/obstacles, and HUD.`;
+}
+
+async function callLocalVision(screenshotDataUrl, textPrompt, opts = {}) {
     if (_localVLMState !== 'ready' || !_localVLMProcessor || !_localVLMModel) {
         throw new Error('Local vision model not ready');
     }
     const { RawImage } = window.__transformers__;
 
     // Load the screenshot into a RawImage
-    const image = await RawImage.fromURL(screenshotDataUrl);
+    let image = await RawImage.fromURL(screenshotDataUrl);
+
+    // Downscale large screenshots for speed (SmolVLM expects ~224-384)
+    const targetSize = opts.downscale || 384;
+    if (image.width > targetSize || image.height > targetSize) {
+        image = await image.resize(targetSize, targetSize);
+    }
 
     // Build chat-style message for SmolVLM
     const messages = [
@@ -718,9 +791,10 @@ async function callLocalVision(screenshotDataUrl, textPrompt) {
     });
 
     // Generate
+    const maxTokens = opts.maxTokens || 120;
     const generatedIds = await _localVLMModel.generate({
         ...inputs,
-        max_new_tokens: 120,
+        max_new_tokens: maxTokens,
     });
 
     // Decode only the newly generated tokens (strip the input prefix)
@@ -2145,6 +2219,7 @@ function stopAIPlayer() {
     if (aiStream)      { aiStream.getTracks().forEach(t => t.stop()); aiStream = null; }
     if (aiInterval)    { clearInterval(aiInterval); aiInterval = null; }
     if (_captureVideo) { _captureVideo.srcObject = null; }
+    if (!buddyActive)  stopBridgeCaptionLoop();
     aiManualState    = 'idle';
     aiPlannedActions = null;
     aiBtn.textContent = '🤖 AI Play';
@@ -2264,6 +2339,7 @@ function stopBuddy() {
         buddyStream = null;
         if (_captureVideo) _captureVideo.srcObject = null;
     }
+    if (!aiPlayerActive) stopBridgeCaptionLoop();
 }
 
 buddyBtn.addEventListener('click', toggleBuddy);
