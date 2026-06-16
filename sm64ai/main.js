@@ -950,10 +950,9 @@ async function fetchCustomModels() {
     const statusSpan = document.getElementById('model-status');
     if (!select) return;
 
-    // Read base URL from memory or localStorage
-    const base = (window._customApiBase || localStorage.getItem('sm64_custom_base') || '').replace(/\/$/, '');
+    // Read base URL from memory or localStorage, strip trailing slash
+    const base = (window._customApiBase || localStorage.getItem('sm64_custom_base') || '').trim().replace(/\/+$/, '');
     if (!base) {
-        // No URL configured yet — show a prompt but don't spam errors
         select.innerHTML = '<option value="">⚙️ Set Base URL in API Settings first</option>';
         select.disabled = true;
         if (statusSpan) statusSpan.textContent = 'no URL';
@@ -964,16 +963,37 @@ async function fetchCustomModels() {
     select.disabled  = true;
     if (statusSpan) statusSpan.textContent = 'fetching…';
 
-    // Read key from memory, then localStorage fallback
-    const key = providerKeys['custom'] || localStorage.getItem('sm64_key_custom') || '';
+    // Sanitize key: strip all whitespace including invisible unicode
+    const rawKey = providerKeys['custom'] || localStorage.getItem('sm64_key_custom') || '';
+    const key = rawKey.replace(/[\s\u200B-\u200D\uFEFF]/g, '');
+
+    // Build headers — only add Authorization if we actually have a key
+    const headers = { 'Content-Type': 'application/json' };
+    if (key) headers['Authorization'] = `Bearer ${key}`;
+
+    const doFetch = (hdrs) => fetch(`${base}/v1/models`, { headers: hdrs });
+
     try {
-        const res = await fetch(`${base}/v1/models`, {
-            headers: {
-                'Content-Type': 'application/json',
-                ...(key ? { 'Authorization': `Bearer ${key}` } : {}),
-            },
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        let res = await doFetch(headers);
+
+        // If 401 and we sent a key, try once more without auth
+        // (some local servers like Ollama/LM Studio don't need auth)
+        if (res.status === 401 && key) {
+            const noAuthHeaders = { 'Content-Type': 'application/json' };
+            const res2 = await doFetch(noAuthHeaders);
+            if (res2.ok) {
+                res = res2;
+            } else {
+                // Both failed — show friendly error, don't throw to console
+                select.innerHTML = '<option value="">🔑 401 — check API key in ⚙️ API Settings</option>';
+                select.disabled = true;
+                if (statusSpan) statusSpan.textContent = '🔑 401';
+                return;
+            }
+        } else if (!res.ok) {
+            throw new Error(`HTTP ${res.status}`);
+        }
+
         const data = await res.json();
 
         // OpenAI /v1/models returns { data: [ { id, object, ... }, ... ] }
@@ -994,8 +1014,6 @@ async function fetchCustomModels() {
             return;
         }
 
-        // If vision toggle is OFF, show all models (user picks the right one)
-        // If vision toggle is ON, still show all — user confirmed they support vision
         const saved = localStorage.getItem(MODEL_STORAGE_KEY) || modelIds[0];
         const grp = document.createElement('optgroup');
         grp.label = PROVIDERS.custom.hasVision
@@ -1018,8 +1036,9 @@ async function fetchCustomModels() {
         PROVIDERS.custom.defaultModel = modelIds.includes(saved) ? saved : modelIds[0];
 
     } catch (err) {
-        console.error('[Custom] /v1/models fetch failed:', err);
-        select.innerHTML = `<option value="">⚠ ${err.message}</option>`;
+        // Only log non-auth errors to console
+        if (!err.message.includes('401')) console.error('[Custom] /v1/models fetch failed:', err);
+        select.innerHTML = `<option value="">⚠ ${err.message} — check ⚙️ API Settings</option>`;
         select.disabled = true;
         if (statusSpan) statusSpan.textContent = '⚠ error';
     }
@@ -1313,7 +1332,8 @@ function buildProviderPanel() {
     saveBtn.addEventListener('click', () => {
         const newId = sel.value;
         activeProvider = PROVIDERS[newId];
-        const newKey   = keyInput.value.trim();
+        // Strip all whitespace including invisible unicode from key
+        const newKey = keyInput.value.replace(/[\s\u200B-\u200D\uFEFF]/g, '');
         if (newKey && !activeProvider.oauthOnly) {
             providerKeys[newId] = newKey;
             try { localStorage.setItem(`sm64_key_${newId}`, newKey); } catch {}
@@ -1378,7 +1398,8 @@ function restoreProviderState() {
         if (savedProvider && PROVIDERS[savedProvider]) activeProvider = PROVIDERS[savedProvider];
         for (const id of Object.keys(PROVIDERS)) {
             const k = localStorage.getItem(`sm64_key_${id}`);
-            if (k) providerKeys[id] = k;
+            // Sanitize on restore too — strip invisible unicode/whitespace
+            if (k) providerKeys[id] = k.replace(/[\s\u200B-\u200D\uFEFF]/g, '');
         }
         // Restore custom provider settings
         const savedBase   = localStorage.getItem('sm64_custom_base');
