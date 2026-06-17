@@ -637,6 +637,14 @@ const AI_TOOLS = [
     _tool('reset_game', 'Last resort: restart to the intro (reloads, no progress saved). LOCKED until is_stuck or is_trapped confirms true.'),
 ];
 
+// Tools that can ONLY work when memory reading is enabled (they read/write
+// Mario's coordinates). Memory is OFF by default on this build, so we hide them
+// from the model rather than advertising tools that always return an error.
+const MEMORY_TOOLS = new Set(['get_game_state', 'save_waypoint', 'waypoint_distance', 'save_state', 'load_state']);
+function getActiveTools() {
+    return MEMORY_ENABLED ? AI_TOOLS : AI_TOOLS.filter(t => !MEMORY_TOOLS.has(t.function.name));
+}
+
 // Lightweight stores for the tools
 let _waypoints  = {};
 let _saveStates = {};
@@ -704,8 +712,10 @@ async function executeTool(name, args = {}) {
                 return 'Rotated the camera to survey the surroundings.';
             }
             case 'set_goal': {
-                userInstruction = String(args.goal || '').slice(0, 200);
-                return userInstruction ? `Goal set: ${userInstruction}` : 'No goal provided.';
+                const g = String(args.goal || '').slice(0, 200);
+                if (!g) return 'No goal provided.';
+                _aiGoal = g; _aiGoalAge = 0;   // feeds the persistent multi-turn plan
+                return `Goal set — I'll keep pursuing: ${g}`;
             }
             case 'study_guide': {
                 await runStudy({ silent: true });
@@ -834,7 +844,7 @@ async function callChatWithTools(messages, opts = {}) {
             const allowTools = rounds <= MAX_ROUNDS && toolCallBudget > 0;
             const msg = await callChatAPI(convo, {
                 ...opts, returnRaw: true,
-                ...(allowTools ? { tools: AI_TOOLS, tool_choice: 'auto' } : {}),
+                ...(allowTools ? { tools: getActiveTools(), tool_choice: 'auto' } : {}),
             });
             _modelToolSupport[model] = true; // it accepted the tools field
 
@@ -2181,10 +2191,93 @@ function _loadImage(src) {
     });
 }
 
+// Objective motion estimate between two frames (0 = identical … 1 = totally
+// different), from a downscaled grayscale pixel diff. This gives the AI a
+// truthful "did I actually move?" signal WITHOUT relying on the unreliable
+// memory reader — the key to making stuck-detection work on vision alone.
+let _diffCanvas = null, _diffCtx = null;
+async function _frameDiffScore(urlA, urlB) {
+    try {
+        const [a, b] = await Promise.all([_loadImage(urlA), _loadImage(urlB)]);
+        const w = 48, h = 36;
+        if (!_diffCanvas) {
+            _diffCanvas = document.createElement('canvas');
+            _diffCtx = _diffCanvas.getContext('2d', { willReadFrequently: true });
+        }
+        _diffCanvas.width = w; _diffCanvas.height = h;
+        _diffCtx.drawImage(a, 0, 0, w, h);
+        const da = _diffCtx.getImageData(0, 0, w, h).data;
+        _diffCtx.drawImage(b, 0, 0, w, h);
+        const db = _diffCtx.getImageData(0, 0, w, h).data;
+        let sum = 0;
+        for (let i = 0; i < da.length; i += 4) {
+            const ga = (da[i] + da[i + 1] + da[i + 2]) / 3;
+            const gb = (db[i] + db[i + 1] + db[i + 2]) / 3;
+            sum += Math.abs(ga - gb);
+        }
+        const meanDiff = sum / (da.length / 4);   // avg gray-level change (0..255)
+        return Math.min(1, meanDiff / 64);         // ~25% gray shift ⇒ "lots changed"
+    } catch { return null; }
+}
+
 // Stitch the previous and current frame into ONE side-by-side image with a bold
 // labelled divider, so the model gets temporal context in a single image and
 // can't confuse the two frames. Returns a JPEG data URL.
 let _composeCanvas = null, _composeCtx = null;
+// Draw a faint 3×3 navigation grid + camera-relative compass over a frame.
+// Vision models localize poorly ("is the door left or ahead?"); explicit anchors
+// let the AI say "target is in the TOP-RIGHT cell → turn right, then forward".
+function _drawNavGrid(ctx, x, y, w, h) {
+    ctx.save();
+    // Grid lines
+    ctx.strokeStyle = 'rgba(120,220,255,0.30)';
+    ctx.lineWidth = 1;
+    for (let i = 1; i < 3; i++) {
+        const gx = x + (w * i) / 3, gy = y + (h * i) / 3;
+        ctx.beginPath(); ctx.moveTo(gx, y); ctx.lineTo(gx, y + h); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(x, gy); ctx.lineTo(x + w, gy); ctx.stroke();
+    }
+    // Cell labels (so the model can name where the target is)
+    const cells = [['TL', 'T', 'TR'], ['L', 'C', 'R'], ['BL', 'B', 'BR']];
+    ctx.font = `bold ${Math.max(10, Math.round(h / 30))}px sans-serif`;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillStyle = 'rgba(120,220,255,0.55)';
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) {
+        ctx.fillText(cells[r][c], x + (w * c) / 3 + 4, y + (h * r) / 3 + 3);
+    }
+    // Camera-relative compass: which arrow key moves Mario which way on screen
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = `bold ${Math.max(11, Math.round(h / 26))}px sans-serif`;
+    const tag = (txt, cx, cy) => {
+        const pad = 4, tw = ctx.measureText(txt).width;
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(cx - tw / 2 - pad, cy - 10, tw + pad * 2, 20);
+        ctx.fillStyle = 'rgba(255,235,120,0.95)';
+        ctx.fillText(txt, cx, cy);
+    };
+    tag('▲ ArrowUp (forward)', x + w / 2, y + 14);
+    tag('▼ Down (back)',       x + w / 2, y + h - 14);
+    tag('◀ Left',              x + 60,    y + h / 2);
+    tag('Right ▶',             x + w - 60, y + h / 2);
+    ctx.restore();
+}
+
+// Annotate a single current frame with the nav grid (used when there is no
+// previous frame to build a comparison from).
+async function annotateCurrentFrame(curUrl) {
+    const img = await _loadImage(curUrl);
+    const w = img.width || 640, h = img.height || 480;
+    if (!_composeCanvas) {
+        _composeCanvas = document.createElement('canvas');
+        _composeCtx    = _composeCanvas.getContext('2d', { alpha: false });
+    }
+    _composeCanvas.width = w; _composeCanvas.height = h;
+    const ctx = _composeCtx;
+    ctx.drawImage(img, 0, 0, w, h);
+    _drawNavGrid(ctx, 0, 0, w, h);
+    return _composeCanvas.toDataURL('image/jpeg', 0.74);
+}
+
 async function composeComparisonImage(prevUrl, curUrl) {
     const [imgA, imgB] = await Promise.all([_loadImage(prevUrl), _loadImage(curUrl)]);
     const h    = Math.max(imgA.height, imgB.height) || 480;
@@ -2211,8 +2304,9 @@ async function composeComparisonImage(prevUrl, curUrl) {
     ctx.fillStyle = 'rgba(0,0,0,0.62)';
     ctx.fillRect(0, labelH, wA, h);
 
-    // CURRENT frame (right) — full brightness, bright green border
+    // CURRENT frame (right) — full brightness, nav grid, bright green border
     ctx.drawImage(imgB, wA + div, labelH, wB, h);
+    _drawNavGrid(ctx, wA + div, labelH, wB, h);
     ctx.strokeStyle = '#39e660';
     ctx.lineWidth = 6;
     ctx.strokeRect(wA + div + 3, labelH + 3, wB - 6, h - 6);
@@ -2284,6 +2378,7 @@ async function composeFrameStrip(urls) {
             ctx.fillText('PREVIOUS', 0, 0);
             ctx.restore();
         } else {
+            _drawNavGrid(ctx, x, labelH, widths[i], h);
             ctx.strokeStyle = '#39e660'; ctx.lineWidth = 6;
             ctx.strokeRect(x + 3, labelH + 3, widths[i] - 6, h - 6);
         }
@@ -2393,6 +2488,8 @@ let _isThinking      = false;   // prevent concurrent calls
 let _prevScreenshot  = null;    // data URL from the previous think
 let _prevGameState   = null;    // RAM state from the previous think
 let _stuckCount      = 0;       // consecutive near-zero-movement decisions
+let _aiGoal          = '';      // persistent multi-turn plan (navigation continuity)
+let _aiGoalAge       = 0;       // turns the current goal has been pursued
 
 // Rapid-fire mode state
 let _rapidFireActive = false;
@@ -2646,6 +2743,18 @@ async function aiThink() {
             // Huge instantaneous jumps usually mean a warp, painting entry, OR an
             // attract-mode DEMO cutting between scenes (a menu is playing demos).
             if (dist > 4000) motionCtx += `\n📍 Mario's position jumped ${dist} units suddenly — you likely warped, entered a painting, OR this is a title-screen DEMO cutting scenes. Re-check the SCREEN type before acting.`;
+        } else if (!memoryOnly && _prevScreenshot && screenshot && _prevScreenshot !== screenshot) {
+            // No reliable memory — derive an OBJECTIVE motion signal from the pixels
+            // so stuck-detection and "did my move work?" still function on vision alone.
+            const vm = await _frameDiffScore(_prevScreenshot, screenshot);
+            if (vm != null) {
+                const pct = Math.round(vm * 100);
+                if (vm < 0.05) _stuckCount++; else _stuckCount = 0;
+                motionCtx = `\n\nVISUAL CHANGE since your last action: ${pct}% (objective screen-pixel difference). Under ~8% means you BARELY MOVED — you probably faced a wall or pressed the wrong key, so change direction. A large value means the view changed a lot.`;
+                if (_stuckCount >= 2) {
+                    motionCtx += `\n⚠ STUCK — the screen has barely changed for ${_stuckCount} turns, so your last move is NOT working. Do something DIFFERENT: turn to face a new direction (Left/Right), back up, jump over the obstacle, or pick another path. Do NOT repeat the previous action.`;
+                }
+            }
         }
 
         const memOn = gameState != null;   // false when memory reading is disabled
@@ -2672,6 +2781,12 @@ async function aiThink() {
 2) ANTI-STUCK TOOLS — if you genuinely can't tell whether you're moving or you look stuck/softlocked, call is_stuck / is_trapped before doing anything drastic.`);
 
         const movementCtx = '\n\nNOTE: The player is idle (no input detected).';
+        const planCtx = _aiGoal
+            ? `\n\nYOUR CURRENT PLAN (you set this ${_aiGoalAge} turn(s) ago — KEEP pursuing it unless the screen clearly shows it's done, impossible, or wrong): ${_aiGoal}`
+            : '';
+        const lastActCtx = _lastActionSummary
+            ? `\n\nYOUR LAST ACTION was: ${_lastActionSummary}. Use the movement/visual-change feedback below to judge if it worked — if it barely moved you, do something DIFFERENT this turn.`
+            : '';
         const memoryCtx   = aiMemory.length > 0
             ? `\n\nPAST MISTAKES TO AVOID:\n${aiMemory.slice(-5).map((m, i) => `${i + 1}. ${m}`).join('\n')}`
             : '';
@@ -2724,9 +2839,18 @@ NAVIGATION:
 - The route is rarely a straight line — expect to move diagonally, sideways, and around obstacles.
 - If you barely moved last turn you are probably facing a wall or the wrong way — TURN (Left/Right) or rotate the camera; do NOT keep mashing forward.
 
+UNDERSTAND BEFORE YOU ACT (do this every turn, in your head, then fill the JSON):
+1. SCENE: what screen is this? (title / file_select / demo / dialog / gameplay)
+2. LOCATE MARIO: where is he in the frame, and which way is he facing?
+3. LOCATE TARGET: what is the next thing to reach (door, bridge, painting, edge, star)? Name the GRID CELL it's in (TL/T/TR/L/C/R/BL/B/BR) using the compass overlay.
+4. TURN MATH: if the target is in a LEFT cell, you must turn Left first; RIGHT cell → turn Right; T/C → it's roughly ahead, go forward. Never hold forward toward a target that is off to the side without turning first.
+5. DID MY LAST MOVE WORK? compare to the PREVIOUS (darkened) frame. If nothing changed, you faced a wall or pressed the wrong key — change direction, do not repeat.
+Commit to a PLAN (your "goal") that spans several turns instead of re-deciding from scratch every frame. Only abandon it when the screen proves it's wrong.
+
 CHAINING ACTIONS:
 - "actions" is a SEQUENCE of groups done one after another. Keys INSIDE one group happen SIMULTANEOUSLY (e.g. ["ArrowUp","jump"] = hold forward while jumping).
 - Give each group a "hold_ms" to set its duration. Movement = long (800–2500ms); a jump or dialog-skip = short (150–350ms).
+- A good navigation turn is often: TURN to face the target (short hold), THEN hold forward toward it (long hold) — e.g. [{"keys":["ArrowLeft"],"hold_ms":400},{"keys":["ArrowUp"],"hold_ms":1800}].
 
 RULES:
 - ⛔ Never press start during gameplay (it pauses).
@@ -2735,12 +2859,15 @@ RULES:
 - ${memOn
     ? 'You may use tools (get_game_state, set_game_speed for tricky jumps, save_move/play_move for reusable sequences) when helpful, but don\'t call tools every turn.'
     : 'There is no reliable game memory — judge everything from the image. You may use set_game_speed, is_stuck/is_trapped, or save_move/play_move when helpful, but don\'t call tools every turn.'}
-${movementCtx}${memStateCtx}${motionCtx}${memoryCtx}${notesCtx}${instrCtx}${trainingCtx}
+${movementCtx}${planCtx}${lastActCtx}${memStateCtx}${motionCtx}${memoryCtx}${notesCtx}${instrCtx}${trainingCtx}
 
 Respond with ONLY valid JSON (no markdown fences):
 {
-  "actions": [ {"keys":["ArrowUp"], "hold_ms": 1600}, {"keys":["ArrowLeft"], "hold_ms": 450}, {"keys":["ArrowUp","jump"], "hold_ms": 300} ],
-  "thought": "where is my target, which way must I turn, how long to hold forward",
+  "scene": "gameplay | title | file_select | demo | dialog",
+  "target": "what I'm heading to + its grid cell, e.g. 'castle doors in TR cell'",
+  "goal": "my multi-turn plan, e.g. 'cross the bridge and enter the castle doors'",
+  "actions": [ {"keys":["ArrowLeft"], "hold_ms": 400}, {"keys":["ArrowUp"], "hold_ms": 1800}, {"keys":["ArrowUp","jump"], "hold_ms": 300} ],
+  "thought": "scene, where Mario is, target cell, which way I must turn, did last move work",
   "speech": "short streamer commentary (max 15 words) — omit if rapid_fire is true",
   "mistake": "error noticed or null",
   "notes": ["optional NEW insight worth remembering — omit or [] if none"],
@@ -2770,7 +2897,10 @@ Valid keys: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jump, start, crouch, acti
                     promptText = `This image shows the last ${frames.length} frames left→right (oldest→newest; the rightmost labelled NOW is the CURRENT frame). Judge Mario's motion across them, then act on the CURRENT (rightmost) frame.`;
                 } else if (_prevScreenshot) {
                     visionImg = await composeComparisonImage(_prevScreenshot, screenshot);
-                    promptText = 'This image shows TWO frames side by side: the LEFT half is the PREVIOUS TURN (before my last action) and the RIGHT half is the CURRENT TURN (now), split by a red divider. Compare them to judge whether I moved the right way, then decide the next action.';
+                    promptText = 'This image shows TWO frames side by side: the LEFT half is the PREVIOUS TURN (before my last action) and the RIGHT half is the CURRENT TURN (now), split by a red divider. The CURRENT frame has a faint 3×3 grid (cells TL/T/TR/L/C/R/BL/B/BR) and a camera-relative compass. First say which cell your target is in and which way to turn, then compare the two frames to judge whether I moved the right way, then decide the next action.';
+                } else {
+                    visionImg = await annotateCurrentFrame(screenshot);
+                    promptText = 'This is the CURRENT frame with a faint 3×3 navigation grid (cells TL/T/TR/L/C/R/BL/B/BR) and a camera-relative compass showing which arrow key moves Mario which way. First name the grid cell your target is in and which way to turn to face it, then decide the action.';
                 }
             } catch (e) {
                 visionImg = screenshot;   // compose failed — fall back to single current frame
@@ -2793,7 +2923,20 @@ Valid keys: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jump, start, crouch, acti
         const clean    = rawContent.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
         const response = JSON.parse(clean);
 
-        updateAIStatus(`💭 ${response.thought}`);
+        // Persist the multi-turn plan for navigation continuity. Keep pursuing the
+        // same goal across turns; only reset the age-counter when it genuinely changes.
+        const newGoal = (response.goal || '').trim();
+        if (newGoal) {
+            if (newGoal !== _aiGoal) { _aiGoal = newGoal; _aiGoalAge = 0; }
+            else _aiGoalAge++;
+        } else if (_aiGoal) {
+            _aiGoalAge++;   // model didn't restate it — assume it's still in effect
+        }
+
+        const thoughtLine = response.target
+            ? `🎯 ${response.target} — ${response.thought || ''}`
+            : `💭 ${response.thought}`;
+        updateAIStatus(thoughtLine);
         logReasoning(response.thought, response.speech);   // feed the streamer thought-stream
         _consecutiveErrors = 0;
         recordUsage();   // sample pollen spend for the energy bar / usage log
@@ -2875,7 +3018,19 @@ function _normalizeGroup(g, fast) {
     return { keys, ms: ms / gameSpeed };
 }
 
-let _lastActions = null;   // last sequence executed (for save_move/play_move)
+let _lastActions = null;        // last sequence executed (for save_move/play_move)
+let _lastActionSummary = '';    // human-readable form of it, fed back to the model
+
+// Render an action sequence as "ArrowLeft 400ms → ArrowUp 1800ms" for the prompt
+function _summarizeActions(groups) {
+    return (groups || []).map(g => {
+        let keys = Array.isArray(g) ? g : (g && (g.keys || g.actions)) || (typeof g === 'string' ? [g] : []);
+        keys = (Array.isArray(keys) ? keys : [keys]).filter(k => keyMap[k]);
+        if (!keys.length) return null;
+        const ms = (g && typeof g === 'object' && !Array.isArray(g)) ? (g.hold_ms ?? g.ms ?? g.duration) : null;
+        return ms ? `${keys.join('+')} ${ms}ms` : keys.join('+');
+    }).filter(Boolean).join(' → ');
+}
 
 async function aiExecute(response) {
     if (!response?.actions?.length) return;
@@ -2884,6 +3039,7 @@ async function aiExecute(response) {
     // re-think immediately so the AI can correct itself mid-sequence.
     if (_turboMode && _turboCfg.multi) groups = groups.slice(0, 1);
     _lastActions = response.actions;
+    _lastActionSummary = _summarizeActions(groups);
     updateAIStatus(`🎮 Executing ${groups.length} action group${groups.length > 1 ? 's' : ''}…`);
 
     const fast = _turboMode || _rapidFireActive;
@@ -3030,6 +3186,10 @@ async function toggleAIPlayer() {
         _prevScreenshot = null;
         _prevGameState  = null;
         _stuckCount     = 0;
+        _aiGoal         = '';
+        _aiGoalAge      = 0;
+        _lastActions    = null;
+        _lastActionSummary = '';
         _frameHistory   = [];
         _escapeArmed      = false;
         _escapeExtraTurns = 0;
@@ -3113,6 +3273,10 @@ function stopAIPlayer() {
     // Free frame buffers so a long session doesn't pile up base64 strings
     _frameHistory = [];
     _prevScreenshot = null;
+    _aiGoal           = '';
+    _aiGoalAge        = 0;
+    _lastActions      = null;
+    _lastActionSummary = '';
     _escapeArmed      = false;
     _escapeExtraTurns = 0;
     aiManualState    = 'idle';
