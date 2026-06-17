@@ -2220,9 +2220,7 @@ async function _frameDiffScore(urlA, urlB) {
     } catch { return null; }
 }
 
-// Stitch the previous and current frame into ONE side-by-side image with a bold
-// labelled divider, so the model gets temporal context in a single image and
-// can't confuse the two frames. Returns a JPEG data URL.
+// Shared offscreen canvas for frame annotation (nav grid + compass overlay).
 let _composeCanvas = null, _composeCtx = null;
 // Draw a faint 3×3 navigation grid + camera-relative compass over a frame.
 // Vision models localize poorly ("is the door left or ahead?"); explicit anchors
@@ -2262,8 +2260,8 @@ function _drawNavGrid(ctx, x, y, w, h) {
     ctx.restore();
 }
 
-// Annotate a single current frame with the nav grid (used when there is no
-// previous frame to build a comparison from).
+// Annotate the current frame with the nav grid + compass. This is the ONLY image
+// the AI is shown each turn (single-frame perception).
 async function annotateCurrentFrame(curUrl) {
     const img = await _loadImage(curUrl);
     const w = img.width || 640, h = img.height || 480;
@@ -2278,119 +2276,9 @@ async function annotateCurrentFrame(curUrl) {
     return _composeCanvas.toDataURL('image/jpeg', 0.74);
 }
 
-async function composeComparisonImage(prevUrl, curUrl) {
-    const [imgA, imgB] = await Promise.all([_loadImage(prevUrl), _loadImage(curUrl)]);
-    const h    = Math.max(imgA.height, imgB.height) || 480;
-    const wA   = Math.round((imgA.width / (imgA.height || 1)) * h);
-    const wB   = Math.round((imgB.width / (imgB.height || 1)) * h);
-    const div  = 10;   // divider width
-    const labelH = 28;
-    const W = wA + div + wB;
-    const H = h + labelH;
-
-    if (!_composeCanvas) {
-        _composeCanvas = document.createElement('canvas');
-        _composeCtx    = _composeCanvas.getContext('2d', { alpha: false });
-    }
-    _composeCanvas.width  = W;
-    _composeCanvas.height = H;
-    const ctx = _composeCtx;
-
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, W, H);
-
-    // PREVIOUS frame (left) — drawn then HEAVILY darkened so it can't be mistaken for now
-    ctx.drawImage(imgA, 0, labelH, wA, h);
-    ctx.fillStyle = 'rgba(0,0,0,0.62)';
-    ctx.fillRect(0, labelH, wA, h);
-
-    // CURRENT frame (right) — full brightness, nav grid, bright green border
-    ctx.drawImage(imgB, wA + div, labelH, wB, h);
-    _drawNavGrid(ctx, wA + div, labelH, wB, h);
-    ctx.strokeStyle = '#39e660';
-    ctx.lineWidth = 6;
-    ctx.strokeRect(wA + div + 3, labelH + 3, wB - 6, h - 6);
-
-    // Red divider bar
-    ctx.fillStyle = '#ff3b30';
-    ctx.fillRect(wA, 0, div, H);
-
-    // Big diagonal watermark across the previous frame
-    ctx.save();
-    ctx.translate(wA / 2, labelH + h / 2);
-    ctx.rotate(-Math.PI / 12);
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.font = `bold ${Math.round(h / 12)}px sans-serif`;
-    ctx.fillStyle = 'rgba(255,82,82,0.9)';
-    ctx.fillText('PREVIOUS FRAME', 0, -h / 24);
-    ctx.font = `bold ${Math.round(h / 22)}px sans-serif`;
-    ctx.fillStyle = 'rgba(255,255,255,0.85)';
-    ctx.fillText('REFERENCE ONLY — DO NOT ACT ON THIS', 0, h / 18);
-    ctx.restore();
-
-    // Header labels
-    ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
-    ctx.font = 'bold 16px sans-serif';
-    ctx.fillStyle = '#ff8a80'; ctx.fillText('◀ PREVIOUS (reference)', wA / 2, labelH / 2);
-    ctx.fillStyle = '#39e660'; ctx.fillText('CURRENT — ACT ON THIS ▶', wA + div + wB / 2, labelH / 2);
-
-    return _composeCanvas.toDataURL('image/jpeg', 0.72);
-}
-
-// Stitch N frames (oldest→newest) into one labelled strip — used by turbo's
-// "consistent frame updates" so the model sees current + several previous frames.
-async function composeFrameStrip(urls) {
-    const imgs = await Promise.all(urls.map(_loadImage));
-    const n = imgs.length;
-    const h = Math.max(...imgs.map(i => i.height)) || 480;
-    const labelH = 24, div = 6;
-    const widths = imgs.map(i => Math.round((i.width / (i.height || 1)) * h));
-    const W = widths.reduce((a, b) => a + b, 0) + div * (n - 1);
-    const H = h + labelH;
-
-    if (!_composeCanvas) {
-        _composeCanvas = document.createElement('canvas');
-        _composeCtx    = _composeCanvas.getContext('2d', { alpha: false });
-    }
-    _composeCanvas.width = W;
-    _composeCanvas.height = H;
-    const ctx = _composeCtx;
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, W, H);
-    ctx.font = 'bold 15px sans-serif';
-    ctx.textBaseline = 'middle';
-    ctx.textAlign = 'center';
-
-    let x = 0;
-    for (let i = 0; i < n; i++) {
-        const isNow = i === n - 1;
-        ctx.drawImage(imgs[i], x, labelH, widths[i], h);
-        if (!isNow) {
-            // Darken older frames hard so the CURRENT one is unmistakable
-            ctx.fillStyle = 'rgba(0,0,0,0.6)';
-            ctx.fillRect(x, labelH, widths[i], h);
-            ctx.save();
-            ctx.translate(x + widths[i] / 2, labelH + h / 2);
-            ctx.rotate(-Math.PI / 12);
-            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-            ctx.font = `bold ${Math.round(h / 16)}px sans-serif`;
-            ctx.fillStyle = 'rgba(255,82,82,0.9)';
-            ctx.fillText('PREVIOUS', 0, 0);
-            ctx.restore();
-        } else {
-            _drawNavGrid(ctx, x, labelH, widths[i], h);
-            ctx.strokeStyle = '#39e660'; ctx.lineWidth = 6;
-            ctx.strokeRect(x + 3, labelH + 3, widths[i] - 6, h - 6);
-        }
-        if (i > 0) { ctx.fillStyle = '#ff3b30'; ctx.fillRect(x - div, 0, div, H); }
-        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillStyle = isNow ? '#39e660' : '#ff8a80';
-        ctx.font = 'bold 14px sans-serif';
-        ctx.fillText(isNow ? 'CURRENT — ACT ON THIS ▶' : `prev −${n - 1 - i} (ref)`, x + widths[i] / 2, labelH / 2);
-        x += widths[i] + div;
-    }
-    return _composeCanvas.toDataURL('image/jpeg', 0.68);
-}
+// (Removed: composeComparisonImage / composeFrameStrip — the previous-frame
+// comparison view was dropped in favour of single-frame perception. Motion is
+// now conveyed to the model as an objective VISUAL CHANGE % in text instead.)
 
 // ── Vision source: capture the game canvas directly (no screen-share popup) ──
 // 'canvas' = MediaStream straight off the game <canvas> (default, zero prompts).
@@ -2500,7 +2388,6 @@ let _rapidFireInterval = null;
 // Runs the think→act loop as fast as the model can answer. Burns pollen FAST.
 let _turboMode = (() => { try { return localStorage.getItem('sm64_turbo') === '1'; } catch { return false; } })();
 let _turboCfg  = (() => { try { return JSON.parse(localStorage.getItem('sm64_turbo_cfg')) || {}; } catch { return {}; } })();
-if (typeof _turboCfg.frames   === 'undefined') _turboCfg.frames   = false; // current + 3 previous frames
 if (typeof _turboCfg.multi    === 'undefined') _turboCfg.multi    = false; // 1 action/think, re-think constantly
 if (typeof _turboCfg.advanced === 'undefined') _turboCfg.advanced = false; // max overdrive (no skips/floors)
 if (typeof _turboCfg.live     === 'undefined') _turboCfg.live     = false; // constant frame updates (live view)
@@ -2844,17 +2731,17 @@ UNDERSTAND BEFORE YOU ACT (do this every turn, in your head, then fill the JSON)
 2. LOCATE MARIO: where is he in the frame, and which way is he facing?
 3. LOCATE TARGET: what is the next thing to reach (door, bridge, painting, edge, star)? Name the GRID CELL it's in (TL/T/TR/L/C/R/BL/B/BR) using the compass overlay.
 4. TURN MATH: if the target is in a LEFT cell, you must turn Left first; RIGHT cell → turn Right; T/C → it's roughly ahead, go forward. Never hold forward toward a target that is off to the side without turning first.
-5. DID MY LAST MOVE WORK? compare to the PREVIOUS (darkened) frame. If nothing changed, you faced a wall or pressed the wrong key — change direction, do not repeat.
+5. DID MY LAST MOVE WORK? check the VISUAL CHANGE % and movement feedback below. If it's low, you faced a wall or pressed the wrong key — change direction, do NOT repeat.
 Commit to a PLAN (your "goal") that spans several turns instead of re-deciding from scratch every frame. Only abandon it when the screen proves it's wrong.
 
 CHAINING ACTIONS:
 - "actions" is a SEQUENCE of groups done one after another. Keys INSIDE one group happen SIMULTANEOUSLY (e.g. ["ArrowUp","jump"] = hold forward while jumping).
-- Give each group a "hold_ms" to set its duration. Movement = long (800–2500ms); a jump or dialog-skip = short (150–350ms).
-- A good navigation turn is often: TURN to face the target (short hold), THEN hold forward toward it (long hold) — e.g. [{"keys":["ArrowLeft"],"hold_ms":400},{"keys":["ArrowUp"],"hold_ms":1800}].
+- Give each group a "hold_ms": FORWARD travel long (1200–2500ms); a TURN to re-aim short (250–500ms — a long turn just spins you in a circle); a jump or dialog-skip short (150–350ms).
+- A good navigation turn is almost always two groups: TURN briefly to face the target, THEN hold forward toward it — e.g. [{"keys":["ArrowLeft"],"hold_ms":350},{"keys":["ArrowUp"],"hold_ms":1800}].
 
 RULES:
 - ⛔ Never press start during gameplay (it pauses).
-- Act ONLY on the bright CURRENT frame. The DARKENED "PREVIOUS" frame(s) are reference to judge how you moved — never walk toward something only visible there.
+- You see ONE current frame each turn. Act on what is in THIS frame; judge whether you moved from the VISUAL CHANGE % and movement feedback (text), not from any remembered image.
 - Escape tools (de_water, load_state, reset_game) stay LOCKED until is_stuck/is_trapped returns true.
 - ${memOn
     ? 'You may use tools (get_game_state, set_game_speed for tricky jumps, save_move/play_move for reusable sequences) when helpful, but don\'t call tools every turn.'
@@ -2874,7 +2761,7 @@ Respond with ONLY valid JSON (no markdown fences):
   "rapid_fire": false
 }
 
-Each group is {"keys":[...simultaneous...], "hold_ms": N}; plain arrays like ["ArrowUp"] also work with a default hold. Movement hold_ms 800–2500; jumps/dialog 150–350. Max 5 groups.
+Each group is {"keys":[...simultaneous...], "hold_ms": N}; plain arrays like ["ArrowUp"] also work with a default hold. Hold guide: FORWARD travel 1200–2500ms (go far); a TURN to re-aim (Left/Right alone) 250–500ms (short, or you spin in circles); jumps/dialog 150–350ms. Max 5 groups.
 Valid keys: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jump, start, crouch, action, cameraLeft`;
 
         let userMessage;
@@ -2885,25 +2772,16 @@ Valid keys: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jump, start, crouch, acti
                 content: 'Based on the live game state, what should I do next? Call get_game_state first if you need exact numbers. Respond with ONLY the JSON.',
             };
         } else {
-            // Vision: stitch PREVIOUS + CURRENT into one labelled side-by-side image
-            // so the model can see whether its last move actually moved Mario (and
-            // which way) without confusing the two frames or paying for two images.
-            let visionImg = screenshot, promptText = 'What should I do?';
-            const multiFrames = _turboMode && _turboCfg.frames && _frameHistory.length >= 2;
+            // Single-frame perception: the AI acts on ONE current frame, annotated
+            // with a nav grid + compass. (The previous-frame comparison was removed —
+            // it confused the model into acting on the old frame; an objective motion
+            // % is fed in TEXT instead, which is clearer and cheaper.)
+            let visionImg = screenshot;
+            let promptText = 'This is the CURRENT live frame, overlaid with a faint 3×3 navigation grid (cells TL/T/TR · L/C/R · BL/B/BR) and a camera-relative compass marking which arrow key moves Mario which way on screen. First name the grid cell your target is in and which way you must turn to face it, then choose your actions.';
             try {
-                if (multiFrames) {
-                    const frames = _frameHistory.slice(-4);   // current + up to 3 previous
-                    visionImg = await composeFrameStrip(frames);
-                    promptText = `This image shows the last ${frames.length} frames left→right (oldest→newest; the rightmost labelled NOW is the CURRENT frame). Judge Mario's motion across them, then act on the CURRENT (rightmost) frame.`;
-                } else if (_prevScreenshot) {
-                    visionImg = await composeComparisonImage(_prevScreenshot, screenshot);
-                    promptText = 'This image shows TWO frames side by side: the LEFT half is the PREVIOUS TURN (before my last action) and the RIGHT half is the CURRENT TURN (now), split by a red divider. The CURRENT frame has a faint 3×3 grid (cells TL/T/TR/L/C/R/BL/B/BR) and a camera-relative compass. First say which cell your target is in and which way to turn, then compare the two frames to judge whether I moved the right way, then decide the next action.';
-                } else {
-                    visionImg = await annotateCurrentFrame(screenshot);
-                    promptText = 'This is the CURRENT frame with a faint 3×3 navigation grid (cells TL/T/TR/L/C/R/BL/B/BR) and a camera-relative compass showing which arrow key moves Mario which way. First name the grid cell your target is in and which way to turn to face it, then decide the action.';
-                }
+                visionImg = await annotateCurrentFrame(screenshot);
             } catch (e) {
-                visionImg = screenshot;   // compose failed — fall back to single current frame
+                visionImg = screenshot;   // annotate failed — use the raw current frame
             }
             setAIVisionFrame(visionImg);   // mirror exactly what the AI sees into streamer mode
             userMessage = {
@@ -3012,9 +2890,22 @@ function _normalizeGroup(g, fast) {
     else if (g && typeof g === 'object') { keys = g.keys || g.actions || []; ms = g.hold_ms ?? g.ms ?? g.duration ?? null; }
     else if (typeof g === 'string') keys = [g];
     keys = (Array.isArray(keys) ? keys : [keys]).filter(k => keyMap[k]);
-    const isMove = keys.some(k => MOVE_KEYS.has(k));
-    if (ms == null) ms = fast ? (isMove ? 500 : 160) : (isMove ? 1100 : 240); // sensible defaults
-    ms = Math.max(80, Math.min(fast ? 1800 : 4000, ms));
+    // Smarter movement defaults when the model omits hold_ms:
+    //  • FORWARD/back travel → long hold so Mario actually covers ground (the #1
+    //    reason the original travelled further than brief taps).
+    //  • TURN-ONLY (Left/Right, no Up/Down) → short tap so he re-aims without
+    //    spinning past the target.
+    //  • jumps / dialog / actions → brief press.
+    const hasForward = keys.includes('ArrowUp') || keys.includes('ArrowDown');
+    const isTurnOnly = !hasForward && (keys.includes('ArrowLeft') || keys.includes('ArrowRight'));
+    if (ms == null) {
+        if (hasForward)      ms = fast ? 750 : 1400;
+        else if (isTurnOnly) ms = fast ? 240 : 380;
+        else                 ms = fast ? 150 : 240;
+    }
+    // Clamp: turns get a tighter ceiling so the AI can't accidentally spin in circles.
+    const maxMs = isTurnOnly ? (fast ? 700 : 900) : (fast ? 1800 : 4000);
+    ms = Math.max(80, Math.min(maxMs, ms));
     return { keys, ms: ms / gameSpeed };
 }
 
@@ -3869,14 +3760,13 @@ document.getElementById('energy-reset-btn')?.addEventListener('click', () => {
 // ────────────────────────────────────────────────────────────
 function _syncTurboSubs() {
     const on = document.getElementById('turbo-master')?.checked;
-    ['turbo-frames', 'turbo-multi', 'turbo-advanced', 'turbo-live'].forEach(id => {
+    ['turbo-multi', 'turbo-advanced', 'turbo-live'].forEach(id => {
         const e = document.getElementById(id); if (e) e.disabled = !on;
     });
 }
 function openTurboModal() {
     const m = id => document.getElementById(id);
     if (m('turbo-master'))   m('turbo-master').checked   = _turboMode;
-    if (m('turbo-frames'))   m('turbo-frames').checked   = !!_turboCfg.frames;
     if (m('turbo-multi'))    m('turbo-multi').checked     = !!_turboCfg.multi;
     if (m('turbo-advanced')) m('turbo-advanced').checked  = !!_turboCfg.advanced;
     if (m('turbo-live'))     m('turbo-live').checked      = !!_turboCfg.live;
@@ -3893,7 +3783,6 @@ document.getElementById('turbo-close-btn')?.addEventListener('click', closeTurbo
 document.getElementById('turbo-backdrop')?.addEventListener('click', closeTurboModal);
 document.getElementById('turbo-master')?.addEventListener('change', _syncTurboSubs);
 document.getElementById('turbo-save-btn')?.addEventListener('click', () => {
-    _turboCfg.frames   = document.getElementById('turbo-frames').checked;
     _turboCfg.multi    = document.getElementById('turbo-multi').checked;
     _turboCfg.advanced = document.getElementById('turbo-advanced').checked;
     _turboCfg.live     = document.getElementById('turbo-live').checked;
