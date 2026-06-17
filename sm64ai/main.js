@@ -622,6 +622,10 @@ const AI_TOOLS = [
     _tool('set_goal', 'Set a persistent short-term goal you will keep pursuing across turns.',
         { goal: { type: 'string', description: 'e.g. "enter the castle door"' } }, ['goal']),
     _tool('study_guide', 'Re-read the SM64 strategy guides and refresh your study notes (use if you are unsure how to progress).'),
+    _tool('save_move', 'Save the action sequence you JUST performed under a name, so you can replay it later (e.g. a reliable "cross the bridge" or "climb the slope" maneuver).',
+        { name: { type: 'string' } }, ['name']),
+    _tool('play_move', 'Replay a previously saved movement sequence by name.',
+        { name: { type: 'string' } }, ['name']),
     _tool('save_waypoint', 'Remember Mario\'s current position under a name, to navigate back to later.',
         { name: { type: 'string' } }, ['name']),
     _tool('waypoint_distance', 'Get distance and turn direction from Mario to a saved waypoint (uses real coordinates).',
@@ -636,6 +640,7 @@ const AI_TOOLS = [
 // Lightweight stores for the tools
 let _waypoints  = {};
 let _saveStates = {};
+let _savedMoves = {};     // named action sequences the AI can replay
 let _frameHistory = [];   // last few screenshots (data URLs) for is_stuck/is_trapped
 
 // ── Anti-cheat gate ──────────────────────────────────────────
@@ -684,13 +689,13 @@ async function executeTool(name, args = {}) {
             }
             case 'is_stuck': {
                 const v = await _frameVerdict('stuck',
-                    'Look at these sequential frames (oldest→newest). Is Mario STUCK — i.e. NO real change in position or camera between them? Answer exactly "STUCK" or "MOVING", then one short reason.');
+                    'These are sequential SM64 frames (oldest→newest). Is Mario STUCK — i.e. his position/camera barely changed across them AND he is wedged against a wall/ledge/water with nowhere useful to walk? Consider whether there is standable ground he could actually move onto. Answer exactly "STUCK" or "MOVING", then one short reason.');
                 if (v.positive) armEscape('stuck confirmed');
                 return `is_stuck → ${v.positive} :: ${v.text}`;
             }
             case 'is_trapped': {
                 const v = await _frameVerdict('trapped',
-                    'Look at these sequential frames of Mario (oldest→newest). Is he TRAPPED with no visible way out, or is there an exit? Answer exactly "TRAPPED" or "EXIT: <direction>", then one short reason.');
+                    'These are sequential SM64 frames of Mario (oldest→newest). Look at the SURROUNDINGS: is there any visible standable land / path / ledge he can reach, or is he boxed in by water, lava, walls or a pit with no way out? Answer exactly "TRAPPED" or "EXIT: <direction + what to walk toward>", then one short reason.');
                 if (v.positive) armEscape('trapped confirmed');
                 return `is_trapped → ${v.positive} :: ${v.text}`;
             }
@@ -705,6 +710,17 @@ async function executeTool(name, args = {}) {
             case 'study_guide': {
                 await runStudy({ silent: true });
                 return `Studied the guide — ${aiNotes.length} strategy notes ready (now in my context).`;
+            }
+            case 'save_move': {
+                if (!_lastActions) return 'No recent move to save yet — perform a sequence first.';
+                _savedMoves[args.name || 'move'] = JSON.parse(JSON.stringify(_lastActions));
+                return `Saved move "${args.name || 'move'}" (${_savedMoves[args.name || 'move'].length} steps).`;
+            }
+            case 'play_move': {
+                const mv = _savedMoves[args.name];
+                if (!mv) return `No saved move named "${args.name}". Saved: ${Object.keys(_savedMoves).join(', ') || 'none'}.`;
+                await aiExecute({ actions: mv });
+                return `Replayed move "${args.name}".`;
             }
             case 'save_waypoint': {
                 const st = readGameState();
@@ -2190,21 +2206,39 @@ async function composeComparisonImage(prevUrl, curUrl) {
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, W, H);
 
-    // Frames
-    ctx.drawImage(imgA, 0,         labelH, wA, h);
-    ctx.drawImage(imgB, wA + div,  labelH, wB, h);
+    // PREVIOUS frame (left) — drawn then HEAVILY darkened so it can't be mistaken for now
+    ctx.drawImage(imgA, 0, labelH, wA, h);
+    ctx.fillStyle = 'rgba(0,0,0,0.62)';
+    ctx.fillRect(0, labelH, wA, h);
 
-    // Red divider bar between them
+    // CURRENT frame (right) — full brightness, bright green border
+    ctx.drawImage(imgB, wA + div, labelH, wB, h);
+    ctx.strokeStyle = '#39e660';
+    ctx.lineWidth = 6;
+    ctx.strokeRect(wA + div + 3, labelH + 3, wB - 6, h - 6);
+
+    // Red divider bar
     ctx.fillStyle = '#ff3b30';
     ctx.fillRect(wA, 0, div, H);
 
-    // Labels
-    ctx.fillStyle    = '#fff';
-    ctx.font         = 'bold 18px sans-serif';
-    ctx.textBaseline = 'middle';
-    ctx.textAlign    = 'center';
-    ctx.fillText('◀ PREVIOUS TURN', wA / 2, labelH / 2);
-    ctx.fillText('CURRENT TURN ▶',  wA + div + wB / 2, labelH / 2);
+    // Big diagonal watermark across the previous frame
+    ctx.save();
+    ctx.translate(wA / 2, labelH + h / 2);
+    ctx.rotate(-Math.PI / 12);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = `bold ${Math.round(h / 12)}px sans-serif`;
+    ctx.fillStyle = 'rgba(255,82,82,0.9)';
+    ctx.fillText('PREVIOUS FRAME', 0, -h / 24);
+    ctx.font = `bold ${Math.round(h / 22)}px sans-serif`;
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillText('REFERENCE ONLY — DO NOT ACT ON THIS', 0, h / 18);
+    ctx.restore();
+
+    // Header labels
+    ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
+    ctx.font = 'bold 16px sans-serif';
+    ctx.fillStyle = '#ff8a80'; ctx.fillText('◀ PREVIOUS (reference)', wA / 2, labelH / 2);
+    ctx.fillStyle = '#39e660'; ctx.fillText('CURRENT — ACT ON THIS ▶', wA + div + wB / 2, labelH / 2);
 
     return _composeCanvas.toDataURL('image/jpeg', 0.72);
 }
@@ -2235,12 +2269,29 @@ async function composeFrameStrip(urls) {
 
     let x = 0;
     for (let i = 0; i < n; i++) {
-        ctx.drawImage(imgs[i], x, labelH, widths[i], h);
-        if (i > 0) { ctx.fillStyle = '#ff3b30'; ctx.fillRect(x - div, 0, div, H); }
         const isNow = i === n - 1;
-        ctx.fillStyle = isNow ? '#43e660' : '#fff';
-        const label = isNow ? 'NOW ▶' : `−${n - 1 - i}`;
-        ctx.fillText(label, x + widths[i] / 2, labelH / 2);
+        ctx.drawImage(imgs[i], x, labelH, widths[i], h);
+        if (!isNow) {
+            // Darken older frames hard so the CURRENT one is unmistakable
+            ctx.fillStyle = 'rgba(0,0,0,0.6)';
+            ctx.fillRect(x, labelH, widths[i], h);
+            ctx.save();
+            ctx.translate(x + widths[i] / 2, labelH + h / 2);
+            ctx.rotate(-Math.PI / 12);
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.font = `bold ${Math.round(h / 16)}px sans-serif`;
+            ctx.fillStyle = 'rgba(255,82,82,0.9)';
+            ctx.fillText('PREVIOUS', 0, 0);
+            ctx.restore();
+        } else {
+            ctx.strokeStyle = '#39e660'; ctx.lineWidth = 6;
+            ctx.strokeRect(x + 3, labelH + 3, widths[i] - 6, h - 6);
+        }
+        if (i > 0) { ctx.fillStyle = '#ff3b30'; ctx.fillRect(x - div, 0, div, H); }
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillStyle = isNow ? '#39e660' : '#ff8a80';
+        ctx.font = 'bold 14px sans-serif';
+        ctx.fillText(isNow ? 'CURRENT — ACT ON THIS ▶' : `prev −${n - 1 - i} (ref)`, x + widths[i] / 2, labelH / 2);
         x += widths[i] + div;
     }
     return _composeCanvas.toDataURL('image/jpeg', 0.68);
@@ -2355,7 +2406,29 @@ let _turboCfg  = (() => { try { return JSON.parse(localStorage.getItem('sm64_tur
 if (typeof _turboCfg.frames   === 'undefined') _turboCfg.frames   = false; // current + 3 previous frames
 if (typeof _turboCfg.multi    === 'undefined') _turboCfg.multi    = false; // 1 action/think, re-think constantly
 if (typeof _turboCfg.advanced === 'undefined') _turboCfg.advanced = false; // max overdrive (no skips/floors)
+if (typeof _turboCfg.live     === 'undefined') _turboCfg.live     = false; // constant frame updates (live view)
 let _turboLoop = null;
+let _liveLoop  = null;
+
+// Constant frame updates: continuously capture the live game so the AI's view
+// is always current, and the "what the AI sees" panel shows live gameplay
+// (not just the frozen request frame).
+let _liveFrame = null;   // freshest screenshot, refreshed in the background
+function startLiveLoop() {
+    if (_liveLoop) return;
+    _liveLoop = setInterval(async () => {
+        if (!(_turboMode && _turboCfg.live && aiPlayerActive && aiStream)) return;
+        const ss = await captureScreen(aiStream);
+        if (!ss) return;
+        _liveFrame = ss;
+        if (_streamerMode) {
+            const img = document.getElementById('so-vision-img');
+            const ph  = document.getElementById('so-vision-ph');
+            if (img) { img.src = ss; img.style.display = 'block'; if (ph) ph.style.display = 'none'; }
+        }
+    }, 350);
+}
+function stopLiveLoop() { if (_liveLoop) { clearInterval(_liveLoop); _liveLoop = null; } _liveFrame = null; }
 
 function saveTurboState() {
     try {
@@ -2380,9 +2453,11 @@ function setTurboMode(on) {
     updateTurboUI();
     if (_turboMode) {
         if (aiPlayerActive) { if (aiInterval) { clearInterval(aiInterval); aiInterval = null; } startTurboLoop(); }
+        if (_turboCfg.live) startLiveLoop();
         tts.interrupt('Consistent rapid fire on. I will play as fast as I can — this burns pollen quickly.');
     } else {
         stopTurboLoop();
+        stopLiveLoop();
         if (aiPlayerActive && aiMode === 'auto' && !_rapidFireActive) scheduleAILoop();
         tts.interrupt('Consistent rapid fire off.');
     }
@@ -2515,7 +2590,11 @@ async function aiThink() {
 
         let screenshot = null;
         if (!memoryOnly) {
-            screenshot = await captureScreen(aiStream);
+            // In live mode the background loop is the single capturer — reuse its
+            // freshest frame (always current) instead of double-capturing.
+            screenshot = (_turboMode && _turboCfg.live && _liveFrame)
+                ? _liveFrame
+                : await captureScreen(aiStream);
             if (!screenshot) { updateAIStatus('❌ Failed to capture game view'); _isThinking = false; return null; }
             // Skip if the frame is identical to recent ones (nothing changed).
             // Advanced turbo (max overdrive) never skips — it always re-thinks.
@@ -2627,37 +2706,49 @@ GAME OBJECTIVE (once you control Mario):
 5. Jump into the painting to start the first level
 6. Collect stars to progress
 
-CONTROLS (read carefully):
-- ArrowUp/Down/Left/Right = walk/steer Mario (Up = forward relative to camera)
-- jump (X) = jump, AND this is how you advance/skip dialog boxes
-- crouch (Space) = duck / crawl / start a long jump
-- action (C) = dive / punch / grab / read a sign
-- cameraLeft (Z) = rotate the camera to look around
-- start (Enter) = CONFIRM/BEGIN on the title screen and to EXIT a demo; but during ACTUAL GAMEPLAY it opens the PAUSE menu. It does NOT skip dialog.
+CONTROLS — how Mario ACTUALLY works (read carefully, you keep getting these wrong):
+- ArrowUp/Down/Left/Right move Mario RELATIVE TO THE CAMERA. Up = away from the camera (the way Mario's back faces). Left/Right STEER and turn him.
+- You MUST hold a direction long enough to travel. A quick tap barely moves him. To cross open ground, hold ArrowUp for 1–3 SECONDS (set "hold_ms": 1500+). This single thing matters most.
+- To head toward something that is NOT straight ahead, TURN FIRST: hold ArrowLeft or ArrowRight (or rotate the camera with cameraLeft/Z), THEN hold ArrowUp. The target is often to your SIDE, not dead ahead.
+- jump (X) = jump; it ALSO advances/closes dialog boxes. (Long jump = run forward, then crouch+jump.)
+- crouch (Space) = duck / crawl / set up a long jump.  action (C) = dive / punch / grab / read a sign.
+- start (Enter) = title/demo CONFIRM only. During real gameplay it just PAUSES — do NOT press it while playing. Use jump (X) for dialog.
 
-KEY RULES:
-- ⛔ During ACTUAL GAMEPLAY, do NOT press start (Enter) — it just pauses. Only press start to begin from the title screen, to exit an attract-mode demo, or to close a pause menu that is already open. To skip/advance dialog use jump (X).
-- Act on the CURRENT situation only. If two frames are shown, the RIGHT/CURRENT frame is reality NOW — the LEFT/PREVIOUS frame is ONLY to judge if you moved. NEVER walk toward something that is only in the previous frame.
-- To change direction you must TURN: hold ArrowLeft or ArrowRight to rotate Mario, or use cameraLeft to spin the camera and re-orient. Don't just push ArrowUp if you're facing the wrong way.
-- If Mario is in WATER, getting out is top priority: press jump (X) to surface and swim toward land. If you keep failing, call the de_water tool.
-- If you look STUCK (same spot across frames) do something different (turn around, back up, jump). The "escape" tools (de_water, load_state teleport, reset_game) are LOCKED: to use them you must FIRST call is_stuck or is_trapped, and only if it confirms true do they unlock (during rapid-fire recovery + 5 turns). Don't try to teleport/escape without confirming.
+WATER — you keep failing this:
+- You do NOT "jump out" of water. Jumping does nothing useful in water.
+- To SWIM: hold a direction toward the nearest shore/shallow edge AND tap jump (X) repeatedly — each tap is a swim stroke that pushes you forward and UP. Keep stroking toward dry land.
+- If Mario is clearly ON LAND, he is NOT in water — just walk. Only swim if you actually SEE water around him.
+
+NAVIGATION:
+- The castle entrance is the pair of big wooden DOORS set into the castle wall, across the bridge — not every archway/tunnel. Pick the visible target, face it, then hold forward toward it.
+- The route is rarely a straight line — expect to move diagonally, sideways, and around obstacles.
+- If you barely moved last turn you are probably facing a wall or the wrong way — TURN (Left/Right) or rotate the camera; do NOT keep mashing forward.
+
+CHAINING ACTIONS:
+- "actions" is a SEQUENCE of groups done one after another. Keys INSIDE one group happen SIMULTANEOUSLY (e.g. ["ArrowUp","jump"] = hold forward while jumping).
+- Give each group a "hold_ms" to set its duration. Movement = long (800–2500ms); a jump or dialog-skip = short (150–350ms).
+
+RULES:
+- ⛔ Never press start during gameplay (it pauses).
+- Act ONLY on the bright CURRENT frame. The DARKENED "PREVIOUS" frame(s) are reference to judge how you moved — never walk toward something only visible there.
+- Escape tools (de_water, load_state, reset_game) stay LOCKED until is_stuck/is_trapped returns true.
 - ${memOn
-    ? 'You may use tools (get_game_state, set_game_speed for tricky jumps) when helpful, but don\'t call tools every turn.'
-    : 'There is no reliable game memory — judge everything from the image. You may still use set_game_speed for tricky jumps, or is_stuck/is_trapped if confused, but don\'t call tools every turn.'}
+    ? 'You may use tools (get_game_state, set_game_speed for tricky jumps, save_move/play_move for reusable sequences) when helpful, but don\'t call tools every turn.'
+    : 'There is no reliable game memory — judge everything from the image. You may use set_game_speed, is_stuck/is_trapped, or save_move/play_move when helpful, but don\'t call tools every turn.'}
 ${movementCtx}${memStateCtx}${motionCtx}${memoryCtx}${notesCtx}${instrCtx}${trainingCtx}
 
 Respond with ONLY valid JSON (no markdown fences):
 {
-  "actions": [["action1"], ["action2", "action3"]],
-  "thought": "brief strategy",
+  "actions": [ {"keys":["ArrowUp"], "hold_ms": 1600}, {"keys":["ArrowLeft"], "hold_ms": 450}, {"keys":["ArrowUp","jump"], "hold_ms": 300} ],
+  "thought": "where is my target, which way must I turn, how long to hold forward",
   "speech": "short streamer commentary (max 15 words) — omit if rapid_fire is true",
   "mistake": "error noticed or null",
-  "notes": ["optional NEW strategy insight worth remembering for later — omit or [] if nothing new"],
+  "notes": ["optional NEW insight worth remembering — omit or [] if none"],
   "rapid_fire": false
 }
 
-Set "rapid_fire": true ONLY when you need to make many fast decisions (e.g. mid-jump sequence, navigating a tight corridor, chasing a star, escaping water). Set it back to false when the situation stabilises.
-Max 5 action groups. Valid names: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jump, start, crouch, action, cameraLeft`;
+Each group is {"keys":[...simultaneous...], "hold_ms": N}; plain arrays like ["ArrowUp"] also work with a default hold. Movement hold_ms 800–2500; jumps/dialog 150–350. Max 5 groups.
+Valid keys: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jump, start, crouch, action, cameraLeft`;
 
         let userMessage;
         if (memoryOnly) {
@@ -2766,35 +2857,62 @@ Max 5 action groups. Valid names: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jum
 // ────────────────────────────────────────────────────────────
 // 16. AI EXECUTE
 // ────────────────────────────────────────────────────────────
+const MOVE_KEYS = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']);
+
+// Normalize an action group into { keys:[...], ms } so the AI can chain
+// simultaneous keys AND control how LONG each is held. Sustained holds are the
+// single biggest reason the original version travelled further — brief taps
+// barely move Mario, so movement defaults to a long hold.
+function _normalizeGroup(g, fast) {
+    let keys = [], ms = null;
+    if (Array.isArray(g)) keys = g;
+    else if (g && typeof g === 'object') { keys = g.keys || g.actions || []; ms = g.hold_ms ?? g.ms ?? g.duration ?? null; }
+    else if (typeof g === 'string') keys = [g];
+    keys = (Array.isArray(keys) ? keys : [keys]).filter(k => keyMap[k]);
+    const isMove = keys.some(k => MOVE_KEYS.has(k));
+    if (ms == null) ms = fast ? (isMove ? 500 : 160) : (isMove ? 1100 : 240); // sensible defaults
+    ms = Math.max(80, Math.min(fast ? 1800 : 4000, ms));
+    return { keys, ms: ms / gameSpeed };
+}
+
+let _lastActions = null;   // last sequence executed (for save_move/play_move)
+
 async function aiExecute(response) {
     if (!response?.actions?.length) return;
     let groups = response.actions;
     // Turbo "multi-request gameplay": execute only the FIRST action group, then
     // re-think immediately so the AI can correct itself mid-sequence.
     if (_turboMode && _turboCfg.multi) groups = groups.slice(0, 1);
+    _lastActions = response.actions;
     updateAIStatus(`🎮 Executing ${groups.length} action group${groups.length > 1 ? 's' : ''}…`);
 
-    const fast           = _turboMode || _rapidFireActive;
-    const windowMs       = (fast ? 1200 : 4000) / gameSpeed;
-    const actionDuration = Math.max(fast ? 80 : 120, windowMs / groups.length);
+    const fast = _turboMode || _rapidFireActive;
 
     for (let i = 0; i < groups.length; i++) {
         if (!aiPlayerActive) break;
-        const group = Array.isArray(groups[i]) ? groups[i] : [groups[i]];
-        for (const action of group) {
+        const { keys, ms } = _normalizeGroup(groups[i], fast);
+        if (!keys.length) continue;
+        // Hold all keys in the group simultaneously for the (sustained) duration
+        for (const action of keys) {
             const keyCode = keyMap[action];
-            if (keyCode) simulateKeyPress(keyCode, Math.max(80, actionDuration * 0.75));
+            if (keyCode) simulateKeyPress(keyCode, Math.max(70, ms * 0.92));
         }
-        updateAIStatus(`🎮 [${i + 1}/${groups.length}] ${group.join(' + ')}`);
-        await delay(actionDuration);
+        updateAIStatus(`🎮 [${i + 1}/${groups.length}] ${keys.join(' + ')} (${Math.round(ms)}ms)`);
+        await delay(ms);
     }
     updateAIStatus('✅ Done');
 }
 
+let _busyCycle = false;   // prevents a new think starting while still executing
 async function aiThinkAndAct() {
-    if (!aiPlayerActive) return;
-    const resp = await aiThink();
-    if (resp && aiPlayerActive) await aiExecute(resp);
+    if (!aiPlayerActive || _busyCycle) return;
+    _busyCycle = true;
+    try {
+        const resp = await aiThink();
+        if (resp && aiPlayerActive) await aiExecute(resp);
+    } finally {
+        _busyCycle = false;
+    }
 }
 
 // ── Rapid-fire mode ─────────────────────────────────────────────────
@@ -2930,6 +3048,7 @@ async function toggleAIPlayer() {
             updateAIStatus(_turboMode ? '⚡ Turbo AI — going as fast as possible' : '🤖 AI Player Active');
             tts.speak(_turboMode ? 'Turbo AI active. Going as fast as I can.' : 'AI player activated. Analyzing the screen now.');
             scheduleAILoop();   // routes to turbo loop if turbo is on
+            if (_turboMode && _turboCfg.live) startLiveLoop();
             aiThinkAndAct();
         } else {
             aiManualState = 'idle';
@@ -2988,6 +3107,7 @@ function stopAIPlayer() {
     if (aiStream)      { aiStream.getTracks().forEach(t => t.stop()); aiStream = null; }
     if (aiInterval)    { clearInterval(aiInterval); aiInterval = null; }
     stopTurboLoop();
+    stopLiveLoop();
     if (_captureVideo) { _captureVideo.srcObject = null; }
     if (!buddyActive)  stopBridgeCaptionLoop();
     // Free frame buffers so a long session doesn't pile up base64 strings
@@ -3342,6 +3462,8 @@ function updateStreamerOverlay(state) {
 // Mirror exactly what the AI "sees" into the streamer overlay
 function setAIVisionFrame(dataUrl) {
     _aiVisionFrame = dataUrl;
+    // In live mode the background loop drives the panel (shows continuous gameplay)
+    if (_turboMode && _turboCfg.live && _streamerMode) return;
     updateStreamerVision(dataUrl);
 }
 function updateStreamerVision(dataUrl) {
@@ -3583,7 +3705,7 @@ document.getElementById('energy-reset-btn')?.addEventListener('click', () => {
 // ────────────────────────────────────────────────────────────
 function _syncTurboSubs() {
     const on = document.getElementById('turbo-master')?.checked;
-    ['turbo-frames', 'turbo-multi', 'turbo-advanced'].forEach(id => {
+    ['turbo-frames', 'turbo-multi', 'turbo-advanced', 'turbo-live'].forEach(id => {
         const e = document.getElementById(id); if (e) e.disabled = !on;
     });
 }
@@ -3593,6 +3715,7 @@ function openTurboModal() {
     if (m('turbo-frames'))   m('turbo-frames').checked   = !!_turboCfg.frames;
     if (m('turbo-multi'))    m('turbo-multi').checked     = !!_turboCfg.multi;
     if (m('turbo-advanced')) m('turbo-advanced').checked  = !!_turboCfg.advanced;
+    if (m('turbo-live'))     m('turbo-live').checked      = !!_turboCfg.live;
     _syncTurboSubs();
     m('turbo-modal')?.classList.add('open');
     m('turbo-backdrop')?.classList.add('open');
@@ -3609,7 +3732,9 @@ document.getElementById('turbo-save-btn')?.addEventListener('click', () => {
     _turboCfg.frames   = document.getElementById('turbo-frames').checked;
     _turboCfg.multi    = document.getElementById('turbo-multi').checked;
     _turboCfg.advanced = document.getElementById('turbo-advanced').checked;
+    _turboCfg.live     = document.getElementById('turbo-live').checked;
     setTurboMode(document.getElementById('turbo-master').checked);   // also saves + restarts loop
+    if (_turboMode && _turboCfg.live && aiPlayerActive) startLiveLoop(); else stopLiveLoop();
     closeTurboModal();
 });
 // Quick toggle (streamer-mode dock)
