@@ -1,19 +1,16 @@
 // ============================================================
-// Super Mario 64 Web – AI Player  (v3)
+// Super Mario 64 Web – AI Player  (v4 — Pollinations-exclusive)
 //
 // Built on top of the original "Super Mario 64 Web" by Tenslant on websim:
 //   https://websim.com/@Tenslant/super-mario-64-web
 // AI player layer by Endoxidev/MetaMysteries8.
 //
-// NEW in v3:
-//  - TTS queue with interrupt / wait / drain modes (no overlap)
-//  - Multi-API provider system (Pollinations, OpenAI, Anthropic,
-//    Google Gemini, any OpenAI-compatible endpoint)
-//    → vision capability verified before allowing selection
-//  - Inference throttle: skip call if screen unchanged, back-off
-//    on repeated errors, configurable think interval
-//  - AI-generated controls guide (one call, cached forever)
-//  - Idle detection: pause AI loop when player is active
+// This build is Pollinations-exclusive: Pollinations handles all model/provider
+// plumbing, so the AI just connects via OAuth and picks a vision model.
+//  - Single-frame vision perception + nav-grid/compass overlay
+//  - Pre-plan (mini-TAS) mode: AI scripts a multi-step move in one turn
+//  - Turbo / rapid-fire loops, inference throttle, idle detection
+//  - AI buddy coach, streamer mode, pollen energy bar
 // ============================================================
 
 // ────────────────────────────────────────────────────────────
@@ -29,13 +26,8 @@ const POLLINATIONS_MODELS_URL = 'https://gen.pollinations.ai/text/models';
 // earnings on inference users spend. NOT used as a standalone API key.
 const POLLINATIONS_APP_KEY    = 'pk_JBemDN4TzwP8Ls2v';
 
-// OpenRouter — OpenAI-compatible aggregator
-const OPENROUTER_API_BASE     = 'https://openrouter.ai/api/v1';
-const OPENROUTER_MODELS_URL   = 'https://openrouter.ai/api/v1/models';
-
 const STORAGE_KEY        = 'pollinations_api_key';
 const MODEL_STORAGE_KEY  = 'sm64_selected_model';
-const PROVIDER_STORAGE   = 'sm64_provider';
 const CONTROLS_CACHE_KEY = 'sm64_controls_guide';
 const DEFAULT_MODEL      = 'openai-large';
 
@@ -51,13 +43,6 @@ const RAPID_FIRE_INTERVAL_MS  = 1500;  // think every 1.5s
 const RAPID_FIRE_MAX_TURNS    = 30;    // auto-exit after 30 turns (~45s)
 const RAPID_FIRE_ACTION_MS    = 300;   // shorter action window
 
-// Local vision model (SmolVLM-256M via Transformers.js)
-const LOCAL_VLM_MODEL = 'HuggingFaceTB/SmolVLM-256M-Instruct';
-const LOCAL_VLM_CDN   = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/dist/transformers.min.js';
-
-// Vision-bridge: SmolVLM captions the screen, text sent to visionless cloud LLM
-// Caption is intentionally short to save tokens on the cloud side
-const BRIDGE_CAPTION_MAX_TOKENS = 80;
 
 // ── SM64 Memory Reader (sm64-port DECOMP build, NOT an emulator) ─────
 // This binary is the PC/decomp port compiled to wasm (found "sm64config",
@@ -327,26 +312,17 @@ const tts = (() => {
 })();
 
 // ────────────────────────────────────────────────────────────
-// 3. MULTI-API PROVIDER SYSTEM
+// 3. PROVIDER (Pollinations-exclusive)
 // ────────────────────────────────────────────────────────────
-//
-// Each provider describes how to call its chat completions endpoint.
-// Vision capability is verified before the provider is allowed.
-//
-// Built-in providers:
-//   pollinations  — uses stored Pollinations key, models fetched live
-//   openai        — standard OpenAI API key, gpt-4o / gpt-4-vision
-//   anthropic     — Claude 3 Opus/Sonnet/Haiku via messages API
-//   gemini        — Google Gemini via openai-compat endpoint
-//   custom        — user-supplied base URL + key (OpenAI-compat)
-//
 
+// This app is Pollinations-exclusive: Pollinations does the model/provider
+// plumbing for us, so there is exactly ONE provider here.
 const PROVIDERS = {
     pollinations: {
         id:    'pollinations',
         label: 'Pollinations AI',
         icon:  '🌸',
-        hasVision: true,   // verified at model-fetch time
+        hasVision: true,   // verified per-model at model-fetch time
         keyLabel: 'Pollinations Key (via OAuth)',
         keyPlaceholder: 'Connect via OAuth below',
         oauthOnly: true,
@@ -361,217 +337,20 @@ const PROVIDERS = {
             };
         },
     },
-    openai: {
-        id:    'openai',
-        label: 'OpenAI',
-        icon:  '🤖',
-        hasVision: true,
-        keyLabel: 'OpenAI API Key',
-        keyPlaceholder: 'sk-…',
-        defaultModel: 'gpt-4o',
-        visionModels: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-4-vision-preview'],
-        buildRequest(messages, model, key, opts) {
-            return {
-                url: 'https://api.openai.com/v1/chat/completions',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
-                body: { model, messages, max_tokens: opts.max_tokens || 800,
-                    ...(opts.tools ? { tools: opts.tools, tool_choice: opts.tool_choice || 'auto' } : {}),
-                    ...(opts.json && !opts.tools ? { response_format: { type: 'json_object' } } : {}) },
-            };
-        },
-    },
-    openrouter: {
-        id:    'openrouter',
-        label: 'OpenRouter',
-        icon:  '🛰️',
-        hasVision: true,           // gated per-model; vision list fetched live
-        keyLabel: 'OpenRouter API Key',
-        keyPlaceholder: 'sk-or-…',
-        modelsUrl: OPENROUTER_MODELS_URL,
-        defaultModel: 'openai/gpt-4o-mini',
-        visionModels: ['openai/gpt-4o', 'openai/gpt-4o-mini', 'anthropic/claude-3.5-sonnet',
-                       'google/gemini-2.0-flash-001', 'x-ai/grok-2-vision-1212',
-                       'qwen/qwen2.5-vl-72b-instruct', 'meta-llama/llama-3.2-90b-vision-instruct'],
-        buildRequest(messages, model, key, opts) {
-            return {
-                url: `${OPENROUTER_API_BASE}/chat/completions`,
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${key}`,
-                    'HTTP-Referer': location.origin,
-                    'X-Title': 'SM64 AI Player',
-                },
-                body: { model, messages, max_tokens: opts.max_tokens || 800,
-                    ...(opts.tools ? { tools: opts.tools, tool_choice: opts.tool_choice || 'auto' } : {}),
-                    ...(opts.json && !opts.tools ? { response_format: { type: 'json_object' } } : {}) },
-            };
-        },
-    },
-    anthropic: {
-        id:    'anthropic',
-        label: 'Anthropic Claude',
-        icon:  '🧠',
-        hasVision: true,
-        keyLabel: 'Anthropic API Key',
-        keyPlaceholder: 'sk-ant-…',
-        defaultModel: 'claude-3-5-sonnet-20241022',
-        visionModels: ['claude-3-5-sonnet-20241022','claude-3-opus-20240229','claude-3-haiku-20240307','claude-opus-4-5','claude-sonnet-4-5'],
-        buildRequest(messages, model, key, opts) {
-            // Convert OpenAI-style messages to Anthropic format
-            const system  = messages.find(m => m.role === 'system')?.content || '';
-            const history = messages.filter(m => m.role !== 'system').map(m => {
-                if (typeof m.content === 'string') return m;
-                // Convert image_url to Anthropic base64 block
-                const parts = m.content.map(p => {
-                    if (p.type === 'text') return { type: 'text', text: p.text };
-                    if (p.type === 'image_url') {
-                        const url = p.image_url.url;
-                        const [header, data] = url.split(',');
-                        const mediaType = header.match(/:(.*?);/)?.[1] || 'image/jpeg';
-                        return { type: 'image', source: { type: 'base64', media_type: mediaType, data } };
-                    }
-                    return p;
-                });
-                return { role: m.role, content: parts };
-            });
-            return {
-                url: 'https://api.anthropic.com/v1/messages',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-api-key': key,
-                    'anthropic-version': '2023-06-01',
-                },
-                body: { model, system, messages: history, max_tokens: opts.max_tokens || 800 },
-                responseExtract: (data) => data.content?.[0]?.text || '',
-            };
-        },
-    },
-    gemini: {
-        id:    'gemini',
-        label: 'Google Gemini',
-        icon:  '💎',
-        hasVision: true,
-        keyLabel: 'Google AI Studio Key',
-        keyPlaceholder: 'AIza…',
-        defaultModel: 'gemini-1.5-flash',
-        visionModels: ['gemini-1.5-flash','gemini-1.5-pro','gemini-2.0-flash-exp','gemini-2.5-flash'],
-        buildRequest(messages, model, key, opts) {
-            // Use OpenAI-compat endpoint via Google
-            return {
-                url: `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`,
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
-                body: { model, messages, max_tokens: opts.max_tokens || 800,
-                    ...(opts.tools ? { tools: opts.tools, tool_choice: opts.tool_choice || 'auto' } : {}),
-                    ...(opts.json && !opts.tools ? { response_format: { type: 'json_object' } } : {}) },
-            };
-        },
-    },
-    custom: {
-        id:    'custom',
-        label: 'Custom (OpenAI-compat)',
-        icon:  '🔧',
-        hasVision: null,  // unknown until user confirms
-        keyLabel: 'API Key',
-        keyPlaceholder: 'your-key-here',
-        defaultModel: '',
-        buildRequest(messages, model, key, opts) {
-            const base = (window._customApiBase || '').replace(/\/$/, '');
-            return {
-                url: `${base}/v1/chat/completions`,
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
-                body: { model, messages, max_tokens: opts.max_tokens || 800,
-                    ...(opts.tools ? { tools: opts.tools, tool_choice: opts.tool_choice || 'auto' } : {}),
-                    ...(opts.json && !opts.tools ? { response_format: { type: 'json_object' } } : {}) },
-            };
-        },
-    },
-    local: {
-        id:       'local',
-        label:    'Local (SmolVLM-256M)',
-        icon:     '💻',
-        hasVision: true,
-        keyLabel: 'No key needed',
-        keyPlaceholder: 'Runs in your browser',
-        noKey: true,
-        defaultModel: LOCAL_VLM_MODEL,
-        visionModels: [LOCAL_VLM_MODEL],
-        buildRequest() { return null; }, // not used — callLocalVision() handles it
-    },
 };
 
-// Active provider state
+// Active provider state — always Pollinations.
 let activeProvider = PROVIDERS.pollinations;
-let providerKeys   = {};   // { providerId: 'key-string' }
-let pollinationsKey = null; // kept for Pollinations OAuth compat
+let providerKeys   = {};   // { pollinations: 'key-string' }
+let pollinationsKey = null;
 
 function getActiveKey() {
-    if (activeProvider.id === 'pollinations') return pollinationsKey;
-    return providerKeys[activeProvider.id] || null;
+    return pollinationsKey;
 }
 
 async function callChatAPI(messages, opts = {}) {
-    // Local provider: route through in-browser SmolVLM (full VQA mode)
-    if (activeProvider.id === 'local') {
-        const userMsg = messages.find(m => m.role === 'user');
-        let imageUrl = null, textPrompt = '';
-        if (Array.isArray(userMsg?.content)) {
-            for (const p of userMsg.content) {
-                if (p.type === 'image_url') imageUrl = p.image_url.url;
-                if (p.type === 'text')      textPrompt += p.text + ' ';
-            }
-        } else {
-            textPrompt = userMsg?.content || '';
-        }
-        const sysMsg = messages.find(m => m.role === 'system');
-        const fullPrompt = (sysMsg ? sysMsg.content.slice(0, 500) + '\n\n' : '') + textPrompt.trim();
-        if (imageUrl) return await callLocalVision(imageUrl, fullPrompt);
-        throw new Error('Local vision model requires an image');
-    }
-
-    // Vision-bridge mode: provider has no vision, but SmolVLM is loaded
-    // Use the cached background caption (updated every 2.5s) instead of blocking
-    if (!providerHasVision() && _localVLMState === 'ready' && !opts._bridgeCaption) {
-        // Extract image from messages
-        const userMsg = messages.find(m => m.role === 'user');
-        let imageUrl = null;
-        const textParts = [];
-        if (Array.isArray(userMsg?.content)) {
-            for (const p of userMsg.content) {
-                if (p.type === 'image_url') imageUrl = p.image_url.url;
-                if (p.type === 'text')      textParts.push(p.text);
-            }
-        }
-        if (imageUrl) {
-            // Use cached bridge caption if available, otherwise fallback to live
-            let caption = _bridgeCaption;
-            if (!caption) {
-                // First call or cache missed — do one live caption (still slow, but only once)
-                const prompt = buildBridgePrompt();
-                const base64 = imageUrl.replace(/^data:image\/(png|jpeg);base64,/, '');
-                const mime = imageUrl.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png';
-                const dataUrl = `data:${mime};base64,${base64}`;
-                caption = await callLocalVision(dataUrl, prompt, { maxTokens: 60, downscale: 384 });
-                _bridgeCaption = caption;
-                _bridgeCaptionHash = quickHash(imageUrl);
-            }
-
-            // Step 2: Replace image with caption text in messages for cloud LLM
-            const bridgedMessages = messages.map(m => {
-                if (m.role !== 'user') return m;
-                const textContent = textParts.join(' ');
-                return {
-                    role: 'user',
-                    content: `[SCREEN DESCRIPTION from local vision model]: ${caption}\n\n${textContent}`,
-                };
-            });
-
-            // Step 3: Call cloud LLM with text-only messages
-            return await callChatAPI(bridgedMessages, { ...opts, _bridgeCaption: true });
-        }
-    }
-
     const key   = getActiveKey();
-    if (!key) throw new Error(`No API key for ${activeProvider.label}`);
+    if (!key) throw new Error('Not connected to Pollinations — please authorize.');
     const model = opts.model || getSelectedModel();
     const req   = activeProvider.buildRequest(messages, model, key, opts);
 
@@ -583,21 +362,16 @@ async function callChatAPI(messages, opts = {}) {
 
     if (!res.ok) {
         if (res.status === 401 || res.status === 403) {
-            if (activeProvider.id === 'pollinations') {
-                clearStoredKey();
-                pollinationsKey = null;
-                document.getElementById('auth-overlay').classList.remove('hidden');
-            }
-            throw new Error(`Auth failed (${res.status}) — check your API key`);
+            clearStoredKey();
+            pollinationsKey = null;
+            document.getElementById('auth-overlay').classList.remove('hidden');
+            throw new Error(`Auth failed (${res.status}) — please reconnect Pollinations`);
         }
         const err = await res.json().catch(() => ({}));
         throw new Error(err?.error?.message || `HTTP ${res.status}`);
     }
 
     const data = await res.json();
-
-    // Allow provider to define custom response extraction
-    if (req.responseExtract) return req.responseExtract(data);
     // Tool-calling callers need the full assistant message (tool_calls + content)
     if (opts.returnRaw) return data.choices?.[0]?.message || {};
     return data.choices?.[0]?.message?.content || '';
@@ -812,16 +586,11 @@ function _applyGameSpeed(s) {
     if (aiPlayerActive && aiMode === 'auto' && !_rapidFireActive) scheduleAILoop();
 }
 
-// Providers whose chat endpoint accepts OpenAI-style `tools`
-const TOOL_CAPABLE_PROVIDERS = new Set(['pollinations', 'openai', 'openrouter', 'gemini', 'custom']);
-
-// Per-model tool support (populated from model metadata when available).
-// null = unknown (we optimistically try once, then remember the result).
+// Per-model tool support (Pollinations models vary). null = unknown — we
+// optimistically try tools once, then remember the result per model.
 const _modelToolSupport = {};
 
 function modelMaySupportTools(model) {
-    if (!TOOL_CAPABLE_PROVIDERS.has(activeProvider.id)) return false;
-    if (activeProvider.id === 'local') return false;
     const known = _modelToolSupport[model];
     return known !== false; // try when true or unknown
 }
@@ -878,340 +647,10 @@ async function callChatWithTools(messages, opts = {}) {
     }
 }
 
-// ────────────────────────────────────────────────────────────
-// 3b. LOCAL VISION MODEL  (SmolVLM-256M via Transformers.js)
-// ────────────────────────────────────────────────────────────
-//
-// Activated when the active provider has hasVision !== true.
-// Loads SmolVLM-256M-Instruct in-browser via WebGPU (or WASM fallback).
-// Provides callLocalVision(screenshotDataUrl, prompt) → string
-//
 
-// SmolVLM uses the low-level AutoProcessor + AutoModelForVision2Seq API,
-// NOT the pipeline() API (which doesn't support image-text-to-text in v3).
-let _localVLMProcessor = null;  // AutoProcessor instance
-let _localVLMModel     = null;  // AutoModelForVision2Seq instance
-let _localVLMState     = 'idle'; // 'idle' | 'loading' | 'ready' | 'error'
-let _localVLMError     = null;
-
-// Check if current provider has vision
-function providerHasVision() {
-    if (activeProvider.id === 'local') return true;  // local IS vision
-    if (activeProvider.id === 'custom') return PROVIDERS.custom.hasVision === true;
-    // OpenRouter: vision depends on the specific model the user picked
-    if (activeProvider.id === 'openrouter') return openrouterSelectedHasVision();
-    return activeProvider.hasVision === true;
-}
-
-// Dynamically load Transformers.js CDN script once
-// SmolVLM needs AutoProcessor + AutoModelForVision2Seq (not pipeline)
-function loadTransformersJS() {
-    return new Promise((resolve, reject) => {
-        if (window.__transformers__) { resolve(window.__transformers__); return; }
-        if (document.getElementById('transformers-js-script')) {
-            // Already injecting — wait for it to finish
-            const wait = setInterval(() => {
-                if (window.__transformers__) { clearInterval(wait); resolve(window.__transformers__); }
-            }, 200);
-            return;
-        }
-        const s = document.createElement('script');
-        s.id   = 'transformers-js-script';
-        s.type = 'module';
-        // Import the full set of classes needed for SmolVLM
-        s.textContent = `
-            import {
-                AutoProcessor,
-                AutoModelForVision2Seq,
-                RawImage,
-                env
-            } from '${LOCAL_VLM_CDN}';
-            env.allowLocalModels = false;
-            window.__transformers__ = { AutoProcessor, AutoModelForVision2Seq, RawImage, env };
-        `;
-        s.onerror = () => reject(new Error('Failed to load Transformers.js from CDN'));
-        document.head.appendChild(s);
-        const wait = setInterval(() => {
-            if (window.__transformers__) { clearInterval(wait); resolve(window.__transformers__); }
-        }, 200);
-        setTimeout(() => { clearInterval(wait); reject(new Error('Transformers.js load timeout (90s)')); }, 90000);
-    });
-}
-
-async function initLocalVLM(onProgress) {
-    if (_localVLMState === 'ready') return true;
-    if (_localVLMState === 'loading') return false;
-    _localVLMState = 'loading';
-    _localVLMError = null;
-
-    try {
-        onProgress?.('Loading Transformers.js…', 5);
-        const { AutoProcessor, AutoModelForVision2Seq, env } = await loadTransformersJS();
-
-        // Use WebGPU if available, fall back to WASM
-        const device = (typeof navigator !== 'undefined' && navigator.gpu) ? 'webgpu' : 'wasm';
-        onProgress?.(`Downloading SmolVLM-256M (~400 MB) via ${device.toUpperCase()}…`, 10);
-
-        const progressCb = (info) => {
-            if (info.status === 'progress' && typeof info.progress === 'number') {
-                const pct = Math.round(10 + info.progress * 0.85);
-                onProgress?.(`Downloading… ${Math.round(info.progress)}%`, pct);
-            } else if (info.status === 'initiate') {
-                onProgress?.(`Fetching ${info.file || 'model files'}…`, 12);
-            } else if (info.status === 'done') {
-                onProgress?.(`Loaded ${info.file || 'file'}`, 90);
-            }
-        };
-
-        // Load processor (tokenizer + image processor)
-        onProgress?.('Loading processor…', 8);
-        _localVLMProcessor = await AutoProcessor.from_pretrained(LOCAL_VLM_MODEL, {
-            progress_callback: progressCb,
-        });
-
-        // Load model with per-component dtypes for best compat
-        // embed_tokens: fp32 avoids NaN on devices with limited fp16 support
-        // vision_encoder + decoder: q4 for WASM (small/fast), fp16 for WebGPU
-        const dtype = device === 'webgpu'
-            ? { embed_tokens: 'fp16', vision_encoder: 'fp16', decoder_model_merged: 'fp16' }
-            : { embed_tokens: 'fp32', vision_encoder: 'q4',   decoder_model_merged: 'q4'   };
-
-        const tryLoadModel = async (dtypeArg) => AutoModelForVision2Seq.from_pretrained(
-            LOCAL_VLM_MODEL,
-            { dtype: dtypeArg, device, progress_callback: progressCb }
-        );
-
-        try {
-            _localVLMModel = await tryLoadModel(dtype);
-        } catch (dtypeErr) {
-            console.warn('[SmolVLM] dtype failed, retrying with fp32 everywhere:', dtypeErr.message);
-            onProgress?.('Retrying with fp32 (broader compat)…', 20);
-            _localVLMModel = await tryLoadModel('fp32');
-        }
-
-        _localVLMState = 'ready';
-        onProgress?.('Local vision model ready! ✅', 100);
-
-        // Warmup: do a dummy inference so the first real caption isn't laggy
-        try {
-            const { RawImage } = window.__transformers__;
-            const warmImg = new RawImage(new Uint8ClampedArray(224 * 224 * 4), 224, 224);
-            const warmMsgs = [{ role: 'user', content: [{ type: 'image' }, { type: 'text', text: 'hi' }] }];
-            const warmPrompt = _localVLMProcessor.apply_chat_template(warmMsgs, { add_generation_prompt: true });
-            const warmInputs = await _localVLMProcessor(warmPrompt, [warmImg], { do_image_splitting: false });
-            await _localVLMModel.generate({ ...warmInputs, max_new_tokens: 1 });
-        } catch (warmErr) {
-            console.warn('[SmolVLM] Warmup failed (non-critical):', warmErr.message);
-        }
-
-        // Start background captioning loop for bridge mode
-        startBridgeCaptionLoop();
-
-        return true;
-    } catch (err) {
-        console.error('Local VLM init error:', err);
-        _localVLMState = 'error';
-        _localVLMError = err.message;
-        onProgress?.(`❌ Error: ${err.message}`, -1);
-        return false;
-    }
-}
-
-// ── Background bridge captioning ─────────────────────────────
-let _bridgeCaption = null;
-let _bridgeCaptionHash = null;
-let _bridgeCaptionLoopId = null;
-
-function startBridgeCaptionLoop() {
-    if (_bridgeCaptionLoopId) return;
-    _bridgeCaptionLoopId = setInterval(async () => {
-        if (!aiPlayerActive && !buddyActive) return;
-        if (!aiStream && !buddyStream) return;
-        try {
-            const stream = aiStream || buddyStream;
-            const screenshot = await captureScreen(stream);
-            if (!screenshot) return;
-            const hash = quickHash(screenshot);
-            if (hash === _bridgeCaptionHash) return; // unchanged
-            _bridgeCaptionHash = hash;
-            const prompt = buildBridgePrompt();
-            const base64 = screenshot.replace(/^data:image\/(png|jpeg);base64,/, '');
-            const mime = screenshot.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png';
-            const dataUrl = `data:${mime};base64,${base64}`;
-            _bridgeCaption = await callLocalVision(dataUrl, prompt, { maxTokens: 60, downscale: 384 });
-        } catch (err) {
-            // Silent fail — bridge is best-effort
-        }
-    }, 2500); // refresh every 2.5s
-}
-
-function stopBridgeCaptionLoop() {
-    if (_bridgeCaptionLoopId) { clearInterval(_bridgeCaptionLoopId); _bridgeCaptionLoopId = null; }
-    _bridgeCaption = null;
-    _bridgeCaptionHash = null;
-}
-
-function buildBridgePrompt() {
-    const state = _gameState;
-    const ctx = state
-        ? `Mario is at ${state.levelName}, pos(${state.x},${state.y},${state.z}), action:${state.actionName}, speed:${state.speed}, health:${state.health}/8, stars:${state.stars}, coins:${state.coins}`
-        : '';
-    return `Describe this SM64 screenshot in ONE sentence. ${ctx} Focus: Mario's action, nearby enemies/obstacles, and HUD.`;
-}
-
-async function callLocalVision(screenshotDataUrl, textPrompt, opts = {}) {
-    if (_localVLMState !== 'ready' || !_localVLMProcessor || !_localVLMModel) {
-        throw new Error('Local vision model not ready');
-    }
-    const { RawImage } = window.__transformers__;
-
-    // Load the screenshot into a RawImage
-    let image = await RawImage.fromURL(screenshotDataUrl);
-
-    // Downscale large screenshots for speed (SmolVLM expects ~224-384)
-    const targetSize = opts.downscale || 384;
-    if (image.width > targetSize || image.height > targetSize) {
-        image = await image.resize(targetSize, targetSize);
-    }
-
-    // Build chat-style message for SmolVLM
-    const messages = [
-        {
-            role: 'user',
-            content: [
-                { type: 'image' },
-                { type: 'text', text: textPrompt },
-            ],
-        },
-    ];
-
-    // Apply chat template to get the prompt string
-    const prompt = _localVLMProcessor.apply_chat_template(messages, {
-        add_generation_prompt: true,
-    });
-
-    // Tokenise + process image
-    const inputs = await _localVLMProcessor(prompt, [image], {
-        do_image_splitting: false,
-    });
-
-    // Generate
-    const maxTokens = opts.maxTokens || 120;
-    const generatedIds = await _localVLMModel.generate({
-        ...inputs,
-        max_new_tokens: maxTokens,
-    });
-
-    // Decode only the newly generated tokens (strip the input prefix)
-    const inputLen = inputs.input_ids.dims.at(-1);
-    const newIds   = generatedIds.slice(null, [inputLen, null]);
-    const decoded  = _localVLMProcessor.batch_decode(newIds, { skip_special_tokens: true });
-    return (decoded[0] || '').trim();
-}
-
-// ── Non-vision warning modal ──────────────────────────────
-function showVisionRequiredModal() {
-    // Update the modal text based on SmolVLM state
-    const localBtn = document.getElementById('vision-req-local-btn');
-    if (localBtn) {
-        if (_localVLMState === 'ready') {
-            localBtn.textContent = '💻 Use Local Vision Bridge';
-        } else if (_localVLMState === 'loading') {
-            localBtn.textContent = '⏳ Loading…';
-            localBtn.disabled = true;
-        } else {
-            localBtn.textContent = '💻 Load Local Model';
-            localBtn.disabled = false;
-        }
-    }
-    document.getElementById('vision-required-modal').classList.add('open');
-    document.getElementById('vision-required-backdrop').classList.add('open');
-}
-function hideVisionRequiredModal() {
-    document.getElementById('vision-required-modal').classList.remove('open');
-    document.getElementById('vision-required-backdrop').classList.remove('open');
-}
-
-// ── Local model loader modal ──────────────────────────────
-function showLocalModelModal() {
-    hideVisionRequiredModal();
-    document.getElementById('local-model-modal').classList.add('open');
-    document.getElementById('local-model-backdrop').classList.add('open');
-    updateLocalModelProgress('Click Load to download SmolVLM-256M (~400 MB)', 0);
-}
-function hideLocalModelModal() {
-    document.getElementById('local-model-modal').classList.remove('open');
-    document.getElementById('local-model-backdrop').classList.remove('open');
-}
-
-function updateLocalModelProgress(msg, pct) {
-    const bar  = document.getElementById('local-model-bar');
-    const text = document.getElementById('local-model-status');
-    if (text) text.textContent = msg;
-    if (bar)  bar.style.width  = (pct < 0 ? 0 : Math.min(100, pct)) + '%';
-    if (bar)  bar.style.background = pct < 0 ? '#e53935' : '';
-}
-
-document.getElementById('local-model-load-btn')?.addEventListener('click', async () => {
-    const btn = document.getElementById('local-model-load-btn');
-    btn.disabled = true;
-    btn.textContent = 'Loading…';
-    const ok = await initLocalVLM(updateLocalModelProgress);
-    if (ok) {
-        // Only switch to local provider if user isn't already on a cloud provider
-        // If they're on a cloud provider with vision=false, keep it and use bridge mode
-        const wasOnCustom = activeProvider.id === 'custom' && !PROVIDERS.custom.hasVision;
-        const wasOnOtherCloud = activeProvider.id !== 'local' && !providerHasVision();
-
-        if (wasOnCustom || wasOnOtherCloud) {
-            // Bridge mode: keep current cloud provider, SmolVLM handles vision
-            populateModelDropdown();
-            hideLocalModelModal();
-            tts.interrupt('Vision bridge ready! SmolVLM will describe the screen for your cloud AI.');
-        } else {
-            // Switch to local provider
-            activeProvider = PROVIDERS.local;
-            try { localStorage.setItem(PROVIDER_STORAGE, 'local'); } catch {}
-            populateModelDropdown();
-            hideLocalModelModal();
-            tts.interrupt('Local vision model loaded! AI player is ready.');
-        }
-
-        // Update the provider panel local row if it's open
-        const localStatusEl = document.getElementById('provider-local-status');
-        const loadLocalBtnEl = document.getElementById('provider-load-local-btn');
-        if (localStatusEl) localStatusEl.textContent = 'SmolVLM-256M: ✅ Loaded';
-        if (loadLocalBtnEl) { loadLocalBtnEl.textContent = '✅ Loaded'; loadLocalBtnEl.disabled = true; }
-
-        // If AI was waiting to start, retry
-        if (_pendingAIStart) { _pendingAIStart = false; toggleAIPlayer(); }
-    } else {
-        btn.disabled = false;
-        btn.textContent = '↺ Retry';
-    }
-});
-
-document.getElementById('local-model-cancel-btn')?.addEventListener('click', hideLocalModelModal);
-document.getElementById('local-model-backdrop')?.addEventListener('click', hideLocalModelModal);
-document.getElementById('vision-required-backdrop')?.addEventListener('click', hideVisionRequiredModal);
-
-document.getElementById('vision-req-connect-btn')?.addEventListener('click', () => {
-    hideVisionRequiredModal();
-    openProviderPanel('custom');
-});
-document.getElementById('vision-req-local-btn')?.addEventListener('click', () => {
-    if (_localVLMState === 'ready') {
-        // SmolVLM already loaded — just enable bridge mode and start AI
-        hideVisionRequiredModal();
-        tts.interrupt('Vision bridge active. Local model will describe the screen for your cloud AI.');
-        if (_pendingAIStart) { _pendingAIStart = false; toggleAIPlayer(); }
-    } else {
-        showLocalModelModal();
-    }
-});
-
-let _pendingAIStart = false;
-let _memoryOnlyNoticeShown = false;
+// The model dropdown only ever lists Pollinations VISION models (image input),
+// so the connected model can always see the screen.
+function providerHasVision() { return true; }
 
 // ────────────────────────────────────────────────────────────
 // 4. AUTH (Pollinations OAuth)
@@ -1331,257 +770,12 @@ async function fetchVisionModels() {
     }
 }
 
-// Live model list from OpenRouter (/models needs no auth). We read each model's
-// capabilities so the app knows, per model, whether it supports vision (image
-// input) and tool-calling — then picks the right perception mode automatically.
-let _openrouterModelsCache = null;
-// Per-model capability map: { [id]: { vision: bool, tools: bool, name } }
-const _openrouterModelMeta = {};
-
-async function fetchOpenRouterModels() {
-    const select     = document.getElementById('model-select');
-    const statusSpan = document.getElementById('model-status');
-    if (!select) return;
-
-    if (_openrouterModelsCache) { renderOpenRouterModels(_openrouterModelsCache); return; }
-
-    select.innerHTML = '<option value="">Loading models…</option>';
-    select.disabled  = true;
-    if (statusSpan) statusSpan.textContent = 'fetching…';
-
-    try {
-        const res  = await fetch(OPENROUTER_MODELS_URL);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        const models = (data.data || []).map(m => {
-            const vision = (m.architecture?.input_modalities || []).includes('image');
-            const tools  = (m.supported_parameters || []).includes('tools');
-            const meta   = { id: m.id, name: m.name || m.id, vision, tools };
-            _openrouterModelMeta[m.id] = meta;
-            // Pre-seed tool support so we don't waste a probe call
-            _modelToolSupport[m.id] = tools;
-            return meta;
-        }).sort((a, b) => a.id.localeCompare(b.id));
-
-        _openrouterModelsCache = models.length ? models : null;
-        PROVIDERS.openrouter.visionModels = models.filter(m => m.vision).map(m => m.id);
-        renderOpenRouterModels(models);
-    } catch (err) {
-        console.warn('[OpenRouter] model fetch failed, using static list:', err);
-        renderOpenRouterModels((PROVIDERS.openrouter.visionModels || [])
-            .map(id => ({ id, name: id, vision: true, tools: true })));
-        if (statusSpan) statusSpan.textContent = '⚠ offline list';
-    }
-}
-
-function renderOpenRouterModels(models) {
-    const select     = document.getElementById('model-select');
-    const statusSpan = document.getElementById('model-status');
-    if (!select) return;
-    select.innerHTML = '';
-
-    const vision = models.filter(m => m.vision);
-    const text   = models.filter(m => !m.vision);
-    const saved  = localStorage.getItem(MODEL_STORAGE_KEY) || PROVIDERS.openrouter.defaultModel;
-
-    const addGroup = (label, list) => {
-        if (!list.length) return;
-        const grp = document.createElement('optgroup');
-        grp.label = label;
-        for (const m of list) {
-            const opt = document.createElement('option');
-            opt.value = m.id;
-            // Tag capabilities so the user can see them at a glance
-            const tags = `${m.vision ? ' 👁️' : ''}${m.tools ? ' 🛠️' : ''}`;
-            opt.textContent = `${m.name}${tags}`;
-            if (m.id === saved) opt.selected = true;
-            grp.appendChild(opt);
-        }
-        select.appendChild(grp);
-    };
-
-    // Vision models first (recommended), then text-only (memory-only / bridge play)
-    addGroup('👁️ Vision models (see the screen)', vision);
-    addGroup('🧠 Text-only models (memory-only / bridge)', text);
-
-    select.disabled = false;
-    if (statusSpan) statusSpan.textContent = `${vision.length} vision · ${text.length} text-only`;
-}
-
-// Does the currently-selected OpenRouter model support image input?
-function openrouterSelectedHasVision() {
-    const model = getSelectedModel();
-    const meta  = _openrouterModelMeta[model];
-    if (!meta) return true;          // unknown — assume vision (safe default for cloud)
-    return meta.vision === true;
-}
-
-// Debounce to prevent rapid successive calls
-let _customModelsFetchPending = false;
-let _customModelsLastFetch = 0;
-
-// Fetch models from a custom OpenAI-compatible endpoint via /v1/models
-async function fetchCustomModels() {
-    const select     = document.getElementById('model-select');
-    const statusSpan = document.getElementById('model-status');
-    if (!select) return;
-
-    // Debounce: skip if already fetching or fetched < 2s ago
-    if (_customModelsFetchPending) return;
-    const now = Date.now();
-    if (now - _customModelsLastFetch < 2000) return;
-    _customModelsFetchPending = true;
-    _customModelsLastFetch = now;
-
-    // Read base URL from memory or localStorage, strip trailing slash
-    const base = (window._customApiBase || localStorage.getItem('sm64_custom_base') || '').trim().replace(/\/+$/, '');
-    if (!base) {
-        select.innerHTML = '<option value="">⚙️ Set Base URL in API Settings first</option>';
-        select.disabled = true;
-        if (statusSpan) statusSpan.textContent = 'no URL';
-        _customModelsFetchPending = false;
-        return;
-    }
-
-    select.innerHTML = '<option value="">Loading models…</option>';
-    select.disabled  = true;
-    if (statusSpan) statusSpan.textContent = 'fetching…';
-
-    // Sanitize key: strip all whitespace including invisible unicode
-    const rawKey = providerKeys['custom'] || localStorage.getItem('sm64_key_custom') || '';
-    const key = rawKey.replace(/[\s\u200B-\u200D\uFEFF]/g, '');
-
-    // Build headers — only add Authorization if we actually have a key
-    const headers = { 'Content-Type': 'application/json' };
-    if (key) headers['Authorization'] = `Bearer ${key}`;
-
-    const doFetch = (hdrs) => fetch(`${base}/v1/models`, { headers: hdrs });
-
-    try {
-        let res = await doFetch(headers);
-
-        // If 401 and we sent a key, try once more without auth
-        // (some local servers like Ollama/LM Studio don't need auth)
-        if (res.status === 401 && key) {
-            const noAuthHeaders = { 'Content-Type': 'application/json' };
-            const res2 = await doFetch(noAuthHeaders);
-            if (res2.ok) {
-                res = res2;
-            } else {
-                // Both failed — show friendly error, don't throw to console
-                select.innerHTML = '<option value="">🔑 401 — check API key in ⚙️ API Settings</option>';
-                select.disabled = true;
-                if (statusSpan) statusSpan.textContent = '🔑 401';
-                return;
-            }
-        } else if (!res.ok) {
-            throw new Error(`HTTP ${res.status}`);
-        }
-
-        const data = await res.json();
-
-        // OpenAI /v1/models returns { data: [ { id, object, ... }, ... ] }
-        const rawModels = Array.isArray(data) ? data
-            : Array.isArray(data.data) ? data.data
-            : [];
-
-        const modelIds = rawModels
-            .map(m => (typeof m === 'string' ? m : m.id || m.name || ''))
-            .filter(Boolean)
-            .sort();
-
-        select.innerHTML = '';
-        if (!modelIds.length) {
-            select.innerHTML = '<option value="">No models returned</option>';
-            select.disabled = true;
-            if (statusSpan) statusSpan.textContent = '0 models';
-            return;
-        }
-
-        const saved = localStorage.getItem(MODEL_STORAGE_KEY) || modelIds[0];
-        const grp = document.createElement('optgroup');
-        grp.label = PROVIDERS.custom.hasVision
-            ? '🔧 Custom Models (vision enabled)'
-            : '🔧 Custom Models (bridge mode)';
-
-        for (const id of modelIds) {
-            const opt = document.createElement('option');
-            opt.value = id;
-            opt.textContent = id;
-            if (id === saved) opt.selected = true;
-            grp.appendChild(opt);
-        }
-        select.appendChild(grp);
-        select.disabled = false;
-        if (statusSpan) statusSpan.textContent = `${modelIds.length} models`;
-
-        // Cache the list on the provider for re-use
-        PROVIDERS.custom.visionModels = modelIds;
-        PROVIDERS.custom.defaultModel = modelIds.includes(saved) ? saved : modelIds[0];
-
-    } catch (err) {
-        // Only log non-auth errors to console
-        if (!err.message.includes('401')) console.error('[Custom] /v1/models fetch failed:', err);
-        select.innerHTML = `<option value="">⚠ ${err.message} — check ⚙️ API Settings</option>`;
-        select.disabled = true;
-        if (statusSpan) statusSpan.textContent = '⚠ error';
-    } finally {
-        _customModelsFetchPending = false;
-    }
-}
 
 function populateModelDropdown() {
     const select     = document.getElementById('model-select');
     const statusSpan = document.getElementById('model-status');
     if (!select) return;
 
-    // Local provider — single fixed model
-    if (activeProvider.id === 'local') {
-        select.innerHTML = '';
-        const grp = document.createElement('optgroup');
-        grp.label = '💻 Local Model (in-browser)';
-        const opt = document.createElement('option');
-        opt.value = LOCAL_VLM_MODEL;
-        opt.textContent = `SmolVLM-256M — ${_localVLMState === 'ready' ? '✅ loaded' : '⏳ not loaded'}`;
-        opt.selected = true;
-        grp.appendChild(opt);
-        select.appendChild(grp);
-        select.disabled = true;
-        if (statusSpan) statusSpan.textContent = _localVLMState === 'ready' ? '✅ local' : '⏳ not loaded';
-        return;
-    }
-
-    // Custom OpenAI-compat provider — fetch /v1/models dynamically
-    if (activeProvider.id === 'custom') {
-        fetchCustomModels();
-        return;
-    }
-
-    // OpenRouter — fetch vision models live (cached)
-    if (activeProvider.id === 'openrouter') {
-        fetchOpenRouterModels();
-        return;
-    }
-
-    // Named providers (openai, anthropic, gemini) — show static vision model list
-    if (activeProvider.id !== 'pollinations') {
-        const models = activeProvider.visionModels || [];
-        select.innerHTML = '';
-        const grp = document.createElement('optgroup');
-        grp.label = `${activeProvider.label} Vision Models`;
-        const saved = localStorage.getItem(MODEL_STORAGE_KEY) || activeProvider.defaultModel;
-        for (const m of models) {
-            const opt = document.createElement('option');
-            opt.value = m;
-            opt.textContent = m;
-            if (m === saved) opt.selected = true;
-            grp.appendChild(opt);
-        }
-        select.appendChild(grp);
-        select.disabled = false;
-        if (statusSpan) statusSpan.textContent = `${models.length} models`;
-        return;
-    }
 
     const visible   = showPaidModels ? allVisionModels : allVisionModels.filter(m => !m.paid_only);
     const savedModel = localStorage.getItem(MODEL_STORAGE_KEY) || DEFAULT_MODEL;
@@ -1634,32 +828,33 @@ document.getElementById('show-paid-toggle').addEventListener('change', (e) => {
 });
 
 // ────────────────────────────────────────────────────────────
-// 7. PROVIDER SETTINGS PANEL
+// 7. PROVIDER SETTINGS PANEL  (Pollinations-only)
 // ────────────────────────────────────────────────────────────
 function buildProviderPanel() {
     const panel = document.getElementById('provider-panel');
     if (!panel) return;
     panel.innerHTML = '';
 
-    // Provider selector
-    const row = document.createElement('div');
-    row.className = 'provider-row';
-    row.innerHTML = '<label class="provider-label">AI Provider</label>';
+    // This app is Pollinations-exclusive — Pollinations handles every model + API.
+    const intro = document.createElement('p');
+    intro.className = 'provider-bridge-note';
+    intro.innerHTML = '🌸 <strong>Powered by Pollinations AI.</strong> Pick any vision model from the model dropdown in the top bar — no other API keys needed.';
+    panel.appendChild(intro);
 
-    const sel = document.createElement('select');
-    sel.id = 'provider-select';
-    sel.className = 'provider-select';
-    for (const [id, p] of Object.entries(PROVIDERS)) {
-        const opt = document.createElement('option');
-        opt.value = id;
-        opt.textContent = `${p.icon} ${p.label}`;
-        if (id === activeProvider.id) opt.selected = true;
-        sel.appendChild(opt);
-    }
-    row.appendChild(sel);
-    panel.appendChild(row);
+    // Connection status row
+    const connRow = document.createElement('div');
+    connRow.className = 'provider-row';
+    const connLabel = document.createElement('label');
+    connLabel.className = 'provider-label';
+    connLabel.textContent = 'Pollinations account';
+    const connStatus = document.createElement('span');
+    connStatus.className = 'provider-local-status';
+    connStatus.textContent = pollinationsKey ? '✅ Connected' : '⬜ Not connected';
+    connRow.appendChild(connLabel);
+    connRow.appendChild(connStatus);
+    panel.appendChild(connRow);
 
-    // Vision source row (applies to every provider) — canvas grab vs screen-share
+    // Vision source row — direct canvas grab vs screen-share
     const visRow = document.createElement('div');
     visRow.className = 'provider-row';
     const visLabel = document.createElement('label');
@@ -1676,219 +871,22 @@ function buildProviderPanel() {
     visRow.appendChild(visSel);
     panel.appendChild(visRow);
 
-    // Key input (hidden for Pollinations OAuth)
-    const keyRow = document.createElement('div');
-    keyRow.className = 'provider-row';
-    keyRow.id = 'provider-key-row';
-
-    const keyLabel = document.createElement('label');
-    keyLabel.className = 'provider-label';
-    keyLabel.textContent = activeProvider.keyLabel;
-
-    const keyInput = document.createElement('input');
-    keyInput.type = 'password';
-    keyInput.id   = 'provider-key-input';
-    keyInput.className = 'provider-key-input';
-    keyInput.placeholder = activeProvider.keyPlaceholder;
-    keyInput.value = providerKeys[activeProvider.id] || '';
-    if (activeProvider.oauthOnly) { keyInput.disabled = true; keyInput.placeholder = 'Connected via OAuth'; }
-    if (activeProvider.noKey) { keyInput.disabled = true; keyInput.placeholder = 'No key needed — runs locally'; }
-
-    keyRow.appendChild(keyLabel);
-    keyRow.appendChild(keyInput);
-    panel.appendChild(keyRow);
-
-    // Placeholder for dynamic custom rows — inserted after key row
-    const customRowsContainer = document.createElement('div');
-    customRowsContainer.id = 'custom-provider-rows';
-    panel.appendChild(customRowsContainer);
-
-    function buildCustomRows(providerId) {
-        customRowsContainer.innerHTML = '';
-        if (providerId !== 'custom') return;
-
-        // Base URL input
-        const urlRow = document.createElement('div');
-        urlRow.className = 'provider-row';
-        const urlLabel = document.createElement('label');
-        urlLabel.className = 'provider-label';
-        urlLabel.textContent = 'Base URL';
-        const urlInput = document.createElement('input');
-        urlInput.type = 'text'; urlInput.id = 'custom-base-url';
-        urlInput.className = 'provider-key-input';
-        urlInput.placeholder = 'https://your-api.example.com';
-        urlInput.value = window._customApiBase
-            || (localStorage.getItem('sm64_custom_base') || '');
-        urlInput.addEventListener('input', () => {
-            window._customApiBase = urlInput.value.trim();
-        });
-        urlRow.appendChild(urlLabel);
-        urlRow.appendChild(urlInput);
-        customRowsContainer.appendChild(urlRow);
-
-        // Vision toggle row
-        const visionRow = document.createElement('div');
-        visionRow.className = 'provider-row provider-vision-row';
-
-        const visionLabelEl = document.createElement('label');
-        visionLabelEl.className = 'provider-label';
-        visionLabelEl.textContent = 'Model supports vision (image input)';
-
-        const visionToggleWrap = document.createElement('label');
-        visionToggleWrap.className = 'provider-toggle-wrap';
-
-        const visionCheck = document.createElement('input');
-        visionCheck.type = 'checkbox'; visionCheck.id = 'custom-vision-check';
-        visionCheck.checked = PROVIDERS.custom.hasVision === true;
-
-        const toggleTrack = document.createElement('span');
-        toggleTrack.className = 'toggle-track';
-        const toggleThumb = document.createElement('span');
-        toggleThumb.className = 'toggle-thumb';
-        toggleTrack.appendChild(toggleThumb);
-
-        const visionToggleLabel = document.createElement('span');
-        visionToggleLabel.className = 'provider-toggle-label';
-        visionToggleLabel.id = 'custom-vision-label';
-        visionToggleLabel.textContent = PROVIDERS.custom.hasVision ? 'Vision ON' : 'Visionless — bridge mode';
-
-        visionCheck.addEventListener('change', () => {
-            PROVIDERS.custom.hasVision = visionCheck.checked;
-            visionToggleLabel.textContent = visionCheck.checked ? 'Vision ON' : 'Visionless — bridge mode';
-            bridgeNote.style.display = visionCheck.checked ? 'none' : 'block';
-            try { localStorage.setItem('sm64_custom_vision', visionCheck.checked ? '1' : '0'); } catch {}
-        });
-
-        visionToggleWrap.appendChild(visionCheck);
-        visionToggleWrap.appendChild(toggleTrack);
-        visionToggleWrap.appendChild(visionToggleLabel);
-
-        visionRow.appendChild(visionLabelEl);
-        visionRow.appendChild(visionToggleWrap);
-        customRowsContainer.appendChild(visionRow);
-
-        // Bridge mode note
-        const bridgeNote = document.createElement('p');
-        bridgeNote.className = 'provider-bridge-note';
-        bridgeNote.id = 'custom-bridge-note';
-        bridgeNote.innerHTML = '🔭 <strong>Bridge mode:</strong> SmolVLM will caption the screen locally, then send the description to your cloud LLM. Load the local model first.';
-        bridgeNote.style.display = PROVIDERS.custom.hasVision ? 'none' : 'block';
-        customRowsContainer.appendChild(bridgeNote);
-
-        // Refresh models button — fetches /v1/models and shows count inline
-        const refreshRow = document.createElement('div');
-        refreshRow.className = 'provider-row provider-local-row';
-        const refreshStatus = document.createElement('span');
-        refreshStatus.className = 'provider-local-status';
-        refreshStatus.id = 'custom-model-fetch-status';
-        refreshStatus.textContent = PROVIDERS.custom.visionModels?.length
-            ? `${PROVIDERS.custom.visionModels.length} models cached`
-            : 'Models not yet fetched';
-        const refreshBtn = document.createElement('button');
-        refreshBtn.className = 'provider-load-local-btn';
-        refreshBtn.textContent = '🔄 Fetch Models';
-        refreshBtn.addEventListener('click', async () => {
-            refreshBtn.disabled = true;
-            refreshBtn.textContent = '⏳ Fetching…';
-            refreshStatus.textContent = 'Connecting…';
-            // Read current URL/key from inputs before saving
-            const urlEl = document.getElementById('custom-base-url');
-            const keyEl = document.getElementById('provider-key-input');
-            if (urlEl) window._customApiBase = urlEl.value.trim();
-            if (keyEl) providerKeys['custom'] = keyEl.value.trim();
-            // Temporarily switch to custom so fetchCustomModels works
-            const prevProvider = activeProvider;
-            activeProvider = PROVIDERS.custom;
-            await fetchCustomModels();
-            activeProvider = prevProvider;
-            const count = PROVIDERS.custom.visionModels?.length || 0;
-            refreshStatus.textContent = count ? `✅ ${count} models fetched` : '⚠ No models returned';
-            refreshBtn.disabled = false;
-            refreshBtn.textContent = '🔄 Fetch Models';
-        });
-        refreshRow.appendChild(refreshStatus);
-        refreshRow.appendChild(refreshBtn);
-        customRowsContainer.appendChild(refreshRow);
-
-        // Local model status + load button
-        const localRow = document.createElement('div');
-        localRow.className = 'provider-row provider-local-row';
-        localRow.id = 'provider-local-row';
-        const localStatus = document.createElement('span');
-        localStatus.className = 'provider-local-status';
-        localStatus.id = 'provider-local-status';
-        const stateMap = { idle: '⬜ Not loaded', loading: '⏳ Loading…', ready: '✅ Loaded', error: '❌ Error' };
-        localStatus.textContent = `SmolVLM-256M: ${stateMap[_localVLMState] || '⬜ Not loaded'}`;
-        const loadLocalBtn = document.createElement('button');
-        loadLocalBtn.className = 'provider-load-local-btn';
-        loadLocalBtn.id = 'provider-load-local-btn';
-        loadLocalBtn.textContent = _localVLMState === 'ready' ? '✅ Loaded' : '⬇ Load Local Model';
-        loadLocalBtn.disabled = _localVLMState === 'ready' || _localVLMState === 'loading';
-        loadLocalBtn.addEventListener('click', () => {
-            showLocalModelModal();
-        });
-        localRow.appendChild(localStatus);
-        localRow.appendChild(loadLocalBtn);
-        customRowsContainer.appendChild(localRow);
-    }
-
-    buildCustomRows(activeProvider.id);
-
-    // Save button
-    const saveBtn = document.createElement('button');
-    saveBtn.className = 'provider-save-btn';
-    saveBtn.textContent = '✓ Save & Apply';
-    saveBtn.addEventListener('click', () => {
-        const newId = sel.value;
-        activeProvider = PROVIDERS[newId];
-        // Strip all whitespace including invisible unicode from key
-        const newKey = keyInput.value.replace(/[\s\u200B-\u200D\uFEFF]/g, '');
-        if (newKey && !activeProvider.oauthOnly) {
-            providerKeys[newId] = newKey;
-            try { localStorage.setItem(`sm64_key_${newId}`, newKey); } catch {}
-        }
-        // Persist custom provider settings
-        if (newId === 'custom') {
-            const urlEl = document.getElementById('custom-base-url');
-            if (urlEl) {
-                window._customApiBase = urlEl.value.trim();
-                try { localStorage.setItem('sm64_custom_base', window._customApiBase); } catch {}
-            }
-            const visionEl = document.getElementById('custom-vision-check');
-            if (visionEl) {
-                PROVIDERS.custom.hasVision = visionEl.checked;
-                try { localStorage.setItem('sm64_custom_vision', visionEl.checked ? '1' : '0'); } catch {}
-            }
-        }
-        try { localStorage.setItem(PROVIDER_STORAGE, newId); } catch {}
-        populateModelDropdown();
+    // Connect / reconnect button
+    const connectBtn = document.createElement('button');
+    connectBtn.className = 'provider-save-btn';
+    connectBtn.textContent = pollinationsKey ? '🔄 Reconnect Pollinations' : '🔗 Connect Pollinations';
+    connectBtn.addEventListener('click', () => {
         closeProviderPanel();
-        tts.interrupt(`Switched to ${activeProvider.label}.`);
+        document.getElementById('auth-overlay')?.classList.remove('hidden');
     });
-    panel.appendChild(saveBtn);
-
-    // Update key row + custom rows on provider change
-    sel.addEventListener('change', () => {
-        const p = PROVIDERS[sel.value];
-        keyLabel.textContent    = p.keyLabel;
-        keyInput.placeholder    = p.noKey ? 'No key needed — runs locally' : p.keyPlaceholder;
-        keyInput.disabled       = !!(p.oauthOnly || p.noKey);
-        keyInput.value          = providerKeys[p.id] || '';
-        buildCustomRows(p.id);
-    });
+    panel.appendChild(connectBtn);
 }
 
-function openProviderPanel(preselect) {
-    // If called from auth screen with no provider set, pre-select custom
-    if (preselect) {
-        const p = PROVIDERS[preselect];
-        if (p) activeProvider = p;
-    }
+function openProviderPanel() {
     buildProviderPanel();
     document.getElementById('provider-modal').classList.add('open');
     document.getElementById('provider-backdrop').classList.add('open');
 }
-// Expose globally so inline scripts (non-module) can call it
 window.openProviderPanel = openProviderPanel;
 
 function closeProviderPanel() {
@@ -1900,23 +898,8 @@ document.getElementById('provider-btn')?.addEventListener('click', openProviderP
 document.getElementById('provider-backdrop')?.addEventListener('click', closeProviderPanel);
 document.getElementById('close-provider-btn')?.addEventListener('click', closeProviderPanel);
 
-// Restore saved provider + keys on load
-function restoreProviderState() {
-    try {
-        const savedProvider = localStorage.getItem(PROVIDER_STORAGE);
-        if (savedProvider && PROVIDERS[savedProvider]) activeProvider = PROVIDERS[savedProvider];
-        for (const id of Object.keys(PROVIDERS)) {
-            const k = localStorage.getItem(`sm64_key_${id}`);
-            // Sanitize on restore too — strip invisible unicode/whitespace
-            if (k) providerKeys[id] = k.replace(/[\s\u200B-\u200D\uFEFF]/g, '');
-        }
-        // Restore custom provider settings
-        const savedBase   = localStorage.getItem('sm64_custom_base');
-        const savedVision = localStorage.getItem('sm64_custom_vision');
-        if (savedBase)   window._customApiBase       = savedBase;
-        if (savedVision !== null) PROVIDERS.custom.hasVision = savedVision === '1';
-    } catch {}
-}
+// Pollinations-only: nothing extra to restore (auth handled by initAuth).
+function restoreProviderState() {}
 
 // ────────────────────────────────────────────────────────────
 // 8. CONTROLS GUIDE  (one AI call, cached in localStorage)
@@ -2015,13 +998,13 @@ document.getElementById('controls-toggle-btn')?.addEventListener('click', () => 
 const TUTORIAL_STEPS = [
     {
         icon: '🍄', title: 'Welcome to SM64 AI Player',
-        body: 'Watch an AI play Super Mario 64 in real time, get coached by your AI buddy, and give live instructions — all powered by your chosen AI provider.',
+        body: 'Watch an AI play Super Mario 64 in real time, get coached by your AI buddy, and give live instructions — all powered by Pollinations AI.',
         narration: 'Welcome to SM64 AI Player! Watch an AI play Super Mario 64 in real time, get coached by your AI buddy, and give live instructions.',
     },
     {
         icon: '🔑', title: 'Step 1 — Connect Your Account',
-        body: 'Click the green Connect button to link your Pollinations account via OAuth. Or open API Settings to use OpenAI, Anthropic, Gemini, or any custom OpenAI-compatible endpoint.',
-        narration: 'Connect your Pollinations account with the green button, or open API Settings to use OpenAI, Anthropic, Gemini, or a custom endpoint.',
+        body: 'Click the green Connect button to link your Pollinations account via OAuth, then pick any vision model from the model dropdown. No other API keys needed.',
+        narration: 'Connect your Pollinations account with the green button, then pick a vision model from the dropdown.',
     },
     {
         icon: '🎮', title: 'Step 2 — Play It Yourself',
@@ -2394,6 +1377,21 @@ if (typeof _turboCfg.live     === 'undefined') _turboCfg.live     = false; // co
 let _turboLoop = null;
 let _liveLoop  = null;
 
+// ── PRE-PLAN MODE (mini-TAS) ──────────────────────────────────────────
+// Instead of one small move per turn, the AI studies the frame and writes a
+// COMPLETE multi-step script (a mini-TAS) executed in a single turn. Either the
+// AI opts in (response.preplan === true) or the user forces it every turn.
+//   _preplanMode : user-forced on/off
+//   _preplanCap  : max steps per script (0 = unlimited)
+let _preplanMode = (() => { try { return localStorage.getItem('sm64_preplan') === '1'; } catch { return false; } })();
+let _preplanCap  = (() => { try { const v = parseInt(localStorage.getItem('sm64_preplan_cap'), 10); return Number.isFinite(v) ? v : 20; } catch { return 20; } })();
+function savePreplanState() {
+    try {
+        localStorage.setItem('sm64_preplan', _preplanMode ? '1' : '0');
+        localStorage.setItem('sm64_preplan_cap', String(_preplanCap));
+    } catch {}
+}
+
 // Constant frame updates: continuously capture the live game so the AI's view
 // is always current, and the "what the AI sees" panel shows live gameplay
 // (not just the frozen request frame).
@@ -2564,48 +1562,26 @@ async function aiThink() {
     updateAIStatus('🤔 Thinking…');
 
     try {
-        // How will the model perceive the game this turn?
-        const visionOK   = providerHasVision();                       // model accepts images
-        const bridgeOK   = !visionOK && _localVLMState === 'ready';    // SmolVLM captions for it
-        const memoryOnly = !visionOK && !bridgeOK;                     // play from RAM alone
-
-        // Live game state from WASM memory — our ground truth, always read
+        // Live game state from WASM memory (null when memory reading is disabled).
         const gameState = readGameState();
 
-        let screenshot = null;
-        if (!memoryOnly) {
-            // In live mode the background loop is the single capturer — reuse its
-            // freshest frame (always current) instead of double-capturing.
-            screenshot = (_turboMode && _turboCfg.live && _liveFrame)
-                ? _liveFrame
-                : await captureScreen(aiStream);
-            if (!screenshot) { updateAIStatus('❌ Failed to capture game view'); _isThinking = false; return null; }
-            // Skip if the frame is identical to recent ones (nothing changed).
-            // Advanced turbo (max overdrive) never skips — it always re-thinks.
-            const skipIdentical = !(_turboMode && _turboCfg.advanced);
-            if (skipIdentical && isFrameIdentical(screenshot)) {
-                updateAIStatus('💤 Screen unchanged — skipping inference');
-                _isThinking = false;
-                return null;
-            }
-            if (bridgeOK) updateAIStatus('🔭 Vision bridge: captioning screen…');
-            _frameHistory.push(screenshot);            // keep recent frames for is_stuck/is_trapped
-            if (_frameHistory.length > 6) _frameHistory.shift();
-        } else {
-            // Memory-only: a non-vision model plays purely from RAM state + game knowledge.
-            if (!gameState) {
-                updateAIStatus('⏳ Waiting for game memory (no vision)…');
-                _isThinking = false;
-                return null;
-            }
-            const sHash = `${gameState.x},${gameState.y},${gameState.z},${gameState.actionId},${gameState.stars},${gameState.coins}`;
-            if (isStateIdentical(sHash)) {
-                updateAIStatus('💤 Game state unchanged — skipping inference');
-                _isThinking = false;
-                return null;
-            }
-            updateAIStatus('🧠 Memory-only play (no vision)…');
+        // Pollinations vision model — always capture the screen.
+        // In live mode the background loop is the single capturer — reuse its
+        // freshest frame (always current) instead of double-capturing.
+        let screenshot = (_turboMode && _turboCfg.live && _liveFrame)
+            ? _liveFrame
+            : await captureScreen(aiStream);
+        if (!screenshot) { updateAIStatus('❌ Failed to capture game view'); _isThinking = false; return null; }
+        // Skip if the frame is identical to recent ones (nothing changed).
+        // Advanced turbo (max overdrive) never skips — it always re-thinks.
+        const skipIdentical = !(_turboMode && _turboCfg.advanced);
+        if (skipIdentical && isFrameIdentical(screenshot)) {
+            updateAIStatus('💤 Screen unchanged — skipping inference');
+            _isThinking = false;
+            return null;
         }
+        _frameHistory.push(screenshot);            // keep recent frames for is_stuck/is_trapped
+        if (_frameHistory.length > 6) _frameHistory.shift();
 
         const { t1, t2 } = await loadTrainingData();
 
@@ -2630,7 +1606,7 @@ async function aiThink() {
             // Huge instantaneous jumps usually mean a warp, painting entry, OR an
             // attract-mode DEMO cutting between scenes (a menu is playing demos).
             if (dist > 4000) motionCtx += `\n📍 Mario's position jumped ${dist} units suddenly — you likely warped, entered a painting, OR this is a title-screen DEMO cutting scenes. Re-check the SCREEN type before acting.`;
-        } else if (!memoryOnly && _prevScreenshot && screenshot && _prevScreenshot !== screenshot) {
+        } else if (_prevScreenshot && screenshot && _prevScreenshot !== screenshot) {
             // No reliable memory — derive an OBJECTIVE motion signal from the pixels
             // so stuck-detection and "did my move work?" still function on vision alone.
             const vm = await _frameDiffScore(_prevScreenshot, screenshot);
@@ -2646,26 +1622,18 @@ async function aiThink() {
 
         const memOn = gameState != null;   // false when memory reading is disabled
 
-        const perceptionNote = memoryOnly
-            ? 'IMPORTANT: You CANNOT see the screen. Play entirely from the LIVE GAME STATE (RAM) below plus your knowledge of Super Mario 64. Reason from Mario\'s position (x,y,z), action, speed and camera angle. Call the get_game_state tool whenever you need exact, fresh numbers.'
-            : (bridgeOK
-                ? 'A local vision model describes the screen for you (see the SCREEN DESCRIPTION).'
-                : (memOn
-                    ? 'Analyze the screenshot together with the LIVE GAME STATE below.'
-                    : 'Analyze the screenshot. NOTE: there is NO live memory readout on this build — rely entirely on what you SEE in the image.'));
+        const perceptionNote = memOn
+            ? 'Analyze the screenshot together with the LIVE GAME STATE below.'
+            : 'Analyze the screenshot. NOTE: there is NO live memory readout on this build — rely entirely on what you SEE in the image.';
 
-        const hierarchyNote = memoryOnly
-            ? `HOW TO DECIDE (you have no vision):
-1) MEMORY FIRST — reason from the live game-state numbers (position, facing, speed, action) and SM64 knowledge.
-2) ANTI-STUCK TOOLS — if the numbers stop changing or you can't tell what's going on, call is_stuck / is_trapped.`
-            : (memOn
-                ? `HOW TO DECIDE — strictly in this order:
+        const hierarchyNote = memOn
+            ? `HOW TO DECIDE — strictly in this order:
 1) VISUALS FIRST — trust what you SEE in the CURRENT frame; your eyes rarely lie. Figure out the screen type and what is actually around Mario right now.
 2) MEMORY SECOND — use the live game-state numbers to confirm/refine what you see. If the picture and the numbers DISAGREE, trust your EYES.
 3) ANTI-STUCK TOOLS THIRD — only when BOTH visuals and numbers are ambiguous, call is_stuck / is_trapped for a second opinion.`
-                : `HOW TO DECIDE:
+            : `HOW TO DECIDE:
 1) VISUALS FIRST — your EYES are the only source of truth here (no live memory). Identify the screen type and what is actually around Mario in the CURRENT frame, and act on that.
-2) ANTI-STUCK TOOLS — if you genuinely can't tell whether you're moving or you look stuck/softlocked, call is_stuck / is_trapped before doing anything drastic.`);
+2) ANTI-STUCK TOOLS — if you genuinely can't tell whether you're moving or you look stuck/softlocked, call is_stuck / is_trapped before doing anything drastic.`;
 
         const movementCtx = '\n\nNOTE: The player is idle (no input detected).';
         const planCtx = _aiGoal
@@ -2674,6 +1642,11 @@ async function aiThink() {
         const lastActCtx = _lastActionSummary
             ? `\n\nYOUR LAST ACTION was: ${_lastActionSummary}. Use the movement/visual-change feedback below to judge if it worked — if it barely moved you, do something DIFFERENT this turn.`
             : '';
+        // Pre-plan (mini-TAS): the AI writes a full multi-step script this turn.
+        const capTxt = _preplanCap > 0 ? `up to ${_preplanCap}` : 'as many as you need';
+        const preplanCtx = _preplanMode
+            ? `\n\n🧠 PRE-PLAN MODE IS ON. Do NOT make one tiny move. STUDY this frame, then write a COMPLETE step-by-step SCRIPT in "actions" (${capTxt} groups) that makes real, visible progress toward your goal — e.g. turn to face the door, run to it, climb the stairs, open it. Think like a speedrun route: each group is one timed key-hold, executed in order. The whole script runs this turn (it auto-stops if the scene changes unexpectedly), so plan a sane chunk you're confident about. Set "preplan": true.`
+            : `\n\n🧠 OPTIONAL PRE-PLAN: if you can clearly see a multi-step path (e.g. a straight run to a visible door), you MAY set "preplan": true and put the FULL multi-step SCRIPT in "actions" (${capTxt} groups) to cover more ground in one turn. Otherwise keep it short.`;
         const memoryCtx   = aiMemory.length > 0
             ? `\n\nPAST MISTAKES TO AVOID:\n${aiMemory.slice(-5).map((m, i) => `${i + 1}. ${m}`).join('\n')}`
             : '';
@@ -2746,7 +1719,7 @@ RULES:
 - ${memOn
     ? 'You may use tools (get_game_state, set_game_speed for tricky jumps, save_move/play_move for reusable sequences) when helpful, but don\'t call tools every turn.'
     : 'There is no reliable game memory — judge everything from the image. You may use set_game_speed, is_stuck/is_trapped, or save_move/play_move when helpful, but don\'t call tools every turn.'}
-${movementCtx}${planCtx}${lastActCtx}${memStateCtx}${motionCtx}${memoryCtx}${notesCtx}${instrCtx}${trainingCtx}
+${movementCtx}${planCtx}${lastActCtx}${preplanCtx}${memStateCtx}${motionCtx}${memoryCtx}${notesCtx}${instrCtx}${trainingCtx}
 
 Respond with ONLY valid JSON (no markdown fences):
 {
@@ -2758,45 +1731,41 @@ Respond with ONLY valid JSON (no markdown fences):
   "speech": "short streamer commentary (max 15 words) — omit if rapid_fire is true",
   "mistake": "error noticed or null",
   "notes": ["optional NEW insight worth remembering — omit or [] if none"],
+  "preplan": false,
   "rapid_fire": false
 }
 
-Each group is {"keys":[...simultaneous...], "hold_ms": N}; plain arrays like ["ArrowUp"] also work with a default hold. Hold guide: FORWARD travel 1200–2500ms (go far); a TURN to re-aim (Left/Right alone) 250–500ms (short, or you spin in circles); jumps/dialog 150–350ms. Max 5 groups.
+Each group is {"keys":[...simultaneous...], "hold_ms": N}; plain arrays like ["ArrowUp"] also work with a default hold. Hold guide: FORWARD travel 1200–2500ms (go far); a TURN to re-aim (Left/Right alone) 250–500ms (short, or you spin in circles); jumps/dialog 150–350ms. ${_preplanMode ? `In PRE-PLAN mode give a full ${capTxt}-group script.` : 'Normally 1–5 groups (more only if you set preplan:true).'}
 Valid keys: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jump, start, crouch, action, cameraLeft`;
 
-        let userMessage;
-        if (memoryOnly) {
-            setAIVisionFrame(null);   // streamer overlay shows "no vision" placeholder
-            userMessage = {
-                role: 'user',
-                content: 'Based on the live game state, what should I do next? Call get_game_state first if you need exact numbers. Respond with ONLY the JSON.',
-            };
-        } else {
-            // Single-frame perception: the AI acts on ONE current frame, annotated
-            // with a nav grid + compass. (The previous-frame comparison was removed —
-            // it confused the model into acting on the old frame; an objective motion
-            // % is fed in TEXT instead, which is clearer and cheaper.)
-            let visionImg = screenshot;
-            let promptText = 'This is the CURRENT live frame, overlaid with a faint 3×3 navigation grid (cells TL/T/TR · L/C/R · BL/B/BR) and a camera-relative compass marking which arrow key moves Mario which way on screen. First name the grid cell your target is in and which way you must turn to face it, then choose your actions.';
-            try {
-                visionImg = await annotateCurrentFrame(screenshot);
-            } catch (e) {
-                visionImg = screenshot;   // annotate failed — use the raw current frame
-            }
-            setAIVisionFrame(visionImg);   // mirror exactly what the AI sees into streamer mode
-            userMessage = {
-                role: 'user',
-                content: [
-                    { type: 'text', text: promptText },
-                    { type: 'image_url', image_url: { url: visionImg } },
-                ],
-            };
+        // Single-frame perception: the AI acts on ONE current frame, annotated
+        // with a nav grid + compass. (The previous-frame comparison was removed —
+        // it confused the model into acting on the old frame; an objective motion
+        // % is fed in TEXT instead, which is clearer and cheaper.)
+        let visionImg = screenshot;
+        const promptText = 'This is the CURRENT live frame, overlaid with a faint 3×3 navigation grid (cells TL/T/TR · L/C/R · BL/B/BR) and a camera-relative compass marking which arrow key moves Mario which way on screen. First name the grid cell your target is in and which way you must turn to face it, then choose your actions.';
+        try {
+            visionImg = await annotateCurrentFrame(screenshot);
+        } catch (e) {
+            visionImg = screenshot;   // annotate failed — use the raw current frame
         }
+        setAIVisionFrame(visionImg);   // mirror exactly what the AI sees into streamer mode
+        const userMessage = {
+            role: 'user',
+            content: [
+                { type: 'text', text: promptText },
+                { type: 'image_url', image_url: { url: visionImg } },
+            ],
+        };
 
+        // Pre-plan scripts can be long — give the model room for the whole sequence.
+        const maxTokens = _preplanMode
+            ? Math.min(2000, 500 + (_preplanCap > 0 ? _preplanCap : 40) * 25)
+            : 400;
         const rawContent = await callChatWithTools([
             { role: 'system', content: systemPrompt },
             userMessage,
-        ], { json: true, max_tokens: 400 });
+        ], { json: true, max_tokens: maxTokens });
 
         const clean    = rawContent.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
         const response = JSON.parse(clean);
@@ -2923,20 +1892,42 @@ function _summarizeActions(groups) {
     }).filter(Boolean).join(' → ');
 }
 
+// Is this turn a pre-plan (mini-TAS) run? Either the user forces it, or the AI
+// opted in by returning preplan:true.
+function _isPreplan(response) {
+    return _preplanMode || response?.preplan === true;
+}
+
 async function aiExecute(response) {
     if (!response?.actions?.length) return;
     let groups = response.actions;
-    // Turbo "multi-request gameplay": execute only the FIRST action group, then
-    // re-think immediately so the AI can correct itself mid-sequence.
-    if (_turboMode && _turboCfg.multi) groups = groups.slice(0, 1);
+    const preplan = _isPreplan(response);
+
+    if (preplan) {
+        // Mini-TAS: run the whole scripted sequence this turn (capped unless the
+        // user chose unlimited). Auto-aborts on player input / dramatic change.
+        if (_preplanCap > 0) groups = groups.slice(0, _preplanCap);
+    } else if (_turboMode && _turboCfg.multi) {
+        // Turbo "multi-request gameplay": execute only the FIRST group, then
+        // re-think immediately so the AI can correct itself mid-sequence.
+        groups = groups.slice(0, 1);
+    }
+
     _lastActions = response.actions;
     _lastActionSummary = _summarizeActions(groups);
-    updateAIStatus(`🎮 Executing ${groups.length} action group${groups.length > 1 ? 's' : ''}…`);
+    updateAIStatus(preplan
+        ? `🧠 Pre-plan: running ${groups.length}-step script…`
+        : `🎮 Executing ${groups.length} action group${groups.length > 1 ? 's' : ''}…`);
 
     const fast = _turboMode || _rapidFireActive;
+    // Scene-change watchdog: in pre-plan (outside turbo) we snapshot between steps
+    // and bail out if the view changes drastically (fell, warped, entered water).
+    const watch = preplan && !_turboMode;
+    let watchFrame = watch ? await captureScreen(aiStream).catch(() => null) : null;
 
     for (let i = 0; i < groups.length; i++) {
         if (!aiPlayerActive) break;
+        if (preplan && playerMovementDetected) { updateAIStatus('✋ Pre-plan aborted — you took control'); break; }
         const { keys, ms } = _normalizeGroup(groups[i], fast);
         if (!keys.length) continue;
         // Hold all keys in the group simultaneously for the (sustained) duration
@@ -2944,8 +1935,17 @@ async function aiExecute(response) {
             const keyCode = keyMap[action];
             if (keyCode) simulateKeyPress(keyCode, Math.max(70, ms * 0.92));
         }
-        updateAIStatus(`🎮 [${i + 1}/${groups.length}] ${keys.join(' + ')} (${Math.round(ms)}ms)`);
+        updateAIStatus(`${preplan ? '🧠' : '🎮'} [${i + 1}/${groups.length}] ${keys.join(' + ')} (${Math.round(ms)}ms)`);
         await delay(ms);
+
+        if (watch && i < groups.length - 1) {
+            const nowFrame = await captureScreen(aiStream).catch(() => null);
+            if (nowFrame && watchFrame) {
+                const d = await _frameDiffScore(watchFrame, nowFrame);
+                if (d != null && d > 0.6) { updateAIStatus('🛑 Big change mid-plan — re-planning'); break; }
+            }
+            if (nowFrame) watchFrame = nowFrame;
+        }
     }
     updateAIStatus('✅ Done');
 }
@@ -3025,35 +2025,10 @@ function scheduleAILoop() {
 // 17. TOGGLE AI PLAYER
 // ────────────────────────────────────────────────────────────
 async function toggleAIPlayer() {
-    // Perception modes:
-    //  • vision model            → sees the canvas directly
-    //  • SmolVLM bridge ready     → local model captions for a non-vision model
-    //  • neither                  → memory-only play (reads RAM, no vision needed)
-    const bridgeMode = !providerHasVision() && _localVLMState === 'ready';
-    const memoryOnly = !providerHasVision() && !bridgeMode;
-    if (memoryOnly && !aiPlayerActive) {
-        // No longer a hard block — the AI can play blind from game memory.
-        // Offer vision as an optional upgrade the first time only.
-        if (!_memoryOnlyNoticeShown) {
-            _memoryOnlyNoticeShown = true;
-            tts.interrupt('This model can\'t see the screen, so I\'ll play from game memory. For sharper play, connect a vision model or load the local one.');
-        }
-    }
-    // Local provider: ensure model is loaded
-    if (activeProvider.id === 'local' && _localVLMState !== 'ready') {
-        _pendingAIStart = true;
-        showLocalModelModal();
-        return;
-    }
-
+    // Pollinations vision model sees the game canvas directly.
     const key = getActiveKey();
-    if (!key && activeProvider.id !== 'local') {
-        if (activeProvider.id === 'pollinations') {
-            document.getElementById('auth-overlay').classList.remove('hidden');
-        } else {
-            tts.interrupt(`Please add your ${activeProvider.label} API key in API Settings.`);
-            openProviderPanel(activeProvider.id);
-        }
+    if (!key) {
+        document.getElementById('auth-overlay').classList.remove('hidden');
         return;
     }
 
@@ -3160,7 +2135,6 @@ function stopAIPlayer() {
     stopTurboLoop();
     stopLiveLoop();
     if (_captureVideo) { _captureVideo.srcObject = null; }
-    if (!buddyActive)  stopBridgeCaptionLoop();
     // Free frame buffers so a long session doesn't pile up base64 strings
     _frameHistory = [];
     _prevScreenshot = null;
@@ -3207,37 +2181,27 @@ async function buddyAdvise() {
     if (!buddyActive) return;
     buddyText.textContent = '🤔 Analyzing…';
 
-    const visionOK   = providerHasVision();
-    const bridgeOK   = !visionOK && _localVLMState === 'ready';
-    const memoryOnly = !visionOK && !bridgeOK;
-
     const gameState = readGameState();
     const stateCtx  = gameState ? `\n\n${gameStateToText(gameState)}` : '';
 
     try {
-        const sysPrompt = `You are an AI Buddy Coach for Super Mario 64. Give helpful, friendly advice in 2 sentences max.${
-            memoryOnly ? ' You cannot see the screen — coach using the LIVE GAME STATE below.' : ''}${stateCtx}
+        const sysPrompt = `You are an AI Buddy Coach for Super Mario 64. Give helpful, friendly advice in 2 sentences max.${stateCtx}
 Respond with ONLY valid JSON (no markdown fences):
 {"text": "advice", "speech": "conversational version (max 20 words)"}`;
 
-        let userMessage;
-        if (memoryOnly) {
-            userMessage = { role: 'user', content: 'Based on the live game state, what advice do you have?' };
-        } else {
-            const streamToUse = aiStream || buddyStream;
-            if (!streamToUse) { buddyText.textContent = '❌ No game view active!'; return; }
-            const screenshot = await captureScreen(streamToUse);
-            if (!screenshot) { buddyText.textContent = '❌ Could not capture game view'; return; }
-            const base64Image = screenshot.replace(/^data:image\/(png|jpeg);base64,/, '');
-            const mimeType    = screenshot.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png';
-            userMessage = {
-                role: 'user',
-                content: [
-                    { type: 'text', text: 'What advice do you have?' },
-                    { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64Image}` } },
-                ],
-            };
-        }
+        const streamToUse = aiStream || buddyStream;
+        if (!streamToUse) { buddyText.textContent = '❌ No game view active!'; return; }
+        const screenshot = await captureScreen(streamToUse);
+        if (!screenshot) { buddyText.textContent = '❌ Could not capture game view'; return; }
+        const base64Image = screenshot.replace(/^data:image\/(png|jpeg);base64,/, '');
+        const mimeType    = screenshot.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png';
+        const userMessage = {
+            role: 'user',
+            content: [
+                { type: 'text', text: 'What advice do you have?' },
+                { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64Image}` } },
+            ],
+        };
 
         const rawContent = await callChatAPI([
             { role: 'system', content: sysPrompt },
@@ -3258,8 +2222,7 @@ Respond with ONLY valid JSON (no markdown fences):
 async function toggleBuddy() {
     const key = getActiveKey();
     if (!key) {
-        if (activeProvider.id === 'pollinations') document.getElementById('auth-overlay').classList.remove('hidden');
-        else openProviderPanel(activeProvider.id);
+        document.getElementById('auth-overlay').classList.remove('hidden');
         return;
     }
 
@@ -3301,7 +2264,6 @@ function stopBuddy() {
         buddyStream = null;
         if (_captureVideo) _captureVideo.srcObject = null;
     }
-    if (!aiPlayerActive) stopBridgeCaptionLoop();
 }
 
 buddyBtn.addEventListener('click', toggleBuddy);
@@ -3347,10 +2309,7 @@ let _studyInFlight = false;
 async function runStudy({ silent = false, openMemory = false } = {}) {
     if (_studyInFlight) return aiNotes;
     if (!getActiveKey()) {
-        if (!silent) {
-            if (activeProvider.id === 'pollinations') document.getElementById('auth-overlay').classList.remove('hidden');
-            else openProviderPanel(activeProvider.id);
-        }
+        if (!silent) document.getElementById('auth-overlay').classList.remove('hidden');
         return aiNotes;
     }
     _studyInFlight = true;
@@ -3623,7 +2582,7 @@ function fmtAmount(pollen) {
 }
 
 async function fetchBalanceValue() {
-    if (activeProvider.id !== 'pollinations' || !pollinationsKey) return null;
+    if (!pollinationsKey) return null;
     try {
         const res = await fetch(`${POLLINATIONS_API_BASE}/account/balance`, {
             headers: { 'Authorization': `Bearer ${pollinationsKey}` },
@@ -3651,7 +2610,7 @@ async function refreshPollenBalance() {
 
 // Sample balance after an AI call and log the cost (debounced)
 async function recordUsage(force = false) {
-    if (activeProvider.id !== 'pollinations' || !pollinationsKey) return;
+    if (!pollinationsKey) return;
     const now = Date.now();
     if (!force && now - _lastUsageCheck < 2000) return;
     _lastUsageCheck = now;
@@ -3681,7 +2640,7 @@ function energyBounds() {
 function updateEnergyUI() {
     const wrap = document.getElementById('so-energy');
     if (!wrap) return;
-    const isPoll = activeProvider.id === 'pollinations' && pollinationsKey;
+    const isPoll = !!pollinationsKey;
     wrap.style.display = (_streamerMode && isPoll && _pollenNow != null) ? 'block' : 'none';
     if (!(_streamerMode && isPoll && _pollenNow != null)) return;
 
@@ -3793,6 +2752,44 @@ document.getElementById('turbo-save-btn')?.addEventListener('click', () => {
 // Quick toggle (streamer-mode dock)
 document.getElementById('so-turbo-btn')?.addEventListener('click', () => setTurboMode(!_turboMode));
 
+// ── Pre-plan (mini-TAS) modal + toggles ─────────────────────────────
+function updatePreplanUI() {
+    const on = _preplanMode;
+    const b  = document.getElementById('preplan-btn');
+    const sb = document.getElementById('so-preplan-btn');
+    if (b)  b.classList.toggle('active', on);
+    if (sb) { sb.classList.toggle('active', on); sb.textContent = on ? '🧠 Pre-Plan ✓' : '🧠 Pre-Plan'; }
+}
+function setPreplanMode(on) {
+    _preplanMode = !!on;
+    savePreplanState();
+    updatePreplanUI();
+    updateAIStatus(_preplanMode ? '🧠 Pre-plan ON — AI will script multi-step moves' : 'Pre-plan off');
+}
+function openPreplanModal() {
+    const master = document.getElementById('preplan-master');
+    const cap    = document.getElementById('preplan-cap');
+    if (master) master.checked = _preplanMode;
+    if (cap)    cap.value = String(_preplanCap);
+    document.getElementById('preplan-modal')?.classList.add('open');
+    document.getElementById('preplan-backdrop')?.classList.add('open');
+}
+function closePreplanModal() {
+    document.getElementById('preplan-modal')?.classList.remove('open');
+    document.getElementById('preplan-backdrop')?.classList.remove('open');
+}
+document.getElementById('preplan-btn')?.addEventListener('click', openPreplanModal);
+document.getElementById('preplan-close-btn')?.addEventListener('click', closePreplanModal);
+document.getElementById('preplan-backdrop')?.addEventListener('click', closePreplanModal);
+document.getElementById('preplan-save-btn')?.addEventListener('click', () => {
+    const cap = parseInt(document.getElementById('preplan-cap')?.value, 10);
+    _preplanCap = Number.isFinite(cap) ? cap : 20;
+    setPreplanMode(document.getElementById('preplan-master')?.checked);
+    closePreplanModal();
+});
+document.getElementById('so-preplan-btn')?.addEventListener('click', () => setPreplanMode(!_preplanMode));
+updatePreplanUI();
+
 // Big honesty warning, shown on every page load
 (function showSuckWarning() {
     const w = document.getElementById('suck-warning');
@@ -3827,19 +2824,7 @@ window.sm64MemDebug = (limit = 12) => {
 // 22. BOOT
 // ────────────────────────────────────────────────────────────
 restoreProviderState();
-// After restoring provider state, fetch the right model list
-if (activeProvider.id === 'custom') {
-    // Only auto-fetch if base URL is already configured
-    if (window._customApiBase || localStorage.getItem('sm64_custom_base')) {
-        fetchCustomModels();
-    } else {
-        populateModelDropdown(); // shows "Set Base URL" prompt
-    }
-} else if (activeProvider.id === 'pollinations') {
-    fetchVisionModels();
-} else {
-    populateModelDropdown(); // static list for openai/anthropic/gemini/local
-}
+fetchVisionModels();   // Pollinations vision-model list
 initAuth();
 renderControlsGuide(null);   // show static controls immediately
 // Voices may not be loaded yet — wait for them then re-render tutorial if open

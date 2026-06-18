@@ -46,6 +46,7 @@
                 <button id="streamer-toggle-btn" class="hud-icon-btn" title="Streamer mode (Shift+S)">🎥</button>
                 <button id="energy-config-btn"   class="hud-icon-btn" title="AI energy bar settings">⚡</button>
                 <button id="turbo-btn"           class="hud-icon-btn" title="Consistent rapid fire / turbo">⚡⚡</button>
+                <button id="preplan-btn"         class="hud-icon-btn" title="Pre-plan mode (AI writes a multi-step script)">🧠</button>
                 <button id="disconnect-btn"      class="hud-icon-btn danger" title="Disconnect account" style="display:none">🔌</button>
             </div>
 
@@ -141,38 +142,6 @@
             <button id="rf-exit-btn" title="Exit rapid fire mode">Exit</button>
         </div>
 
-        <!-- Vision-required modal -->
-        <div id="vision-required-modal" role="dialog" aria-modal="true" aria-label="Vision Required">
-            <div id="vision-required-panel">
-                <div class="modal-icon">👁️</div>
-                <h3>Vision Required</h3>
-                <p>The selected provider or model does not support image input (vision). The AI player needs to <em>see</em> the game screen to make decisions.</p>
-                <p>You can either connect a vision-capable API provider, or run a small vision model directly in your browser (no account needed).</p>
-                <div class="vision-req-btns">
-                    <button id="vision-req-connect-btn" class="hud-btn green">🔑 Connect Vision Provider</button>
-                    <button id="vision-req-local-btn"   class="hud-btn cyan">💻 Run Local Model</button>
-                </div>
-                <button class="modal-close-btn" onclick="document.getElementById('vision-required-modal').classList.remove('open');document.getElementById('vision-required-backdrop').classList.remove('open');">Cancel</button>
-            </div>
-        </div>
-        <div id="vision-required-backdrop" class="modal-backdrop"></div>
-
-        <!-- Local model loader modal -->
-        <div id="local-model-modal" role="dialog" aria-modal="true" aria-label="Load Local Vision Model">
-            <div id="local-model-panel">
-                <div class="modal-icon">💻</div>
-                <h3>Local Vision Model</h3>
-                <p>This will download <strong>SmolVLM-256M-Instruct</strong> (~400 MB) and run it entirely in your browser using WebGPU or WASM. No API key needed. The model is cached after first download.</p>
-                <div id="local-model-bar-wrap"><div id="local-model-bar"></div></div>
-                <p id="local-model-status" class="local-model-status-text">Click Load to begin download</p>
-                <div class="vision-req-btns">
-                    <button id="local-model-load-btn" class="hud-btn green">⬇ Load Model</button>
-                    <button id="local-model-cancel-btn" class="hud-btn">Cancel</button>
-                </div>
-            </div>
-        </div>
-        <div id="local-model-backdrop" class="modal-backdrop"></div>
-
         <!-- Energy bar config -->
         <div id="energy-modal" role="dialog" aria-modal="true" aria-label="AI Energy Settings">
             <div id="energy-panel">
@@ -238,18 +207,45 @@
         </div>
         <div id="turbo-backdrop" class="modal-backdrop"></div>
 
+        <!-- Pre-plan (mini-TAS) modal -->
+        <div id="preplan-modal" role="dialog" aria-modal="true" aria-label="Pre-Plan Settings">
+            <div id="turbo-panel">
+                <button id="preplan-close-btn" class="modal-close-btn" aria-label="Close">✕</button>
+                <h3>🧠 Pre-Plan Mode</h3>
+                <p class="turbo-warn">Instead of one tiny move per turn, the AI studies the frame and writes a <strong>full multi-step script (a mini-TAS)</strong> that runs in a single turn. It auto-stops if you take control or the scene changes suddenly. The AI may also choose to pre-plan on its own when it sees a clear path.</p>
+                <label class="energy-field turbo-master-field">
+                    <input type="checkbox" id="preplan-master">
+                    <span><strong>Force pre-plan every turn</strong></span>
+                </label>
+                <div class="turbo-subs">
+                    <label class="energy-field" for="preplan-cap">
+                        <span>📏 Max steps per script<br><small>How many moves the AI may chain in one turn</small></span>
+                    </label>
+                    <select id="preplan-cap" class="provider-select">
+                        <option value="10">Soft cap — 10 steps</option>
+                        <option value="20">Soft cap — 20 steps</option>
+                        <option value="40">Soft cap — 40 steps</option>
+                        <option value="0">♾️ Unlimited (as many as the AI wants)</option>
+                    </select>
+                </div>
+                <div class="energy-btn-row">
+                    <button id="preplan-save-btn" class="hud-btn green">✓ Save</button>
+                </div>
+            </div>
+        </div>
+        <div id="preplan-backdrop" class="modal-backdrop"></div>
+
         <!-- Auth overlay -->
         <div id="auth-overlay">
             <div id="auth-panel">
                 <div id="auth-logo">🍄</div>
                 <h2>SM64 AI Player</h2>
-                <p id="auth-desc">Watch an AI play Super Mario 64 in real time, get coached by your AI buddy, and give live instructions — powered by Pollinations AI or your own API key.</p>
+                <p id="auth-desc">Watch an AI play Super Mario 64 in real time, get coached by your AI buddy, and give live instructions — powered by Pollinations AI.</p>
                 <button id="auth-btn">🔑 Connect Pollinations Account</button>
                 <div id="auth-status"></div>
                 <p id="auth-note">You'll be redirected to Pollinations to authorize. Your key is stored only in this browser.</p>
                 <div id="auth-alt-row">
                     <button id="auth-tutorial-btn">❓ How does this work?</button>
-                    <button id="auth-provider-btn">⚙ Use my own API key</button>
                 </div>
                 <p id="auth-credit">
                     Based on the original
@@ -307,6 +303,7 @@
                 <button id="so-study-btn" class="so-ctrl cyan"   title="AI studies the SM64 guide">📚 Study</button>
                 <button id="so-memory-btn" class="so-ctrl purple" title="View AI memory & notes">🧠 Memory</button>
                 <button id="so-turbo-btn" class="so-ctrl" title="Consistent rapid fire (AI can't disable it)">⚡ Turbo</button>
+                <button id="so-preplan-btn" class="so-ctrl" title="Pre-plan mode (AI writes a multi-step script)">🧠 Pre-Plan</button>
                 <button id="so-mute-btn"  class="so-ctrl" title="Mute game audio">🔊</button>
             </div>
         </div>
@@ -347,21 +344,5 @@
     </script>
     <script src="./sm64.js"></script>
     <script type="module" src="./main.js"></script>
-
-    <script>
-      // Wire up auth-panel "Use my own API key" button
-      // Delay until main.js (module) has loaded and openProviderPanel is defined
-      document.getElementById('auth-provider-btn')?.addEventListener('click', () => {
-          document.getElementById('auth-overlay').classList.add('hidden');
-          const tryOpen = (attempts) => {
-              if (typeof openProviderPanel === 'function') {
-                  openProviderPanel('custom');
-              } else if (attempts > 0) {
-                  setTimeout(() => tryOpen(attempts - 1), 150);
-              }
-          };
-          tryOpen(20);
-      });
-    </script>
 </body>
 </html>

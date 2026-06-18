@@ -1028,7 +1028,7 @@ body {
 #app.streamer-mode #suck-warning { display: none; }
 
 /* ── Turbo modal ─────────────────────────────────────────── */
-#turbo-modal {
+#turbo-modal, #preplan-modal {
     display: none;
     position: fixed; top: 50%; left: 50%;
     transform: translate(-50%, -50%);
@@ -1040,9 +1040,10 @@ body {
     box-shadow: var(--shadow);
     padding: 22px;
 }
-#turbo-modal.open { display: block; }
+#turbo-modal.open, #preplan-modal.open { display: block; }
 #turbo-panel { position: relative; }
-#turbo-modal h3 { margin-bottom: 10px; }
+#turbo-modal h3, #preplan-modal h3 { margin-bottom: 10px; }
+#preplan-cap { width: 100%; margin-top: 8px; }
 .turbo-warn {
     font-size: 13px; line-height: 1.5;
     color: #ffcdd2;
