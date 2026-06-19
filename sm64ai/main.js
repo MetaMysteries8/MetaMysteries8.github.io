@@ -898,6 +898,40 @@ function buildProviderPanel() {
     fmtRow.appendChild(fmtSel);
     panel.appendChild(fmtRow);
 
+    // ── Experimental: Adaptive Brain (tiny in-browser learner) ──
+    const expHead = document.createElement('div');
+    expHead.className = 'provider-bridge-note';
+    expHead.innerHTML = '🧪 <strong>Experimental — Adaptive Brain.</strong> A tiny in-browser learner (no download) that watches which moves work where and coaches the AI over time. Also adds a rough depth/structure read.';
+    panel.appendChild(expHead);
+
+    const abRow = document.createElement('label');
+    abRow.className = 'provider-row'; abRow.style.cursor = 'pointer';
+    abRow.innerHTML = `<span class="provider-label">Enable Adaptive Brain</span>`;
+    const abChk = document.createElement('input');
+    abChk.type = 'checkbox'; abChk.checked = _adaptiveBrain;
+    abChk.addEventListener('change', () => setAdaptiveBrain(abChk.checked));
+    abRow.appendChild(abChk); panel.appendChild(abRow);
+
+    const biasRow = document.createElement('div');
+    biasRow.className = 'provider-row';
+    const biasLabel = document.createElement('label');
+    biasLabel.className = 'provider-label'; biasLabel.textContent = 'Learning bias';
+    const biasSel = document.createElement('select');
+    biasSel.className = 'provider-select';
+    biasSel.innerHTML = `
+        <option value="improve">📈 Improve (amplify what works)</option>
+        <option value="chaos">🎲 Chaos (amplify the jank, for streams)</option>`;
+    biasSel.value = _brainBias;
+    biasSel.addEventListener('change', () => setBrainBias(biasSel.value));
+    biasRow.appendChild(biasLabel); biasRow.appendChild(biasSel);
+    panel.appendChild(biasRow);
+
+    const clearQ = document.createElement('button');
+    clearQ.className = 'provider-save-btn'; clearQ.style.background = '#3a2030';
+    clearQ.textContent = '🧹 Reset what it has learned';
+    clearQ.addEventListener('click', () => { clearQTable(); clearQ.textContent = '✓ Learning reset'; setTimeout(() => clearQ.textContent = '🧹 Reset what it has learned', 1500); });
+    panel.appendChild(clearQ);
+
     // Connect / reconnect button
     const connectBtn = document.createElement('button');
     connectBtn.className = 'provider-save-btn';
@@ -1454,6 +1488,117 @@ function clearBrainmap() {
     updateBrainmapViz();
 }
 
+// ── ADAPTIVE BRAIN (experimental) ─────────────────────────────────────
+// A genuinely tiny, from-scratch, in-browser reinforcement learner — NO model
+// download. It's a contextual bandit / Q-table: it watches (coarse situation →
+// action category → did it help) and learns, over the session, which moves tend
+// to work where. Each turn it whispers a learned hint to the AI ("forward keeps
+// failing here, turning works"). 'improve' bias amplifies what works; 'chaos'
+// bias leans into what fails (for fun streams). Off by default — experimental.
+let _adaptiveBrain = (() => { try { return localStorage.getItem('sm64_adaptive') === '1'; } catch { return false; } })();
+let _brainBias     = (() => { try { return localStorage.getItem('sm64_brain_bias') || 'improve'; } catch { return 'improve'; } })();
+let _qTable = {};            // stateKey -> { actionCat: { n, mean } }
+let _pendingLearn = null;    // { stateKey, actionCat } awaiting its reward
+let _prevProgressLen = 0;    // to detect a milestone earned by the last action
+
+function _brainState() {
+    const region = /in-level/.test(_region) ? 'level' : (_region || 'unknown');
+    const stuck = _stuckCount >= 2 ? 'stuck' : _stuckCount >= 1 ? 'slow' : 'moving';
+    const vis = _lastVisualPct == null ? 'na' : _lastVisualPct < 8 ? 'none' : _lastVisualPct < 25 ? 'low' : 'high';
+    return `${region}|${stuck}|${vis}`;
+}
+function _actionCat(actions) {
+    const g = _expandGroups(actions || [])[0];
+    let keys = Array.isArray(g) ? g : (g && (g.keys || g.actions)) || (typeof g === 'string' ? [g] : []);
+    keys = (Array.isArray(keys) ? keys : [keys]).filter(k => keyMap[k]);
+    const codes = keys.map(k => keyMap[k]);
+    const has = c => codes.includes(c);
+    if (has('ArrowUp') && has('KeyX')) return 'jump-forward';
+    if (has('ArrowDown')) return 'backward';
+    if (has('ArrowUp')) return 'forward';
+    if (has('ArrowLeft') || has('ArrowRight')) return 'turn';
+    if (has('KeyX')) return 'jump';
+    if (has('KeyC')) return 'action';
+    if (has('Space')) return 'crouch';
+    return 'other';
+}
+function _qUpdate(stateKey, actionCat, reward) {
+    const s = _qTable[stateKey] || (_qTable[stateKey] = {});
+    const a = s[actionCat] || (s[actionCat] = { n: 0, mean: 0 });
+    a.n++; a.mean += (reward - a.mean) / a.n;
+    try { localStorage.setItem('sm64_qtable', JSON.stringify(_qTable)); } catch {}
+}
+// Reward the PREVIOUS action using the outcome we can now measure.
+function _brainLearn() {
+    if (!_adaptiveBrain || !_pendingLearn) return;
+    let r = (_lastVisualPct == null ? 0 : _lastVisualPct / 100);   // movement = good
+    if (_stuckCount >= 2) r -= 0.4;                                 // stuck = bad
+    if (_progressLog.length > _prevProgressLen) r += 0.6;          // milestone = great
+    _qUpdate(_pendingLearn.stateKey, _pendingLearn.actionCat, Math.max(-0.5, Math.min(1.3, r)));
+    _pendingLearn = null;
+    _prevProgressLen = _progressLog.length;
+}
+function _brainHint(stateKey) {
+    if (!_adaptiveBrain) return '';
+    const s = _qTable[stateKey];
+    if (!s) return '';
+    const entries = Object.entries(s).filter(([, v]) => v.n >= 2).sort((a, b) => b[1].mean - a[1].mean);
+    if (!entries.length) return '';
+    const best = entries[0], worst = entries[entries.length - 1];
+    if (_brainBias === 'chaos') {
+        return `\n\n📊 ADAPTIVE BRAIN (CHAOS mode — embrace the jank): here, "${worst[0]}" has been failing; lean into chaotic/unconventional moves for the stream.`;
+    }
+    let h = `\n\n📊 ADAPTIVE BRAIN (learned this run): in spots like this, "${best[0]}" has worked best (score ${best[1].mean.toFixed(2)}).`;
+    if (entries.length > 1 && worst[1].mean < 0.15) h += ` "${worst[0]}" tends to FAIL here — avoid it.`;
+    return h;
+}
+function setAdaptiveBrain(on) {
+    _adaptiveBrain = !!on;
+    try { localStorage.setItem('sm64_adaptive', _adaptiveBrain ? '1' : '0'); } catch {}
+}
+function setBrainBias(b) {
+    _brainBias = (b === 'chaos') ? 'chaos' : 'improve';
+    try { localStorage.setItem('sm64_brain_bias', _brainBias); } catch {}
+}
+function loadQTable() { try { _qTable = JSON.parse(localStorage.getItem('sm64_qtable')) || {}; } catch { _qTable = {}; } }
+function clearQTable() { _qTable = {}; try { localStorage.removeItem('sm64_qtable'); } catch {} }
+window.sm64Brain = (on) => setAdaptiveBrain(on);
+
+// ── DEPTH / STRUCTURE READ (lightweight heuristic, NOT a neural net) ──
+// Splits the frame into L/C/R thirds and estimates, per side, brightness + edge
+// activity to roughly tell "open path that recedes" vs "near solid wall". It's a
+// cheap hint, deliberately conservative — only speaks when a side is clearly
+// different. Honest about being a heuristic.
+let _depthCanvas = null, _depthCtx = null;
+async function _depthRead(url) {
+    try {
+        const img = await _loadImage(url);
+        const w = 60, h = 45;
+        if (!_depthCanvas) { _depthCanvas = document.createElement('canvas'); _depthCtx = _depthCanvas.getContext('2d', { willReadFrequently: true }); }
+        _depthCanvas.width = w; _depthCanvas.height = h;
+        _depthCtx.drawImage(img, 0, 0, w, h);
+        const d = _depthCtx.getImageData(0, 0, w, h).data;
+        const third = w / 3;
+        const cols = [{ b: 0, e: 0, n: 0 }, { b: 0, e: 0, n: 0 }, { b: 0, e: 0, n: 0 }];
+        const gray = (x, y) => { const i = (y * w + x) * 4; return (d[i] + d[i + 1] + d[i + 2]) / 3; };
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+            const c = Math.min(2, Math.floor(x / third)), g = gray(x, y);
+            cols[c].b += g; cols[c].n++;
+            if (x > 0) cols[c].e += Math.abs(g - gray(x - 1, y));   // horizontal edge energy
+        }
+        const score = cols.map(c => ({ bright: c.b / c.n, edge: c.e / c.n }));
+        // "Openness": darker + busier (more edges/detail receding) = likelier a path;
+        // very bright + flat = likelier a near wall.
+        const open = score.map(s => (s.edge * 1.2) - (s.bright / 255) * 40);
+        const labels = ['LEFT', 'CENTER', 'RIGHT'];
+        const best = open.indexOf(Math.max(...open));
+        const worst = open.indexOf(Math.min(...open));
+        if (best === worst) return '';
+        const flat = score[worst].edge < 6 && score[worst].bright > 150;
+        return `🔍 DEPTH READ (rough heuristic): the ${labels[best]} looks most open/passable; the ${labels[worst]} looks ${flat ? 'like a near WALL' : 'more blocked'}. Trust your eyes first, use this as a tiebreaker.`;
+    } catch { return ''; }
+}
+
 
 // ── DEBUG HUD: live readout of what the AI is thinking/doing ──
 let _debugHUD = (() => { try { return localStorage.getItem('sm64_debug_hud') === '1'; } catch { return false; } })();
@@ -1463,7 +1608,10 @@ function updateDebugHUD() {
     if (!el) return;
     if (!_debugHUD) { el.style.display = 'none'; return; }
     el.style.display = 'block';
-    const flags = [_preplanMode && 'preplan', _turboMode && 'turbo', _rapidFireActive && 'rapid', _agentOnly && 'agent-only'].filter(Boolean).join(' ') || '—';
+    const flags = [_preplanMode && 'preplan', _turboMode && 'turbo', _rapidFireActive && 'rapid', _agentOnly && 'agent-only', _adaptiveBrain && 'brain'].filter(Boolean).join(' ') || '—';
+    const brainLine = _adaptiveBrain
+        ? `<div>brain: ${Object.keys(_qTable).length} states learned (${_brainBias})</div>`
+        : '';
     el.innerHTML =
         `<b>🐞 SM64-AI debug</b>` +
         `<div>region: <b>${_esc(_region)}</b> (${_regionAge}t)</div>` +
@@ -1471,6 +1619,7 @@ function updateDebugHUD() {
         `<div>visualΔ: ${_lastVisualPct == null ? '—' : _lastVisualPct + '%'} · stuck:${_stuckCount} · cut:${_sceneCutCount}</div>` +
         `<div>fmt: ${_cmdFormat}</div>` +
         `<div>mode: ${flags}</div>` +
+        brainLine +
         `<div>done: ${_esc(_progressLog.slice(-3).join(' → ') || '—')}</div>`;
 }
 function toggleDebugHUD(on) {
@@ -1899,6 +2048,15 @@ async function aiThink() {
 
         const memOn = gameState != null;   // false when memory reading is disabled
 
+        // ── Adaptive brain (experimental): reward the last action, learn, hint ──
+        let _curStateKey = '', brainCtx = '', depthCtx = '';
+        if (_adaptiveBrain) {
+            _brainLearn();                       // score the previous action's outcome
+            _curStateKey = _brainState();
+            brainCtx = _brainHint(_curStateKey);
+            if (screenshot) depthCtx = await _depthRead(screenshot);
+        }
+
         const perceptionNote = memOn
             ? 'Analyze the screenshot together with the LIVE GAME STATE below.'
             : 'Analyze the screenshot. NOTE: there is NO live memory readout on this build — rely entirely on what you SEE in the image.';
@@ -2033,7 +2191,7 @@ RULES:
 - ${memOn
     ? 'You may use tools (get_game_state, set_game_speed for tricky jumps, save_move/play_move for reusable sequences) when helpful, but don\'t call tools every turn.'
     : 'There is no reliable game memory — judge everything from the image. You may use set_game_speed, is_stuck/is_trapped, or save_move/play_move when helpful, but don\'t call tools every turn.'}
-${brainmapCtx}${movementCtx}${planCtx}${lastActCtx}${preplanCtx}${memStateCtx}${motionCtx}${memoryCtx}${notesCtx}${instrCtx}
+${brainmapCtx}${brainCtx}${depthCtx}${movementCtx}${planCtx}${lastActCtx}${preplanCtx}${memStateCtx}${motionCtx}${memoryCtx}${notesCtx}${instrCtx}
 
 ${_cmdFormat === 'simple'
 ? `Reply in this SIMPLE LINE FORMAT (one field per line, NO JSON, NO markdown):
@@ -2100,6 +2258,11 @@ Valid keys (THESE ARE THE ONLY ONES — there is no camera key): ArrowUp(forward
         ], { json: _cmdFormat !== 'simple', max_tokens: maxTokens });
 
         const response = parseAIResponse(rawContent);
+
+        // Adaptive brain: remember (state, action) so we can reward it next turn.
+        if (_adaptiveBrain && response?.actions?.length) {
+            _pendingLearn = { stateKey: _curStateKey || _brainState(), actionCat: _actionCat(response.actions) };
+        }
 
         // Persist the multi-turn plan for navigation continuity. Keep pursuing the
         // same goal across turns; only reset the age-counter when it genuinely changes.
@@ -3294,6 +3457,7 @@ window.sm64MemDebug = (limit = 12) => {
 // ────────────────────────────────────────────────────────────
 restoreProviderState();
 if (_persistBrainmap) loadBrainmap();   // restore the AI's map across reloads
+loadQTable();                            // restore the adaptive brain's learning
 const _bmPersistEl = document.getElementById('brainmap-persist-toggle');
 if (_bmPersistEl) _bmPersistEl.checked = _persistBrainmap;
 if (_debugHUD) document.getElementById('debug-btn')?.classList.add('active');
