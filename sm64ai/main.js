@@ -1629,7 +1629,7 @@ function setBrainBias(b) {
 function loadQTable() { try { _qTable = JSON.parse(localStorage.getItem('sm64_qtable')) || {}; } catch { _qTable = {}; } }
 function clearQTable() {
     _qTable = {}; try { localStorage.removeItem('sm64_qtable'); } catch {}
-    _trainStats = { episodes: 0, turns: 0, overrides: 0, overrideGood: 0, overrideBad: 0, taught: 0, bestRegionRank: 0 }; _saveTrainStats();
+    _trainStats = { episodes: 0, turns: 0, overrides: 0, overrideGood: 0, overrideBad: 0, taught: 0, graded: 0, rated: 0, bestRegionRank: 0 }; _saveTrainStats();
     if (typeof _setChildTrust === 'function') _setChildTrust(0.15);   // back to a fresh, untrusted child
 }
 window.sm64Brain = (on) => setAdaptiveBrain(on);
@@ -1673,7 +1673,8 @@ let _elderLoop = null, _elderPrevFrame = null, _lastTaughtCat = null;
 function startElderWatch() {
     if (_elderLoop) return;
     _elderLoop = setInterval(async () => {
-        if (!_adaptiveBrain || !_elderLearn || !aiPlayerActive || _agentOnly) { _elderPrevFrame = null; return; }
+        // Only learns from your play in Player-Teach mode (and never during a show-off).
+        if (!_adaptiveBrain || !_elderLearn || !aiPlayerActive || _agentOnly || _playMode !== 'player-teach' || _showoffRunning) { _elderPrevFrame = null; return; }
         if (!playerMovementDetected) { _elderPrevFrame = null; return; }   // only while the human drives
         const cat = _categorizeCodes([...playerInputs]);
         if (!cat) return;
@@ -1682,12 +1683,18 @@ function startElderWatch() {
         if (_elderPrevFrame) {
             const vm = await _frameDiffScore(_elderPrevFrame, ss);
             if (vm != null) {
-                // A human's deliberate movement is a GOOD demonstration. Reward by how
-                // much it changed the view, with a positive floor (the elder is trusted).
+                // Fast heuristic teaching signal every tick (movement = positive demo).
                 _qUpdate(_brainState(), cat, Math.max(0.12, Math.min(0.8, vm * 1.2)));
                 _trainStats.taught = (_trainStats.taught || 0) + 1; _saveTrainStats();
-                _setChildTrust(_childTrust + 0.004);   // watching a human grows it up a touch
+                _setChildTrust(_childTrust + 0.004);
                 _lastTaughtCat = cat;
+                // Richer, controls-aware grade from the PARENT LLM (throttled, costs a
+                // call): it judges whether YOUR move was good/bad and teaches the child
+                // your right & wrong — so you never hand-rate your own play.
+                if (Date.now() - _lastGradeTime > 3500) {
+                    _lastGradeTime = Date.now();
+                    _gradeHumanMove(_elderPrevFrame, ss, cat, _brainState(), _inputsToText([...playerInputs]));
+                }
                 updateDebugHUD();
             }
         }
@@ -1697,25 +1704,223 @@ function startElderWatch() {
 function stopElderWatch() { if (_elderLoop) { clearInterval(_elderLoop); _elderLoop = null; } _elderPrevFrame = null; }
 // Power-user: hand-grade the human's most recent demonstrated move from the console.
 window.sm64Teach = (reward = 0.6) => { if (_lastTaughtCat) _qUpdate(_brainState(), _lastTaughtCat, Math.max(-1, Math.min(1.5, reward))); return _lastTaughtCat; };
+let _lastGradeTime = 0;
+
+// ── PLAY MODES ────────────────────────────────────────────────────────────
+//   ai           — the parent LLM plays (the child may step in when trusted)
+//   rl           — the child (RL) plays entirely on its own, NO LLM (free)
+//   player-teach — YOU play; the parent LLM auto-grades YOUR moves so the child
+//                  learns what you do right/wrong. (Manual rating is NOT for your
+//                  play — it's for when the RL shows off, below.)
+//   ai-teach     — the parent LLM plays and teaches the child; it never takes over
+//                  (clean demonstration signal).
+let _playMode = (() => { try { return localStorage.getItem('sm64_play_mode') || 'ai'; } catch { return 'ai'; } })();
+function _playModeLabel(m) {
+    return { ai: '🤖 AI Play', rl: '🧒 RL Play', 'player-teach': '🧓 Player Teach', 'ai-teach': '👨‍🏫 AI Teach' }[m] || '🤖 AI Play';
+}
+function setPlayMode(m) {
+    if (!['ai', 'rl', 'player-teach', 'ai-teach'].includes(m)) m = 'ai';
+    _playMode = m;
+    try { localStorage.setItem('sm64_play_mode', m); } catch {}
+    const sel = document.getElementById('play-mode'); if (sel) sel.value = m;
+    if (!aiPlayerActive) { const b = document.getElementById('ai-player-btn'); if (b) b.textContent = _playModeLabel(m); }
+    updateAIStatus(`Mode: ${_playModeLabel(m)} — press the play button to start`);
+}
+window.sm64Mode = (m) => { if (m) setPlayMode(m); return _playMode; };
+
+// ── RL SOLO CONTROL — the child plays with no LLM, off its learned Q-table ──
+// State generalizes across regions (it borrows stats from same stuck|vis context),
+// so a child taught in one spot can act in another. Epsilon-greedy exploration.
+function _aggregateBySuffix(suffix) {
+    const agg = {};
+    for (const [k, acts] of Object.entries(_qTable)) {
+        if (!k.endsWith(suffix)) continue;
+        for (const [a, v] of Object.entries(acts)) {
+            const g = agg[a] || (agg[a] = { n: 0, mean: 0 });
+            const tot = g.n + v.n; g.mean = (g.mean * g.n + v.mean * v.n) / (tot || 1); g.n = tot;
+        }
+    }
+    return agg;
+}
+function _rlPickAction(stateKey) {
+    const ALL = ['forward', 'backward', 'turn', 'jump-forward', 'jump', 'action', 'crouch', 'wait'];
+    let s = _qTable[stateKey];
+    if (!s || Object.keys(s).length < 2) {
+        const agg = _aggregateBySuffix(stateKey.slice(stateKey.indexOf('|')));
+        if (Object.keys(agg).length) s = agg;
+    }
+    const eps = 0.25;   // explore a quarter of the time so it keeps discovering
+    if (!s || Math.random() < eps) {
+        const tried = s ? Object.keys(s) : [];
+        const untried = ALL.filter(a => !tried.includes(a));
+        const pool = untried.length ? untried : ALL;
+        return pool[Math.floor(Math.random() * pool.length)];
+    }
+    return Object.entries(s).sort((a, b) => b[1].mean - a[1].mean)[0][0];
+}
+async function rlThinkAndAct() {
+    if (!aiPlayerActive || _busyCycle || _showoffRunning) return;
+    _busyCycle = true;
+    try {
+        const ss = await captureScreen(aiStream).catch(() => null);
+        if (!ss) return;
+        if (_prevScreenshot) {
+            const vm = await _frameDiffScore(_prevScreenshot, ss);
+            if (vm != null) { _lastVisualPct = Math.round(vm * 100); if (vm < 0.05) _stuckCount++; else _stuckCount = 0; }
+        }
+        _brainLearn();                         // reward the previous RL move
+        const stateKey = _brainState();
+        const cat = _rlPickAction(stateKey);
+        _pendingLearn = { stateKey, actionCat: cat, wasOverride: false };
+        _pushShowoff(stateKey, cat);
+        _prevScreenshot = ss;
+        updateAIStatus(`🧒 RL plays on its own: ${cat}  ·  ${stateKey}`);
+        await aiExecute({ actions: _catToAction(cat, true) || [{ keys: ['ArrowUp'], hold_ms: 520 }] });
+        updateDebugHUD();
+    } finally { _busyCycle = false; }
+}
+function scheduleRLLoop() {
+    if (aiInterval) { clearInterval(aiInterval); aiInterval = null; }
+    // Fast cadence — the _busyCycle guard paces it to the action length, so the
+    // child reacts every few hundred ms (no API cost). This is the foundation for
+    // true frame-by-frame play: RL is local, so it can scale far past the LLM.
+    const cycle = Math.max(120, 300 / gameSpeed);
+    aiInterval = setInterval(() => { if (aiPlayerActive && !_busyCycle && !_showoffRunning) rlThinkAndAct(); }, cycle);
+}
+
+// ── RL SHOW-OFF — the child takes temporary full control to demonstrate, then
+// YOU manually rate that run (👍/👎). This is the ONLY place manual rating
+// applies — it rates the RL, not your teaching.
+let _showoffRunning = false;
+let _showoffBuffer = [];   // [{stateKey, cat}] from the current show-off
+function _pushShowoff(stateKey, cat) { _showoffBuffer.push({ stateKey, cat }); while (_showoffBuffer.length > 14) _showoffBuffer.shift(); }
+function _rateShowoff(reward) {
+    const r = Math.max(-1, Math.min(1.5, reward));
+    for (const { stateKey, cat } of _showoffBuffer) _qUpdate(stateKey, cat, r);
+    _trainStats.rated = (_trainStats.rated || 0) + 1; _saveTrainStats();
+    _setChildTrust(_childTrust + (r >= 0.25 ? 0.05 : r <= -0.25 ? -0.06 : 0));
+    if (typeof pushChatlog === 'function')
+        pushChatlog(`<span class="cl-cmd">${r >= 0 ? '👍' : '👎'} you rated the RL's run ${r.toFixed(1)} — applied to ${_showoffBuffer.length} move(s)</span>`, 'cl-tool');
+    _showoffBuffer = [];
+    updateDebugHUD();
+}
+async function rlShowoff(steps = 5) {
+    if (_showoffRunning || !aiPlayerActive) return;
+    _showoffRunning = true; _showoffBuffer = [];
+    _showElderBanner(false); _showRatingWidget(false);
+    updateAIStatus('🎬 RL is showing off — watch, then rate it 👍/👎');
+    for (let i = 0; i < steps && aiPlayerActive; i++) {
+        const ss = await captureScreen(aiStream).catch(() => null);
+        if (ss) {
+            if (_prevScreenshot) { const vm = await _frameDiffScore(_prevScreenshot, ss); if (vm != null) { _lastVisualPct = Math.round(vm * 100); if (vm < 0.05) _stuckCount++; else _stuckCount = 0; } }
+            _prevScreenshot = ss;
+        }
+        _brainLearn();
+        const stateKey = _brainState(); const cat = _rlPickAction(stateKey);
+        _pendingLearn = { stateKey, actionCat: cat, wasOverride: false }; _pushShowoff(stateKey, cat);
+        await aiExecute({ actions: _catToAction(cat, true) || [{ keys: ['ArrowUp'], hold_ms: 520 }] });
+        updateDebugHUD();
+    }
+    _showoffRunning = false;
+    _showRatingWidget(true);                       // ask YOU to rate the RL's run
+    if (_playMode === 'player-teach') { /* banner returns after rating */ }
+}
+window.sm64Showoff = (n) => rlShowoff(n || 5);
+
+// Floating manual-rating widget (👍 / 👎 / skip) — created lazily, no HTML needed.
+function _ensureRatingWidget() {
+    let w = document.getElementById('rl-rating');
+    if (!w) {
+        w = document.createElement('div'); w.id = 'rl-rating';
+        w.style.cssText = 'position:fixed;bottom:84px;left:50%;transform:translateX(-50%);z-index:9999;display:none;gap:8px;align-items:center;background:#161b26;border:1px solid #2a3344;padding:8px 12px;border-radius:24px;box-shadow:0 4px 16px rgba(0,0,0,.5);font:600 13px system-ui;color:#e6e9ef';
+        w.innerHTML = `<span>Rate the RL's run:</span>
+            <button id="rl-rate-up"   style="cursor:pointer;border:0;background:#19c37d;color:#042;border-radius:14px;padding:5px 11px;font-weight:700">👍 Good</button>
+            <button id="rl-rate-down" style="cursor:pointer;border:0;background:#e3556e;color:#fff;border-radius:14px;padding:5px 11px;font-weight:700">👎 Bad</button>
+            <button id="rl-rate-skip" style="cursor:pointer;border:0;background:#333a4a;color:#aab;border-radius:14px;padding:5px 9px">skip</button>`;
+        document.body.appendChild(w);
+        w.querySelector('#rl-rate-up').onclick   = () => { _rateShowoff(0.85);  _afterRate(); };
+        w.querySelector('#rl-rate-down').onclick = () => { _rateShowoff(-0.7);  _afterRate(); };
+        w.querySelector('#rl-rate-skip').onclick = () => { _showoffBuffer = []; _afterRate(); };
+    }
+    return w;
+}
+function _afterRate() { _showRatingWidget(_playMode === 'rl'); if (_playMode === 'player-teach') _showElderBanner(true); }
+function _showRatingWidget(on) { _ensureRatingWidget().style.display = on ? 'flex' : 'none'; }
+
+// Player-Teach banner (with a "let RL show off" button), created lazily.
+function _showElderBanner(on) {
+    let b = document.getElementById('elder-banner');
+    if (on) {
+        if (!b) {
+            b = document.createElement('div'); b.id = 'elder-banner';
+            b.style.cssText = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:9998;background:#15303a;color:#cfe;border:1px solid #4fd1e0;padding:6px 14px;border-radius:20px;font:600 13px system-ui;box-shadow:0 2px 12px rgba(0,0,0,.4)';
+            document.body.appendChild(b);
+        }
+        b.innerHTML = '🧓 Player-Teach: <b>play the game</b> — the parent grades your moves & the child learns. <button id="elder-showoff" style="margin-left:8px;cursor:pointer;border:0;background:#4fd1e0;color:#042;border-radius:12px;padding:3px 9px;font-weight:700">🎬 Let RL show off</button>';
+        b.style.display = 'block';
+        const sb = b.querySelector('#elder-showoff'); if (sb) sb.onclick = () => rlShowoff(5);
+    } else if (b) { b.style.display = 'none'; }
+}
+
+// Render the literal keys the human held into friendly text, so the grader sees
+// exactly what inputs I did — not just the move category.
+function _inputsToText(codes) {
+    const m = { ArrowUp: '↑ forward', ArrowDown: '↓ backward', ArrowLeft: '← left', ArrowRight: '→ right',
+        KeyW: '↑ forward', KeyS: '↓ backward', KeyA: '← left', KeyD: '→ right',
+        KeyX: 'X (jump/A)', KeyC: 'C (dive·punch/B)', Space: 'Z (crouch·ground-pound)', KeyZ: 'Z', Enter: 'Start' };
+    return codes.map(c => m[c] || c).join(' + ') || '(nothing)';
+}
+// The parent LLM grades a single move from BEFORE→AFTER frames + the EXACT inputs I
+// pressed. Controls are spelled out so the parent understands what the move did.
+async function _llmGradeMove(before, after, cat, inputStr) {
+    const sys = `You are coaching a learner to play Super Mario 64. CONTROLS so you understand the inputs: ↑/ArrowUp=walk FORWARD, ↓/ArrowDown=walk BACKWARD, ←/→=turn, X=jump (A button), C=dive/punch/grab (B), Z/Space=crouch / ground-pound. You see a BEFORE frame then an AFTER frame; the player just pressed: [${inputStr}] (move type "${cat}"). Judge ONLY whether THAT input was a good play: GOOD = sensible progress (moved toward an objective, didn't ram a wall / fall off / go the wrong way / get stuck); BAD = the opposite. Reply EXACTLY one line: "GRADE: <number -1.0..1.0>, <max 6 word reason>".`;
+    const content = [
+        { type: 'text', text: `BEFORE then AFTER. Inputs pressed: [${inputStr}] (type: ${cat}). Grade just this play.` },
+        { type: 'image_url', image_url: { url: before } },
+        { type: 'image_url', image_url: { url: after } },
+    ];
+    const ans = ((await callChatAPI([{ role: 'system', content: sys }, { role: 'user', content }], { max_tokens: 40 })) || '').trim();
+    recordUsage();
+    const m = ans.match(/-?\d*\.?\d+/);
+    if (!m) return null;
+    const g = parseFloat(m[0]);
+    return Number.isFinite(g) ? Math.max(-1, Math.min(1.2, g)) : null;
+}
+async function _gradeHumanMove(before, after, cat, stateKey, inputStr) {
+    try {
+        const g = await _llmGradeMove(before, after, cat, inputStr);
+        if (g != null) {
+            _qUpdate(stateKey, cat, g);
+            _trainStats.graded = (_trainStats.graded || 0) + 1; _saveTrainStats();
+            if (typeof pushChatlog === 'function')
+                pushChatlog(`<span class="cl-cmd">👨‍🏫 parent graded your "${_esc(cat)}": ${g.toFixed(2)} (${g >= 0.2 ? 'good' : g <= -0.2 ? 'bad' : 'meh'})</span>`, 'cl-tool');
+            updateDebugHUD();
+        }
+    } catch {}
+}
 
 let _turnFlip = false;   // alternate override turn direction so it can't spin one way forever
-// Map a learned action CATEGORY back to one concrete, sane move group.
-function _catToAction(cat) {
+// Map a learned action CATEGORY back to one concrete, sane move group. `fast` uses
+// short, reactive holds for RL solo play (the child plays at a quick, human-like
+// cadence since it's local + free); normal holds are for the LLM-paced override.
+function _catToAction(cat, fast = false) {
+    const fwd = fast ? 520 : 1500, turn = fast ? 240 : 400, back = fast ? 420 : 700;
     switch (cat) {
-        case 'forward':      return [{ keys: ['ArrowUp'], hold_ms: 1500 }];
-        case 'backward':     return ['back_up'];
-        case 'turn':         { _turnFlip = !_turnFlip; return [{ keys: [_turnFlip ? 'ArrowLeft' : 'ArrowRight'], hold_ms: 400 }]; }
-        case 'jump-forward': return ['run_jump'];
+        case 'forward':      return [{ keys: ['ArrowUp'], hold_ms: fwd }];
+        case 'backward':     return [{ keys: ['ArrowDown'], hold_ms: back }];
+        case 'turn':         { _turnFlip = !_turnFlip; return [{ keys: [_turnFlip ? 'ArrowLeft' : 'ArrowRight'], hold_ms: turn }]; }
+        case 'jump-forward': return fast ? [{ keys: ['ArrowUp', 'jump'], hold_ms: 300 }] : ['run_jump'];
         case 'jump':         return [{ keys: ['jump'], hold_ms: 220 }];
         case 'action':       return [{ keys: ['action'], hold_ms: 220 }];
         case 'crouch':       return [{ keys: ['crouch'], hold_ms: 260 }];
-        case 'wait':         return ['wait'];
+        case 'wait':         return [{ keys: ['_wait'], hold_ms: fast ? 350 : 700 }];
         default:             return null;
     }
 }
 // Decide whether the brain should take over this step. Returns {cat, from, actions} or null.
 function _brainOverride(response, stateKey) {
     if (!_adaptiveBrain || !_brainAssistControl) return null;
+    if (_playMode === 'ai-teach') return null;   // AI-Teach = clean demonstration, child never takes over
     const s = _qTable[stateKey];
     if (!s) return null;
     const ranked = Object.entries(s).filter(([, v]) => v.n >= 2).sort((a, b) => b[1].mean - a[1].mean);
@@ -1806,7 +2011,8 @@ function updateDebugHUD() {
     const brainLine = _adaptiveBrain
         ? `<div>child: ${Object.keys(_qTable).length} states · lastR: ${_lastReward == null ? '—' : _lastReward.toFixed(2)} (${_brainBias})</div>` +
           `<div>trust: ${Math.round(_childTrust * 100)}% · steps ✓${_og}/✗${_ob} · best:${_rankName}</div>` +
-          `<div>trained: ${_trainStats.episodes}ep · ${_trainStats.turns}turns · taught:${_trainStats.taught || 0}</div>`
+          `<div>mode: ${_playMode} · taught:${_trainStats.taught || 0} · graded:${_trainStats.graded || 0} · rated:${_trainStats.rated || 0}</div>` +
+          `<div>trained: ${_trainStats.episodes}ep · ${_trainStats.turns}turns</div>`
         : '';
     el.innerHTML =
         `<b>🐞 SM64-AI debug</b>` +
@@ -2959,31 +3165,54 @@ async function toggleAIPlayer() {
         clearChatlog();
         aiStream.getVideoTracks()[0].addEventListener('ended', stopAIPlayer);
 
-        // Auto-study the guide before playing (once), in the background
-        if (aiNotes.length === 0 && getActiveKey()) {
+        // Auto-study the guide before playing (once), in the background. RL Play uses
+        // no LLM, so it skips this.
+        if (_playMode !== 'rl' && aiNotes.length === 0 && getActiveKey()) {
             updateAIStatus('📚 Studying the guide before playing…');
             runStudy({ silent: true }).catch(() => {});
         }
 
-        if (aiMode === 'auto') {
-            aiBtn.textContent = '⏹ Stop AI';
-            aiBtn.classList.add('active');
-            updateAIStatus(_turboMode ? '⚡ Turbo AI — going as fast as possible' : '🤖 AI Player Active');
-            tts.speak(_turboMode ? 'Turbo AI active. Going as fast as I can.' : 'AI player activated. Analyzing the screen now.');
-            scheduleAILoop();   // routes to turbo loop if turbo is on
-            if (_turboMode && _turboCfg.live) startLiveLoop();
-            updateDebugHUD();
-            aiThinkAndAct();
-        } else {
-            aiManualState = 'idle';
-            aiBtn.textContent = '🧠 Think';
-            aiBtn.classList.add('active');
-            updateAIStatus('🤖 Manual Mode — press to think');
-        }
+        _startSelectedMode();
 
     } else {
-        aiMode === 'manual' ? handleManualModeClick() : stopAIPlayer();
+        (_playMode === 'ai' && aiMode === 'manual') ? handleManualModeClick() : stopAIPlayer();
     }
+}
+
+// Route the play button to whatever mode is selected.
+function _startSelectedMode() {
+    aiBtn.classList.add('active');
+    aiBtn.textContent = '⏹ Stop';
+    if (_playMode === 'rl') {
+        updateAIStatus('🧒 RL Player — the child plays on its own (no LLM: free, fast, reactive)');
+        tts.speak('R L player active. The child is playing on its own.');
+        _showRatingWidget(true);                 // rate its run any time
+        updateDebugHUD(); scheduleRLLoop(); rlThinkAndAct();
+        return;
+    }
+    if (_playMode === 'player-teach') {
+        updateAIStatus('🧓 Player-Teach — YOU play; the parent grades your moves, the child learns. Click the game!');
+        tts.speak('Player teach mode. You play. I will grade your moves and the child will learn.');
+        _showElderBanner(true);
+        updateDebugHUD();
+        return;                                  // no LLM play loop — elder watch + grading do the work
+    }
+    // 'ai' or 'ai-teach' → the parent LLM plays
+    if (_playMode === 'ai' && aiMode === 'manual') {
+        aiManualState = 'idle';
+        aiBtn.textContent = '🧠 Think';
+        updateAIStatus('🤖 Manual Mode — press to think');
+        return;
+    }
+    const teach = _playMode === 'ai-teach';
+    updateAIStatus(teach ? '👨‍🏫 AI-Teach — the parent plays and trains the child (no takeovers)'
+                         : (_turboMode ? '⚡ Turbo AI — going as fast as possible' : '🤖 AI Player Active'));
+    tts.speak(teach ? 'A I teach mode. I will play and teach the child.'
+                    : (_turboMode ? 'Turbo A I active.' : 'A I player activated.'));
+    scheduleAILoop();
+    if (_turboMode && _turboCfg.live) startLiveLoop();
+    updateDebugHUD();
+    aiThinkAndAct();
 }
 
 async function handleManualModeClick() {
@@ -3033,6 +3262,8 @@ function stopAIPlayer() {
     stopTurboLoop();
     stopLiveLoop();
     stopElderWatch();
+    _showoffRunning = false; _showoffBuffer = [];
+    _showElderBanner(false); _showRatingWidget(false);
     if (_captureVideo) { _captureVideo.srcObject = null; }
     // Free frame buffers so a long session doesn't pile up base64 strings
     _frameHistory = [];
@@ -3046,7 +3277,7 @@ function stopAIPlayer() {
     _escapeExtraTurns = 0;
     aiManualState    = 'idle';
     aiPlannedActions = null;
-    aiBtn.textContent = '🤖 AI Play';
+    aiBtn.textContent = _playModeLabel(_playMode);
     aiBtn.classList.remove('active');
     aiBtn.disabled    = false;
     aiStatus.style.display = 'none';
@@ -3054,6 +3285,8 @@ function stopAIPlayer() {
 }
 
 aiBtn.addEventListener('click', toggleAIPlayer);
+document.getElementById('play-mode')?.addEventListener('change', (e) => { if (aiPlayerActive) stopAIPlayer(); setPlayMode(e.target.value); });
+setPlayMode(_playMode);   // sync the selector + button label to the saved mode
 document.getElementById('rf-exit-btn')?.addEventListener('click', exitRapidFire);
 
 aiBtn.addEventListener('contextmenu', (e) => {
