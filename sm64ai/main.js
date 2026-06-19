@@ -1098,9 +1098,9 @@ const TUTORIAL_STEPS = [
         narration: 'Use arrow keys to move, X to jump, Space to crouch, C to dive or punch, and Enter to skip dialog. Open the Controls guide for the full reference.',
     },
     {
-        icon: '🤖', title: 'Step 3 — AI Player',
-        body: 'Click AI Play to let the AI take over. Share your screen when prompted so the AI can see the game. It analyzes each frame, decides what to do, and plays — narrating its thoughts out loud.',
-        narration: 'Click AI Play to let the AI take over. Share your screen so the AI can see the game. It will analyze each frame and play, narrating its thoughts out loud.',
+        icon: '🤖', title: 'Step 3 — Pick a mode & Start',
+        body: 'Choose a mode in the dropdown (AI Play, RL Play, Player Teach, or AI Teach), then click Start. Share your screen when prompted so it can see the game. It analyzes each frame, decides what to do, and plays — narrating its thoughts out loud.',
+        narration: 'Pick a mode from the dropdown, then click Start. Share your screen so it can see the game. It will analyze each frame and play, narrating its thoughts out loud.',
     },
     {
         icon: '💬', title: 'Step 4 — Give the AI Instructions',
@@ -1723,7 +1723,7 @@ function setPlayMode(m) {
     _playMode = m;
     try { localStorage.setItem('sm64_play_mode', m); } catch {}
     const sel = document.getElementById('play-mode'); if (sel) sel.value = m;
-    if (!aiPlayerActive) { const b = document.getElementById('ai-player-btn'); if (b) b.textContent = _playModeLabel(m); }
+    if (!aiPlayerActive) { const b = document.getElementById('ai-player-btn'); if (b) b.textContent = '▶ Start'; }
     updateAIStatus(`Mode: ${_playModeLabel(m)} — press the play button to start`);
 }
 window.sm64Mode = (m) => { if (m) setPlayMode(m); return _playMode; };
@@ -3277,7 +3277,7 @@ function stopAIPlayer() {
     _escapeExtraTurns = 0;
     aiManualState    = 'idle';
     aiPlannedActions = null;
-    aiBtn.textContent = _playModeLabel(_playMode);
+    aiBtn.textContent = '▶ Start';
     aiBtn.classList.remove('active');
     aiBtn.disabled    = false;
     aiStatus.style.display = 'none';
@@ -3294,9 +3294,9 @@ aiBtn.addEventListener('contextmenu', (e) => {
     if (aiPlayerActive) stopAIPlayer();
     aiMode = aiMode === 'auto' ? 'manual' : 'auto';
     const label = aiMode === 'auto' ? 'Auto' : 'Manual';
-    aiBtn.textContent = `🤖 AI Play (${label})`;
-    tts.interrupt(`Switched to ${label} mode.`);
-    setTimeout(() => { if (!aiPlayerActive) aiBtn.textContent = '🤖 AI Play'; }, 2500);
+    aiBtn.textContent = `▶ Start (${label})`;
+    tts.interrupt(`Switched to ${label} mode. Applies to AI Play.`);
+    setTimeout(() => { if (!aiPlayerActive) aiBtn.textContent = '▶ Start'; }, 2500);
 });
 
 // ────────────────────────────────────────────────────────────
@@ -3567,7 +3567,7 @@ document.getElementById('so-mute-btn')?.addEventListener('click',   () => _proxy
 // Keep the streamer-mode control dock in sync with real AI/buddy/mute state
 function updateStreamerControls() {
     const aiB = document.getElementById('so-ai-btn');
-    if (aiB) { aiB.classList.toggle('active', aiPlayerActive); aiB.textContent = aiPlayerActive ? '⏹ Stop AI' : '🤖 AI Play'; }
+    if (aiB) { aiB.classList.toggle('active', aiPlayerActive); aiB.textContent = aiPlayerActive ? '⏹ Stop' : '▶ Start'; }
     const buB = document.getElementById('so-buddy-btn');
     if (buB) { buB.classList.toggle('active', buddyActive); buB.textContent = buddyActive ? '⏹ Stop' : '🧡 Buddy'; }
     const mB = document.getElementById('so-mute-btn');
