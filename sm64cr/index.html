@@ -2,128 +2,122 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="theme-color" content="#100817" />
-  <title>CartriTilt64 — Drop-in SM64 WASM Corrupter</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#07070c" />
+  <title>CartriTilt64 — RTC-style SM64 WASM Corrupter</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <div class="crt" aria-hidden="true"></div>
-  <main class="shell">
-    <section class="hero panel">
-      <div>
-        <p class="eyebrow">Static WASM memory gremlin console</p>
-        <h1>CartriTilt64</h1>
-        <p class="tagline">Corrupt, blast, and “tilt the cartridge” of your own SM64 WASM build in real time.</p>
-      </div>
-      <div class="statusStack">
-        <div class="statusBox">
-          <span id="runtimeLight" class="light idle"></span>
-          <span id="runtimeStatus">Idle — ready for /sm64cr/ static boot</span>
+  <main class="app" id="app">
+    <header class="topbar">
+      <a class="backLink" href="../" title="Back to projects">← Projects</a>
+      <div class="brand">
+        <span class="logo" aria-hidden="true">▣</span>
+        <div>
+          <h1>CartriTilt64</h1>
+          <p>RTC-style live SM64 WASM memory corrupter</p>
         </div>
-        <div id="envNote" class="envNote">Checking static environment…</div>
       </div>
-    </section>
+      <div class="statusPill" role="status" aria-live="polite">
+        <span id="runtimeLight" class="light idle"></span>
+        <span id="runtimeStatus">Idle</span>
+      </div>
+    </header>
 
-    <section class="stageWrap panel">
-      <div class="screenBar">
-        <span>SM64 output</span>
-        <div class="screenTools">
-          <button id="focusBtn" class="smallBtn" type="button">Focus game</button>
-          <button id="fullscreenBtn" class="smallBtn" type="button">Fullscreen</button>
-        </div>
-      </div>
-      <div id="screenShell" class="screenShell">
-        <canvas id="canvas" class="gameCanvas" width="640" height="480" tabindex="0"></canvas>
-        <div id="bootOverlay" class="bootOverlay">
-          <h2>Insert cart</h2>
-          <p>
-            Put this folder at <code>/sm64cr/</code>, add your legal
-            <code>sm64.wasm</code> beside these files, then press boot.
-          </p>
-          <div class="overlayButtons">
-            <button id="bootDefaultBtn" type="button">Boot ./sm64.wasm</button>
-            <label class="fileDrop" id="dropZone">
-              <span>Pick or drop sm64.wasm</span>
-              <input id="wasmFile" type="file" accept=".wasm,application/wasm" />
-            </label>
+    <section class="layout">
+      <section class="stageCard" aria-label="SM64 game screen">
+        <div class="stageToolbar">
+          <span id="envNote">Static /sm64cr/ mode</span>
+          <div class="toolbarButtons">
+            <button id="focusBtn" class="tiny" type="button">Focus</button>
+            <button id="fullscreenBtn" class="tiny" type="button">Fullscreen</button>
           </div>
-          <p class="miniHint">Double-click/local-file mode: use the picker so the page can load the WASM without fetch.</p>
-        </div>
-      </div>
-    </section>
-
-    <section class="controls panel">
-      <div class="controlGroup bootGroup">
-        <h2>Static boot</h2>
-        <button id="bootDefaultSideBtn" type="button">Boot bundled ./sm64.wasm</button>
-        <button id="bootPickedBtn" type="button">Boot picked WASM</button>
-        <button id="reloadBtn" type="button">Hard reset page</button>
-        <label class="checkboxLine"><input id="autoBoot" type="checkbox" /> Auto-boot ./sm64.wasm on Pages</label>
-        <p class="hint">No backend, no build step, no ROM/assets included. Drop this folder into any static/Jekyll-hosted site.</p>
-      </div>
-
-      <div class="controlGroup">
-        <h2>Real-time corruptor</h2>
-        <div class="buttonRow">
-          <button id="armBtn" type="button" disabled>Arm corrupter</button>
-          <button id="blastBtn" type="button" disabled>Blast!</button>
-          <button id="tiltBtn" type="button" disabled>Tilt cartridge</button>
-          <button id="panicBtn" class="danger" type="button" disabled>Panic stop</button>
         </div>
 
-        <label>
-          Mode
-          <select id="modeSelect">
-            <option value="nibble">Nibble nudge — tiny bit flips</option>
-            <option value="drift">Analog drift — values slide around</option>
-            <option value="static">TV static — noisy XOR bursts</option>
-            <option value="swap">Byte swap — RAM roulette</option>
-            <option value="void">Void touch — 00/FF pokes</option>
-            <option value="sparkle">Sparkle — mostly harmless visual fizz</option>
-          </select>
-        </label>
+        <div id="screenShell" class="screenShell">
+          <canvas id="canvas" class="gameCanvas" width="640" height="480" tabindex="0" aria-label="Super Mario 64 output"></canvas>
+          <div id="bootOverlay" class="bootOverlay">
+            <h2>Insert cart</h2>
+            <p>Add <code>sm64.wasm</code> beside this page, then boot. No server code needed.</p>
+            <div class="bootButtons">
+              <button id="bootDefaultBtn" type="button">Boot ./sm64.wasm</button>
+              <label class="fileDrop" id="dropZone">
+                <span>Pick/drop WASM</span>
+                <input id="wasmFile" type="file" accept=".wasm,application/wasm" />
+              </label>
+            </div>
+            <small>Local file mode: use the picker. GitHub Pages: use ./sm64.wasm.</small>
+          </div>
+        </div>
+      </section>
 
-        <label>
-          Strength <output id="strengthOut">10</output>
-          <input id="strength" type="range" min="1" max="100" value="10" />
-        </label>
-        <label>
-          Speed <output id="speedOut">8/s</output>
-          <input id="speed" type="range" min="1" max="60" value="8" />
-        </label>
-        <label>
-          Tilt bias <output id="tiltOut">35%</output>
-          <input id="tiltBias" type="range" min="0" max="100" value="35" />
-        </label>
-      </div>
+      <aside class="controls" aria-label="CartriTilt64 controls">
+        <section class="card quickCard">
+          <div class="buttonGrid mainActions">
+            <button id="armBtn" type="button" disabled>Arm</button>
+            <button id="blastBtn" type="button" disabled>Blast</button>
+            <button id="tiltBtn" type="button" disabled>Tilt</button>
+            <button id="panicBtn" class="danger" type="button" disabled>Panic</button>
+          </div>
+          <div class="meterLine"><span>Live target</span><strong id="liveTarget">heap warming up</strong></div>
+          <div class="meterLine"><span>Pokes</span><strong id="pokeCount">0</strong></div>
+        </section>
 
-      <div class="controlGroup">
-        <h2>Memory target</h2>
-        <div class="rangeGrid">
+        <section class="card">
+          <h2>Corruptor</h2>
           <label>
-            Start <output id="startOut">22%</output>
-            <input id="rangeStart" type="range" min="0" max="98" value="22" />
+            Target domain
+            <select id="targetSelect">
+              <option value="auto">Auto: MarioState + hot RAM</option>
+              <option value="mario">MarioState / visible game state</option>
+              <option value="hot">Hot RAM pages only</option>
+              <option value="heap">Safe heap spray</option>
+            </select>
           </label>
           <label>
-            End <output id="endOut">90%</output>
-            <input id="rangeEnd" type="range" min="1" max="100" value="90" />
+            Engine
+            <select id="modeSelect">
+              <option value="tilt">Cart tilt — drifting values</option>
+              <option value="bitflip">Nightmare bits — masked flips</option>
+              <option value="xor">Static XOR — noisy bytes</option>
+              <option value="swap">Swapstorm — byte swaps</option>
+              <option value="zeroff">Void pulse — 00/FF taps</option>
+              <option value="numeric">Number gremlin — floats/shorts</option>
+            </select>
           </label>
-        </div>
-        <label class="checkboxLine"><input id="protectLow" type="checkbox" checked /> Protect first 2 MiB of runtime memory</label>
-        <label class="checkboxLine"><input id="smartGuard" type="checkbox" checked /> Smart guard: avoid stack-ish low memory</label>
-        <label class="checkboxLine"><input id="visualFx" type="checkbox" checked /> Add screen shake/filter while corrupting</label>
-        <div class="buttonRow">
-          <button id="snapshotBtn" type="button" disabled>Snapshot heap</button>
-          <button id="restoreBtn" type="button" disabled>Restore snapshot</button>
-        </div>
-        <p class="hint">Snapshot after the title screen for a rough rollback. Reload is still the cleanest reset.</p>
-      </div>
 
-      <div class="controlGroup logGroup">
-        <h2>Console</h2>
-        <pre id="log" class="log" aria-live="polite"></pre>
-      </div>
+          <div class="sliderRow">
+            <label>Strength <output id="strengthOut">8</output><input id="strength" type="range" min="1" max="80" value="8" /></label>
+            <label>Speed <output id="speedOut">8/s</output><input id="speed" type="range" min="1" max="45" value="8" /></label>
+          </div>
+          <label>Chaos bias <output id="tiltOut">35%</output><input id="tiltBias" type="range" min="0" max="100" value="35" /></label>
+        </section>
+
+        <details class="card" open>
+          <summary>Safety + targeting</summary>
+          <div class="rangeGrid">
+            <label>Heap start <output id="startOut">18%</output><input id="rangeStart" type="range" min="0" max="98" value="18" /></label>
+            <label>Heap end <output id="endOut">88%</output><input id="rangeEnd" type="range" min="1" max="100" value="88" /></label>
+          </div>
+          <label class="check"><input id="protectLow" type="checkbox" checked /> Protect low runtime memory</label>
+          <label class="check"><input id="smartGuard" type="checkbox" checked /> Prefer changing/hot RAM</label>
+          <label class="check"><input id="visualFx" type="checkbox" checked /> Screen glitch FX</label>
+          <label class="check"><input id="autoBoot" type="checkbox" /> Auto-boot ./sm64.wasm</label>
+          <div class="buttonGrid">
+            <button id="snapshotBtn" type="button" disabled>Snapshot</button>
+            <button id="restoreBtn" type="button" disabled>Restore</button>
+            <button id="undoBtn" type="button" disabled>Undo blast</button>
+            <button id="bootDefaultSideBtn" type="button">Boot</button>
+            <button id="bootPickedBtn" type="button">Boot picked</button>
+            <button id="reloadBtn" type="button">Reset page</button>
+          </div>
+        </details>
+
+        <details class="card">
+          <summary>Console</summary>
+          <pre id="log" class="log" aria-live="polite"></pre>
+        </details>
+      </aside>
     </section>
   </main>
 
