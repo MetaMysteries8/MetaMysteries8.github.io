@@ -361,14 +361,22 @@ async function callChatAPI(messages, opts = {}) {
     });
 
     if (!res.ok) {
-        if (res.status === 401 || res.status === 403) {
+        const err = await res.json().catch(() => ({}));
+        const msg = err?.error?.message || err?.message || '';
+        // ONLY a real 401 (bad/expired key) should disconnect you. A 403 is usually
+        // a per-request block (rate limit, content filter, tier) — NOT a dead key,
+        // so we keep you connected and just let the loop back off and retry. This
+        // is the fix for "one API hiccup logs me out".
+        if (res.status === 401) {
             clearStoredKey();
             pollinationsKey = null;
-            document.getElementById('auth-overlay').classList.remove('hidden');
-            throw new Error(`Auth failed (${res.status}) — please reconnect Pollinations`);
+            document.getElementById('auth-overlay')?.classList.remove('hidden');
+            throw new Error('401 Unauthorized — your Pollinations key expired. Please reconnect.');
         }
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err?.error?.message || `HTTP ${res.status}`);
+        if (res.status === 403) throw new Error(`403 (blocked this request — rate limit/tier/filter): ${msg || 'try again shortly'}`);
+        if (res.status === 429) throw new Error('429 Rate limited — backing off, will retry.');
+        if (res.status >= 500)  throw new Error(`Server error ${res.status} — temporary, will retry.`);
+        throw new Error(msg || `HTTP ${res.status}`);
     }
 
     const data = await res.json();
@@ -890,20 +898,6 @@ function buildProviderPanel() {
     fmtRow.appendChild(fmtSel);
     panel.appendChild(fmtRow);
 
-    // Auto-boot opener toggle
-    const bootRow = document.createElement('label');
-    bootRow.className = 'provider-row';
-    bootRow.style.cursor = 'pointer';
-    bootRow.innerHTML = `<span class="provider-label">Auto-boot into game</span>`;
-    const bootChk = document.createElement('input');
-    bootChk.type = 'checkbox'; bootChk.checked = _autoBoot;
-    bootChk.addEventListener('change', () => {
-        _autoBoot = bootChk.checked;
-        try { localStorage.setItem('sm64_auto_boot', _autoBoot ? '1' : '0'); } catch {}
-    });
-    bootRow.appendChild(bootChk);
-    panel.appendChild(bootRow);
-
     // Connect / reconnect button
     const connectBtn = document.createElement('button');
     connectBtn.className = 'provider-save-btn';
@@ -1248,48 +1242,6 @@ async function _frameDiffScore(urlA, urlB) {
     } catch { return null; }
 }
 
-// Estimate how the SCENE translated between two frames (block-matching on a
-// downscaled grayscale). Returns {dx,dy,conf}: dx>0 = content moved RIGHT on
-// screen, dy>0 = moved DOWN. Used by calibration to learn which way "forward"
-// actually pushes the view right now.
-let _flowCanvas = null, _flowCtx = null;
-async function _estimateFlow(urlA, urlB) {
-    try {
-        const [a, b] = await Promise.all([_loadImage(urlA), _loadImage(urlB)]);
-        const w = 64, h = 48, R = 7;
-        if (!_flowCanvas) { _flowCanvas = document.createElement('canvas'); _flowCtx = _flowCanvas.getContext('2d', { willReadFrequently: true }); }
-        _flowCanvas.width = w; _flowCanvas.height = h;
-        const gray = (img) => {
-            _flowCtx.drawImage(img, 0, 0, w, h);
-            const d = _flowCtx.getImageData(0, 0, w, h).data;
-            const g = new Float32Array(w * h);
-            for (let i = 0, p = 0; i < d.length; i += 4, p++) g[p] = (d[i] + d[i + 1] + d[i + 2]) / 3;
-            return g;
-        };
-        const ga = gray(a), gb = gray(b);
-        let best = { dx: 0, dy: 0, sad: Infinity }, zeroSad = 0;
-        for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
-            let sad = 0, n = 0;
-            for (let y = R; y < h - R; y += 2) for (let x = R; x < w - R; x += 2) {
-                sad += Math.abs(ga[y * w + x] - gb[(y + dy) * w + (x + dx)]); n++;
-            }
-            sad /= n;
-            if (dx === 0 && dy === 0) zeroSad = sad;
-            if (sad < best.sad) best = { dx, dy, sad };
-        }
-        // Confidence: how much better the best shift is than no-shift (0..1)
-        const conf = zeroSad > 0 ? Math.max(0, Math.min(1, (zeroSad - best.sad) / zeroSad)) : 0;
-        return { dx: best.dx, dy: best.dy, conf };
-    } catch { return null; }
-}
-// Turn a flow vector into a compass word ("down-left", "up", …).
-function _flowWord(dx, dy) {
-    if (Math.abs(dx) < 2 && Math.abs(dy) < 2) return 'barely at all';
-    const v = []; if (dy > 1) v.push('down'); else if (dy < -1) v.push('up');
-    if (dx > 1) v.push('right'); else if (dx < -1) v.push('left');
-    return v.join('-') || 'sideways';
-}
-
 // Shared offscreen canvas for frame annotation (nav grid + compass overlay).
 let _composeCanvas = null, _composeCtx = null;
 // Draw a faint 3×3 navigation grid + camera-relative compass over a frame.
@@ -1461,7 +1413,7 @@ let _brainmapEvents = [];       // visual timeline: [{ t, kind, text }]
 let _persistBrainmap = (() => { try { return localStorage.getItem('sm64_persist_brainmap') === '1'; } catch { return false; } })();
 
 function _resetBrainmap() {
-    _sceneCutCount = 0; _calibNote = ''; _calibDone = false;
+    _sceneCutCount = 0;
     // When persistence is ON we KEEP the accumulated map across AI restarts/reloads.
     if (_persistBrainmap) { updateBrainmapViz?.(); return; }
     _region = 'unknown'; _regionAge = 0; _progressLog = []; _checklist = []; _brainmapEvents = [];
@@ -1502,59 +1454,6 @@ function clearBrainmap() {
     updateBrainmapViz();
 }
 
-// ── Movement calibration: measure what "forward" actually does on screen ──
-let _calibNote = '';      // short grounding note fed to the model for a few turns
-let _calibTurns = 0;      // how many more turns to keep showing _calibNote
-let _calibDone = false;   // calibrated this episode/region yet?
-let _needCalib = false;   // request a calibration before the next think
-async function runCalibration() {
-    if (!aiPlayerActive || !aiStream || _calibrating) return;
-    _calibrating = true;
-    try {
-        updateAIStatus('🧭 Calibrating movement…');
-        const before = await captureScreen(aiStream);
-        if (before) {
-            simulateKeyPress('ArrowUp', 600);   // tap forward
-            await delay(660);
-            const after = await captureScreen(aiStream);
-            if (after) {
-                const mag = await _frameDiffScore(before, after);
-                const flow = await _estimateFlow(before, after);
-                _calibDone = true; _calibTurns = 4;
-                if (mag != null && mag < 0.04) {
-                    _calibNote = '🧭 CALIBRATION: pressing ArrowUp barely changed the view — forward is BLOCKED (a wall ahead) or you are not in control. Turn (Left/Right) or back up instead of pushing forward.';
-                } else if (flow && flow.conf > 0.15) {
-                    _calibNote = `🧭 CALIBRATION: forward (ArrowUp) WORKS — Mario moved and the scene shifted ${_flowWord(flow.dx, flow.dy)}. Use the on-frame compass (Up = away from camera) to aim; turn before running toward side targets.`;
-                } else {
-                    _calibNote = '🧭 CALIBRATION: forward (ArrowUp) moved you (the view changed). Trust the on-frame compass for directions.';
-                }
-            }
-        }
-    } catch {} finally { _calibrating = false; }
-}
-let _calibrating = false;
-
-// ── BOOT OPENER: deterministically mash through title / demo / file-select ──
-// Getting from the title (or an attract DEMO) into actual gameplay is a fixed
-// sequence the model wastes many turns on. This just does it: Start exits a demo
-// and advances the title; X picks the save file and skips the intro dialog. After
-// it, the AI takes over (and calibration runs once a gameplay region is seen).
-let _autoBoot = (() => { try { return localStorage.getItem('sm64_auto_boot') !== '0'; } catch { return true; } })();
-let _bootRunning = false;
-async function runBootOpener() {
-    if (!aiPlayerActive || !_autoBoot || _bootRunning) return;
-    _bootRunning = true;
-    try {
-        updateAIStatus('🎬 Booting in (skipping menus/demo)…');
-        const seq = ['Enter', 'Enter', 'KeyX', 'KeyX', 'KeyX'];   // Start,Start, X,X,X
-        for (const code of seq) {
-            if (!aiPlayerActive || playerMovementDetected) break;
-            simulateKeyPress(code, 150);
-            await delay(1400);
-        }
-        updateAIStatus('🎮 In game — AI taking over');
-    } finally { _bootRunning = false; }
-}
 
 // ── DEBUG HUD: live readout of what the AI is thinking/doing ──
 let _debugHUD = (() => { try { return localStorage.getItem('sm64_debug_hud') === '1'; } catch { return false; } })();
@@ -1570,7 +1469,7 @@ function updateDebugHUD() {
         `<div>region: <b>${_esc(_region)}</b> (${_regionAge}t)</div>` +
         `<div>last: ${_esc(_lastActionSummary || '—')}</div>` +
         `<div>visualΔ: ${_lastVisualPct == null ? '—' : _lastVisualPct + '%'} · stuck:${_stuckCount} · cut:${_sceneCutCount}</div>` +
-        `<div>calib: ${_calibDone ? 'done' : '—'} · fmt:${_cmdFormat}</div>` +
+        `<div>fmt: ${_cmdFormat}</div>` +
         `<div>mode: ${flags}</div>` +
         `<div>done: ${_esc(_progressLog.slice(-3).join(' → ') || '—')}</div>`;
 }
@@ -1591,7 +1490,7 @@ function _bmNode(id, label, icon) {
 function renderBrainmapHTML() {
     const map = `<div class="bm-map">${_bmNode('title', 'Title', '🎬')}<span class="bm-arrow">→</span>${_bmNode('outside-castle', 'Outside', '🌳')}<span class="bm-arrow">→</span>${_bmNode('castle-foyer', 'Foyer', '🏰')}<span class="bm-arrow">→</span>${_bmNode('in-level', 'In Level', '🎨')}</div>`;
     const cur = `<div class="bm-cur">📍 <b>${_esc(_region)}</b> <small>(${_regionAge} turns here)</small></div>`;
-    const calib = `<div class="bm-meta">${_calibDone ? '🧭 calibrated' : '🧭 not calibrated'} · 🎯 ${_esc(_aiGoal || 'no goal yet')}</div>`;
+    const calib = `<div class="bm-meta">🎯 ${_esc(_aiGoal || 'no goal yet')}</div>`;
     const checklist = _checklist.length
         ? `<div class="bm-h">Checklist</div>` + _checklist.map(c => `<div class="bm-check">${c.done ? '✅' : '⬜'} ${_esc(c.text || c)}</div>`).join('')
         : '';
@@ -2027,8 +1926,6 @@ async function aiThink() {
             (_checklist.length ? `- CHECKLIST: ${_checklist.map(c => `${c.done ? '✅' : '⬜'} ${c.text || c}`).join(' | ')}.\n` : '') +
             `- Update "region" every turn from what you SEE. If you just walked through the castle's front doors, your region is now "castle-foyer" — you are INSIDE; do not turn around and leave.`;
         // Calibration grounding (measured: what "forward" actually did on screen)
-        const calibCtx = (_calibTurns > 0 && _calibNote) ? `\n\n${_calibNote}` : '';
-        if (_calibTurns > 0) _calibTurns--;
         const planCtx = _aiGoal
             ? `\n\nYOUR CURRENT PLAN (you set this ${_aiGoalAge} turn(s) ago — KEEP pursuing it unless the screen clearly shows it's done, impossible, or wrong): ${_aiGoal}`
             : '';
@@ -2080,31 +1977,41 @@ GAME OBJECTIVE (once you control Mario):
 4. IN a level: go for the obvious star objective.
 5. Collect stars to progress.
 
-CONTROLS — how Mario ACTUALLY works (read carefully, you keep getting these wrong):
-- ArrowUp = forward, ArrowDown = BACKWARD (yes you CAN back up / turn around — use it when wedged or facing a wall), ArrowLeft/Right = steer/turn. All RELATIVE TO THE CAMERA (Up = away from camera).
-- You MUST hold a direction long enough to travel. A quick tap barely moves him. To cross open ground, hold ArrowUp for 1–3 SECONDS (hold_ms 1500+). This matters most.
-- Target not straight ahead? TURN FIRST (hold Left/Right ~300ms), THEN hold ArrowUp.
-- SIMULTANEOUS keys: put multiple keys in ONE group to press them together — ["ArrowUp","jump"] = jump while running forward (this is how you jump ACROSS gaps and INTO paintings). ["ArrowUp","crouch","jump"] = long jump.
-- jump (X) = jump + advances dialog. crouch (Space) = duck / ground-pound. action (C) = dive / punch / grab / read sign.
-- start (Enter) = title/demo CONFIRM only; in gameplay it PAUSES — never press it while playing.
+CONTROLS — the COMPLETE, exact control set. There are ONLY these. LEARN them:
+- ArrowUp = move FORWARD (the way Mario's back faces / away from camera).
+- ArrowDown = move BACKWARD — the literal OPPOSITE of ArrowUp. If forward is blocked or you overshot, press ArrowDown to back straight up. ⭐ YOU CONSTANTLY FORGET ArrowDown EXISTS. It is just as valid as forward. USE IT to un-stick yourself.
+- ArrowLeft / ArrowRight = turn/steer that way (the camera follows Mario).
+- DIAGONALS: hold TWO arrows together for diagonal movement — ["ArrowUp","ArrowLeft"] = forward-left, ["ArrowUp","ArrowRight"] = forward-right. Use this to line up precisely without a full separate turn.
+- Hold long enough to travel: a tap barely moves him; cross open ground = hold ~1500ms+.
 
-MACRO MOVES — easiest way to do tricky things; just put the word in "actions":
-- "run_jump" = run then jump (cross a gap, hop a ledge).
-- "enter_painting" = run forward and jump INTO the painting in front of you (use this to start a level).
-- "long_jump" = big horizontal leap.  "dive" = fast forward lunge.  "triple_jump" = highest jump.
-- "back_up" = move backward a bit.  "turn_around" = face the other way.  "swim_up" = stroke upward in water.
-- backflip = jump straight up from standstill.
+- jump (X) = the A button — jump; also advances dialog boxes.
+- action (C) = the B button — punch / kick / DIVE (while running) / grab / read a sign.
+- crouch (Space) = the Z button — crouch on the ground; IN THE AIR it does a GROUND POUND (slam straight down to hit switches, break boxes, or land precisely).
+- start (Enter) = Start — title/menu confirm and PAUSE only. NEVER press it during gameplay.
+
+KEY MOVES (keys in ONE group are pressed together / simultaneously):
+- Jump across a gap or INTO a painting: ["ArrowUp","jump"] while moving (or macro "run_jump" / "enter_painting").
+- Long jump (big horizontal leap): run, then ["ArrowUp","crouch","jump"] together (macro "long_jump").
+- Ground pound onto a target: jump, then crouch in the air (macro "ground_pound").
+- Wall kick to climb a corner: jump into the wall, then jump again off it (macro "wall_kick").
+- Back up / turn around when stuck: ArrowDown (macro "back_up" / "turn_around").
 Example actions: ["run_jump"]  or  [{"keys":["ArrowLeft"],"hold_ms":350},{"keys":["ArrowUp"],"hold_ms":1600},"enter_painting"]
 
-WATER — you keep failing this:
-- You do NOT "jump out" of water. Jumping does nothing useful in water.
-- To SWIM: hold a direction toward the nearest shore/shallow edge AND tap jump (X) repeatedly — each tap is a swim stroke that pushes you forward and UP. Keep stroking toward dry land.
-- If Mario is clearly ON LAND, he is NOT in water — just walk. Only swim if you actually SEE water around him.
+WATER — you get this BACKWARDS, so read carefully:
+- Underwater the up/down controls are INVERTED: hold ArrowDOWN to angle UPWARD toward the surface; hold ArrowUp to dive DEEPER. Tap jump (X) repeatedly = swim strokes that push you the way you're aimed.
+- To GET OUT of water: hold ArrowDown (to aim UP) + tap jump repeatedly to rise to the surface, then swim toward the nearest shore and up onto land.
+- If Mario is clearly ON DRY LAND he is NOT swimming — just walk normally.
 
-NAVIGATION:
-- The castle entrance is the pair of big wooden DOORS set into the castle wall, across the bridge — not every archway/tunnel. Pick the visible target, face it, then hold forward toward it.
-- The route is rarely a straight line — expect to move diagonally, sideways, and around obstacles.
-- If you barely moved last turn you are probably facing a wall or the wrong way — TURN (hold Left or Right to spin Mario; the camera follows him); do NOT keep mashing forward. There is NO separate camera control — re-orient by turning Mario.
+READING THE SCREEN — depth & obstacles (you are bad at this; slow down and look):
+- WALL vs PATH: a WALL is a solid surface that fills the view and STOPS you (you stop moving, the view freezes). A TUNNEL / DOORWAY / PATH is a DARKER opening or gap that RECEDES into the distance — you can pass THROUGH it. Unsure? Nudge forward briefly: if the view keeps changing it's a path; if it freezes it's a wall — then back up (ArrowDown) and go around.
+- DOORS vs PAINTINGS: a DOOR is a flat panel at FLOOR level you WALK through. A PAINTING is a framed picture on a wall that you JUMP INTO to enter a level. They are NOT the same — never try to jump into a door or walk into a painting.
+- DEPTH cues: things LOWER/LARGER on screen are CLOSER; HIGHER/SMALLER are FARTHER. An edge with empty space or sky beyond it is a DROP — don't walk off unless you mean to.
+- MOVING PLATFORMS (lifts, elevators, rotating bridges) are your natural enemy: do NOT chase them. Wait at the edge until the platform lines up next to you, step on when it's adjacent, ride it, step off at the far side. Only jump when it's right beside you.
+
+NAVIGATION & UN-STICKING:
+- The castle ENTRANCE is the pair of big wooden DOORS in the front wall across the bridge — not every arch/tunnel. Face it, hold forward into it.
+- The route is rarely straight — expect to move diagonally and around things.
+- WEDGED in a corner / box / against a wall (barely moved 2+ turns)? Do NOT keep pushing forward. Recovery in order: (1) press ArrowDown to BACK OUT, (2) turn 90° (hold Left or Right ~500ms), (3) go forward a new way. Backing up is the #1 escape — use it before anything drastic.
 
 UNDERSTAND BEFORE YOU ACT (do this every turn, in your head, then fill the JSON):
 1. SCENE: what screen is this? (title / file_select / demo / dialog / gameplay)
@@ -2126,7 +2033,7 @@ RULES:
 - ${memOn
     ? 'You may use tools (get_game_state, set_game_speed for tricky jumps, save_move/play_move for reusable sequences) when helpful, but don\'t call tools every turn.'
     : 'There is no reliable game memory — judge everything from the image. You may use set_game_speed, is_stuck/is_trapped, or save_move/play_move when helpful, but don\'t call tools every turn.'}
-${brainmapCtx}${calibCtx}${movementCtx}${planCtx}${lastActCtx}${preplanCtx}${memStateCtx}${motionCtx}${memoryCtx}${notesCtx}${instrCtx}
+${brainmapCtx}${movementCtx}${planCtx}${lastActCtx}${preplanCtx}${memStateCtx}${motionCtx}${memoryCtx}${notesCtx}${instrCtx}
 
 ${_cmdFormat === 'simple'
 ? `Reply in this SIMPLE LINE FORMAT (one field per line, NO JSON, NO markdown):
@@ -2160,8 +2067,8 @@ SAY: heading into my first level!`
   "rapid_fire": false
 }`}
 
-A "step"/group is {"keys":[...simultaneous...], "hold_ms": N} OR a macro word ("run_jump","enter_painting","long_jump","dive","triple_jump","back_up","turn_around","swim_up","backflip"). Hold guide: FORWARD 1200–2500ms; TURN 250–500ms (short!); jump/dialog 150–350ms. ${_preplanMode ? `PRE-PLAN: give a full ${capTxt}-step script.` : 'Normally 1–5 steps (more only if preplan:true).'}
-Valid keys (THESE ARE THE ONLY ONES — there is no camera key): ArrowUp(forward), ArrowDown(backward), ArrowLeft(turn left), ArrowRight(turn right), jump(=A), action(=B: dive/punch/grab), crouch(=Z: ground-pound/long-jump), start(pause/confirm only).`;
+A "step"/group is {"keys":[...simultaneous...], "hold_ms": N} OR a macro word ("run_jump","enter_painting","long_jump","dive","triple_jump","ground_pound","wall_kick","back_up","turn_around","swim_up","backflip"). Hold guide: FORWARD/BACKWARD 1200–2500ms; TURN 250–500ms (short!); jump/dialog 150–350ms. ${_preplanMode ? `PRE-PLAN: give a full ${capTxt}-step script.` : 'Normally 1–5 steps (more only if preplan:true).'}
+Valid keys (THESE ARE THE ONLY ONES — there is no camera key): ArrowUp(forward), ArrowDown(BACKWARD — opposite of forward, USE IT), ArrowLeft(turn left), ArrowRight(turn right), jump(=A), action(=B: dive/punch/grab), crouch(=Z: ground-pound in air / long-jump), start(pause/confirm only). Combine arrows for diagonals.`;
 
         // Single-frame perception: the AI acts on ONE current frame, annotated
         // with a nav grid + compass. (The previous-frame comparison was removed —
@@ -2220,12 +2127,8 @@ Valid keys (THESE ARE THE ONLY ONES — there is no camera key): ArrowUp(forward
                 _region = newRegion; _regionAge = 0;
                 _progressLog.push(`entered ${newRegion}`);
                 _bmEvent('region', `entered ${newRegion}`);
-                // Re-calibrate forward whenever we enter a NEW gameplay area (camera differs).
-                if (GAMEPLAY_REGION.test(newRegion)) { _calibDone = false; _needCalib = true; }
             } else _regionAge++;
         } else _regionAge++;
-        // First time we ever confirm a gameplay region, calibrate.
-        if (!_calibDone && GAMEPLAY_REGION.test(_region)) _needCalib = true;
         // Milestones the model reports completing this turn
         const done = response.done || response.progress;
         if (done && typeof done === 'string' && done.trim()) {
@@ -2365,16 +2268,23 @@ function _isPreplan(response) {
 // into a sequence of simultaneous-key groups (this is also where "simultaneous
 // controls" really matter — e.g. a long jump is Up+crouch+jump at once).
 const _MACROS = {
-    run_jump:       [{ keys: ['ArrowUp'], hold_ms: 700 }, { keys: ['ArrowUp', 'jump'], hold_ms: 300 }],
-    long_jump:      [{ keys: ['ArrowUp'], hold_ms: 550 }, { keys: ['ArrowUp', 'crouch', 'jump'], hold_ms: 320 }],
-    dive:           [{ keys: ['ArrowUp'], hold_ms: 450 }, { keys: ['ArrowUp', 'action'], hold_ms: 320 }],
-    enter_painting: [{ keys: ['ArrowUp'], hold_ms: 750 }, { keys: ['ArrowUp', 'jump'], hold_ms: 340 }],
-    jump_forward:   [{ keys: ['ArrowUp', 'jump'], hold_ms: 320 }],
-    triple_jump:    [{ keys: ['ArrowUp', 'jump'], hold_ms: 280 }, { keys: ['ArrowUp', 'jump'], hold_ms: 280 }, { keys: ['ArrowUp', 'jump'], hold_ms: 340 }],
+    // Run a solid distance FIRST (so there's real speed), then jump at the end.
+    run_jump:       [{ keys: ['ArrowUp'], hold_ms: 900 }, { keys: ['ArrowUp', 'jump'], hold_ms: 320 }],
+    long_jump:      [{ keys: ['ArrowUp'], hold_ms: 750 }, { keys: ['ArrowUp', 'crouch', 'jump'], hold_ms: 340 }],
+    dive:           [{ keys: ['ArrowUp'], hold_ms: 550 }, { keys: ['ArrowUp', 'action'], hold_ms: 320 }],
+    // Run well into the painting, then jump into it.
+    enter_painting: [{ keys: ['ArrowUp'], hold_ms: 1000 }, { keys: ['ArrowUp', 'jump'], hold_ms: 360 }],
+    jump_forward:   [{ keys: ['ArrowUp', 'jump'], hold_ms: 340 }],
+    triple_jump:    [{ keys: ['ArrowUp', 'jump'], hold_ms: 280 }, { keys: ['ArrowUp', 'jump'], hold_ms: 280 }, { keys: ['ArrowUp', 'jump'], hold_ms: 360 }],
     backflip:       [{ keys: ['crouch'], hold_ms: 130 }, { keys: ['jump'], hold_ms: 280 }],
+    // Ground pound: jump up, then crouch (Z) in the air to slam straight down.
+    ground_pound:   [{ keys: ['jump'], hold_ms: 260 }, { keys: ['crouch'], hold_ms: 320 }],
+    // Wall kick: jump toward a wall, then jump again off it to gain height.
+    wall_kick:      [{ keys: ['ArrowUp', 'jump'], hold_ms: 260 }, { keys: ['jump'], hold_ms: 280 }],
     turn_around:    [{ keys: ['ArrowDown'], hold_ms: 500 }],
     back_up:        [{ keys: ['ArrowDown'], hold_ms: 700 }],
-    swim_up:        [{ keys: ['ArrowUp', 'jump'], hold_ms: 200 }, { keys: ['ArrowUp', 'jump'], hold_ms: 200 }, { keys: ['ArrowUp', 'jump'], hold_ms: 200 }],
+    // Surface in water: hold DOWN (aims Mario UP) and stroke with jump.
+    swim_up:        [{ keys: ['ArrowDown', 'jump'], hold_ms: 220 }, { keys: ['ArrowDown', 'jump'], hold_ms: 220 }, { keys: ['ArrowDown', 'jump'], hold_ms: 220 }],
 };
 function _macroName(g) {
     let s = null;
@@ -2509,13 +2419,6 @@ async function aiThinkAndAct() {
     if (!aiPlayerActive || _busyCycle) return;
     _busyCycle = true;
     try {
-        // Calibrate forward movement when we just entered a gameplay area (skip in
-        // turbo/rapid — it would steal time from the fast loop).
-        if (_needCalib && !_turboMode && !_rapidFireActive) {
-            _needCalib = false;
-            await runCalibration();
-            if (!aiPlayerActive) return;
-        }
         const resp = await aiThink();
         if (resp && aiPlayerActive) await aiExecute(resp);
         updateDebugHUD();   // refresh the debug panel after each decision
@@ -2639,8 +2542,7 @@ async function toggleAIPlayer() {
             scheduleAILoop();   // routes to turbo loop if turbo is on
             if (_turboMode && _turboCfg.live) startLiveLoop();
             updateDebugHUD();
-            // Mash through the title/demo/file-select into gameplay first, then think.
-            runBootOpener().then(() => { if (aiPlayerActive) aiThinkAndAct(); });
+            aiThinkAndAct();
         } else {
             aiManualState = 'idle';
             aiBtn.textContent = '🧠 Think';
