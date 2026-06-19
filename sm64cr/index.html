@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#07070c" />
-  <title>CartriTilt64 — RTC-style SM64 WASM Corrupter</title>
+  <title>CartriTilt64 — Anti-crash SM64 RTC Corrupter</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -15,7 +15,7 @@
         <span class="logo" aria-hidden="true">▣</span>
         <div>
           <h1>CartriTilt64</h1>
-          <p>RTC-style live SM64 WASM memory corrupter</p>
+          <p>supervised RTC-style SM64 WASM corrupter</p>
         </div>
       </div>
       <div class="statusPill" role="status" aria-live="polite">
@@ -25,20 +25,21 @@
     </header>
 
     <section class="layout">
-      <section class="stageCard" aria-label="SM64 game screen">
+      <section class="stageCard" aria-label="SM64 game runner">
         <div class="stageToolbar">
-          <span id="envNote">Static /sm64cr/ mode</span>
+          <span id="envNote">Sandbox runner: parent UI stays outside the game runtime.</span>
           <div class="toolbarButtons">
-            <button id="focusBtn" class="tiny" type="button">Focus</button>
+            <button id="focusBtn" class="tiny" type="button">Focus game</button>
             <button id="fullscreenBtn" class="tiny" type="button">Fullscreen</button>
+            <button id="detachBtn" class="tiny" type="button">Detached tab</button>
           </div>
         </div>
 
         <div id="screenShell" class="screenShell">
-          <canvas id="canvas" class="gameCanvas" width="640" height="480" tabindex="0" aria-label="Super Mario 64 output"></canvas>
+          <iframe id="runnerFrame" class="runnerFrame" title="CartriTilt64 isolated SM64 runner" sandbox="allow-scripts allow-pointer-lock allow-popups allow-modals" allow="autoplay; fullscreen" allowfullscreen></iframe>
           <div id="bootOverlay" class="bootOverlay">
             <h2>Insert cart</h2>
-            <p>Add <code>sm64.wasm</code> beside this page, then boot. No server code needed.</p>
+            <p>Boots <code>./sm64.wasm</code> through the supervisor, then runs SM64 inside a sandboxed runner.</p>
             <div class="bootButtons">
               <button id="bootDefaultBtn" type="button">Boot ./sm64.wasm</button>
               <label class="fileDrop" id="dropZone">
@@ -46,7 +47,7 @@
                 <input id="wasmFile" type="file" accept=".wasm,application/wasm" />
               </label>
             </div>
-            <small>Local file mode: use the picker. GitHub Pages: use ./sm64.wasm.</small>
+            <small>If the game hangs, use Panic / Force reboot. The control UI lives outside the runner.</small>
           </div>
         </div>
       </section>
@@ -59,19 +60,24 @@
             <button id="tiltBtn" type="button" disabled>Tilt</button>
             <button id="panicBtn" class="danger" type="button" disabled>Panic</button>
           </div>
-          <div class="meterLine"><span>Live target</span><strong id="liveTarget">heap warming up</strong></div>
+          <div class="buttonGrid rebootActions">
+            <button id="forceRebootBtn" class="warn" type="button">Force reboot runner</button>
+            <button id="softPanicBtn" type="button" disabled>Soft restore</button>
+          </div>
+          <div class="meterLine"><span>Runner</span><strong id="runnerHealth">not booted</strong></div>
+          <div class="meterLine"><span>Live target</span><strong id="liveTarget">waiting</strong></div>
           <div class="meterLine"><span>Pokes</span><strong id="pokeCount">0</strong></div>
         </section>
 
-        <section class="card">
+        <section class="card compactCard">
           <h2>Corruptor</h2>
           <label>
-            Target domain
+            Target
             <select id="targetSelect">
               <option value="auto">Auto: MarioState + hot RAM</option>
               <option value="mario">MarioState / visible game state</option>
               <option value="hot">Hot RAM pages only</option>
-              <option value="heap">Safe heap spray</option>
+              <option value="heap">Guarded heap spray</option>
             </select>
           </label>
           <label>
@@ -87,20 +93,22 @@
           </label>
 
           <div class="sliderRow">
-            <label>Strength <output id="strengthOut">8</output><input id="strength" type="range" min="1" max="80" value="8" /></label>
-            <label>Speed <output id="speedOut">8/s</output><input id="speed" type="range" min="1" max="45" value="8" /></label>
+            <label>Strength <output id="strengthOut">6</output><input id="strength" type="range" min="1" max="64" value="6" /></label>
+            <label>Speed <output id="speedOut">6/s</output><input id="speed" type="range" min="1" max="30" value="6" /></label>
           </div>
-          <label>Chaos bias <output id="tiltOut">35%</output><input id="tiltBias" type="range" min="0" max="100" value="35" /></label>
+          <label>Chaos bias <output id="tiltOut">28%</output><input id="tiltBias" type="range" min="0" max="100" value="28" /></label>
         </section>
 
         <details class="card" open>
-          <summary>Safety + targeting</summary>
+          <summary>Crash guard + targeting</summary>
           <div class="rangeGrid">
-            <label>Heap start <output id="startOut">18%</output><input id="rangeStart" type="range" min="0" max="98" value="18" /></label>
-            <label>Heap end <output id="endOut">88%</output><input id="rangeEnd" type="range" min="1" max="100" value="88" /></label>
+            <label>Heap start <output id="startOut">20%</output><input id="rangeStart" type="range" min="0" max="98" value="20" /></label>
+            <label>Heap end <output id="endOut">86%</output><input id="rangeEnd" type="range" min="1" max="100" value="86" /></label>
           </div>
-          <label class="check"><input id="protectLow" type="checkbox" checked /> Protect low runtime memory</label>
+          <label class="check"><input id="protectLow" type="checkbox" checked /> Protect low/runtime memory</label>
           <label class="check"><input id="smartGuard" type="checkbox" checked /> Prefer changing/hot RAM</label>
+          <label class="check"><input id="crashGuard" type="checkbox" checked /> Cap writes per tick</label>
+          <label class="check"><input id="autoRecover" type="checkbox" checked /> Auto-reboot frozen runner</label>
           <label class="check"><input id="visualFx" type="checkbox" checked /> Screen glitch FX</label>
           <label class="check"><input id="autoBoot" type="checkbox" /> Auto-boot ./sm64.wasm</label>
           <div class="buttonGrid">
@@ -109,7 +117,7 @@
             <button id="undoBtn" type="button" disabled>Undo blast</button>
             <button id="bootDefaultSideBtn" type="button">Boot</button>
             <button id="bootPickedBtn" type="button">Boot picked</button>
-            <button id="reloadBtn" type="button">Reset page</button>
+            <button id="resetUiBtn" type="button">Reset UI</button>
           </div>
         </details>
 
@@ -121,6 +129,6 @@
     </section>
   </main>
 
-  <script src="cartritilt64.js"></script>
+  <script src="controller.js"></script>
 </body>
 </html>

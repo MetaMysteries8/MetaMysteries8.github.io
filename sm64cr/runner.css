@@ -1,0 +1,35 @@
+html, body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: #000;
+  color: #f7f5ff;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+body {
+  display: grid;
+  place-items: center;
+}
+canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+  background: #000;
+  outline: none;
+}
+.runnerOverlay {
+  position: fixed;
+  inset: auto 1rem 1rem 1rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid rgba(255,255,255,0.18);
+  border-radius: 14px;
+  background: rgba(0,0,0,0.74);
+  color: rgba(255,255,255,0.78);
+  text-align: center;
+  font-size: 0.9rem;
+  pointer-events: none;
+}
+.runnerOverlay.hidden { display: none; }
