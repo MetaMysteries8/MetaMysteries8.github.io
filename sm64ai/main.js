@@ -898,15 +898,15 @@ function buildProviderPanel() {
     fmtRow.appendChild(fmtSel);
     panel.appendChild(fmtRow);
 
-    // ── Experimental: Adaptive Brain (tiny in-browser learner) ──
+    // ── Parent + Child learner (recommended) ──
     const expHead = document.createElement('div');
     expHead.className = 'provider-bridge-note';
-    expHead.innerHTML = '🧪 <strong>Experimental — Adaptive Brain.</strong> A tiny in-browser learner (no download) that watches which moves work where and coaches the AI over time. Also adds a rough depth/structure read.';
+    expHead.innerHTML = '🧠 <strong>Parent &amp; Child learner (recommended, on by default).</strong> The text model is the <em>parent</em> — it knows Super Mario 64 but fumbles the loose controls. Beside it runs a tiny from-scratch reinforcement learner — the <em>child</em> — born with ZERO game knowledge, learning only by watching which inputs actually move Mario (rewarded for progress, punished for getting stuck or killed). The parent grades the child and sets a TRUST level; as the child grows up, the parent hands it the controller more often. Also adds a rough depth read.';
     panel.appendChild(expHead);
 
     const abRow = document.createElement('label');
     abRow.className = 'provider-row'; abRow.style.cursor = 'pointer';
-    abRow.innerHTML = `<span class="provider-label">Enable Adaptive Brain</span>`;
+    abRow.innerHTML = `<span class="provider-label">Enable parent + child learner</span>`;
     const abChk = document.createElement('input');
     abChk.type = 'checkbox'; abChk.checked = _adaptiveBrain;
     abChk.addEventListener('change', () => setAdaptiveBrain(abChk.checked));
@@ -925,6 +925,24 @@ function buildProviderPanel() {
     biasSel.addEventListener('change', () => setBrainBias(biasSel.value));
     biasRow.appendChild(biasLabel); biasRow.appendChild(biasSel);
     panel.appendChild(biasRow);
+
+    // Let the child take the controller when the parent trusts it enough.
+    const assistRow = document.createElement('label');
+    assistRow.className = 'provider-row'; assistRow.style.cursor = 'pointer';
+    assistRow.innerHTML = `<span class="provider-label">🧒 Let the child take steps<br><small>Once the parent trusts it, the child plays moves it has learned — more often as trust grows</small></span>`;
+    const assistChk = document.createElement('input');
+    assistChk.type = 'checkbox'; assistChk.checked = _brainAssistControl;
+    assistChk.addEventListener('change', () => setBrainAssist(assistChk.checked));
+    assistRow.appendChild(assistChk); panel.appendChild(assistRow);
+
+    // Elder mode — the child learns from the human's manual play.
+    const elderRow = document.createElement('label');
+    elderRow.className = 'provider-row'; elderRow.style.cursor = 'pointer';
+    elderRow.innerHTML = `<span class="provider-label">🧓 Learn from my play (elder)<br><small>While the AI is on but you grab the controls, the child watches and learns from you — play a level by hand to teach it</small></span>`;
+    const elderChk = document.createElement('input');
+    elderChk.type = 'checkbox'; elderChk.checked = _elderLearn;
+    elderChk.addEventListener('change', () => setElderLearn(elderChk.checked));
+    elderRow.appendChild(elderChk); panel.appendChild(elderRow);
 
     const clearQ = document.createElement('button');
     clearQ.className = 'provider-save-btn'; clearQ.style.background = '#3a2030';
@@ -1495,11 +1513,13 @@ function clearBrainmap() {
 // to work where. Each turn it whispers a learned hint to the AI ("forward keeps
 // failing here, turning works"). 'improve' bias amplifies what works; 'chaos'
 // bias leans into what fails (for fun streams). Off by default — experimental.
-let _adaptiveBrain = (() => { try { return localStorage.getItem('sm64_adaptive') === '1'; } catch { return false; } })();
+let _adaptiveBrain = (() => { try { const v = localStorage.getItem('sm64_adaptive'); return v == null ? true : v === '1'; } catch { return true; } })();
 let _brainBias     = (() => { try { return localStorage.getItem('sm64_brain_bias') || 'improve'; } catch { return 'improve'; } })();
 let _qTable = {};            // stateKey -> { actionCat: { n, mean } }
 let _pendingLearn = null;    // { stateKey, actionCat } awaiting its reward
 let _prevProgressLen = 0;    // to detect a milestone earned by the last action
+let _lastReward = null;          // RL score handed to the previous action (HUD + LLM feedback)
+let _lastBrainActionCat = null;  // previous turn's action category (repeat-failure detection)
 
 function _brainState() {
     const region = /in-level/.test(_region) ? 'level' : (_region || 'unknown');
@@ -1507,12 +1527,13 @@ function _brainState() {
     const vis = _lastVisualPct == null ? 'na' : _lastVisualPct < 8 ? 'none' : _lastVisualPct < 25 ? 'low' : 'high';
     return `${region}|${stuck}|${vis}`;
 }
-function _actionCat(actions) {
-    const g = _expandGroups(actions || [])[0];
-    let keys = Array.isArray(g) ? g : (g && (g.keys || g.actions)) || (typeof g === 'string' ? [g] : []);
-    keys = (Array.isArray(keys) ? keys : [keys]).filter(k => keyMap[k]);
-    const codes = keys.map(k => keyMap[k]);
-    const has = c => codes.includes(c);
+// Classify a set of physical key CODES into one action category. Shared by the
+// AI's planned moves AND the human elder's live inputs (WASD mapped to arrows),
+// so demonstrations and the model's own moves land in the same buckets.
+function _categorizeCodes(codes) {
+    const alias = { KeyW: 'ArrowUp', KeyS: 'ArrowDown', KeyA: 'ArrowLeft', KeyD: 'ArrowRight', KeyZ: 'Space' };
+    const c = codes.map(x => alias[x] || x);
+    const has = k => c.includes(k);
     if (has('ArrowUp') && has('KeyX')) return 'jump-forward';
     if (has('ArrowDown')) return 'backward';
     if (has('ArrowUp')) return 'forward';
@@ -1520,7 +1541,15 @@ function _actionCat(actions) {
     if (has('KeyX')) return 'jump';
     if (has('KeyC')) return 'action';
     if (has('Space')) return 'crouch';
-    return 'other';
+    return null;
+}
+function _actionCat(actions) {
+    const g = _expandGroups(actions || [])[0];
+    let keys = Array.isArray(g) ? g : (g && (g.keys || g.actions)) || (typeof g === 'string' ? [g] : []);
+    keys = Array.isArray(keys) ? keys : [keys];
+    if (keys.some(k => k === '_wait' || k === 'wait' || k === 'observe')) return 'wait';
+    keys = keys.filter(k => keyMap[k]);
+    return _categorizeCodes(keys.map(k => keyMap[k])) || 'other';
 }
 function _qUpdate(stateKey, actionCat, reward) {
     const s = _qTable[stateKey] || (_qTable[stateKey] = {});
@@ -1528,15 +1557,43 @@ function _qUpdate(stateKey, actionCat, reward) {
     a.n++; a.mean += (reward - a.mean) / a.n;
     try { localStorage.setItem('sm64_qtable', JSON.stringify(_qTable)); } catch {}
 }
-// Reward the PREVIOUS action using the outcome we can now measure.
+// Reward (or PUNISH) the PREVIOUS action using the outcome we can now measure.
+// This is the core of the RL loop: did the last move help, do nothing, or hurt?
 function _brainLearn() {
     if (!_adaptiveBrain || !_pendingLearn) return;
-    let r = (_lastVisualPct == null ? 0 : _lastVisualPct / 100);   // movement = good
-    if (_stuckCount >= 2) r -= 0.4;                                 // stuck = bad
-    if (_progressLog.length > _prevProgressLen) r += 0.6;          // milestone = great
-    _qUpdate(_pendingLearn.stateKey, _pendingLearn.actionCat, Math.max(-0.5, Math.min(1.3, r)));
+    const p = _pendingLearn;
+    let r = 0;
+    // Real, visible travel is good — UNLESS the WHOLE screen flipped, which is
+    // almost always a DEATH / level-exit / demo cut rather than progress. A "wait"
+    // legitimately produces little screen change, so it isn't punished for that.
+    if (_lastVisualPct != null) {
+        if (_sceneCutCount >= 1)         r -= 0.4;                   // uncaused scene cut ≈ death
+        else if (p.actionCat === 'wait') r += 0.05;                 // patience is mildly fine
+        else                             r += Math.min(0.6, _lastVisualPct / 100); // genuine travel
+    }
+    if (_stuckCount >= 2 && p.actionCat !== 'wait') {
+        r -= 0.5;                                                    // wedged = bad
+        if (p.actionCat === _lastBrainActionCat) r -= 0.3;          // repeating the SAME failing move = worse
+    }
+    if (_progressLog.length > _prevProgressLen) r += 0.9;           // a milestone = the jackpot
+    r = Math.max(-1.2, Math.min(1.5, r));
+    _qUpdate(p.stateKey, p.actionCat, r);
+    _lastReward = r;
+    _lastBrainActionCat = p.actionCat;
+    // The child grows up by proving itself. When IT took the step, its result
+    // moves trust the most; even while just watching, consistent good/bad calls
+    // nudge trust a little. This is the "parent grading the child" feedback.
+    if (p.wasOverride) {
+        if (r >= 0.25)      _trainStats.overrideGood = (_trainStats.overrideGood || 0) + 1;
+        else if (r <= -0.25) _trainStats.overrideBad  = (_trainStats.overrideBad  || 0) + 1;
+        _setChildTrust(_childTrust + (r >= 0.25 ? 0.04 : r <= -0.25 ? -0.05 : 0));
+    } else {
+        _setChildTrust(_childTrust + (r >= 0.4 ? 0.01 : r <= -0.4 ? -0.01 : 0));
+    }
     _pendingLearn = null;
     _prevProgressLen = _progressLog.length;
+    _trainStats.turns++;          // one more scored experience banked
+    _saveTrainStats();
 }
 function _brainHint(stateKey) {
     if (!_adaptiveBrain) return '';
@@ -1548,8 +1605,17 @@ function _brainHint(stateKey) {
     if (_brainBias === 'chaos') {
         return `\n\n📊 ADAPTIVE BRAIN (CHAOS mode — embrace the jank): here, "${worst[0]}" has been failing; lean into chaotic/unconventional moves for the stream.`;
     }
-    let h = `\n\n📊 ADAPTIVE BRAIN (learned this run): in spots like this, "${best[0]}" has worked best (score ${best[1].mean.toFixed(2)}).`;
-    if (entries.length > 1 && worst[1].mean < 0.15) h += ` "${worst[0]}" tends to FAIL here — avoid it.`;
+    let h = `\n\n📊 YOUR APPRENTICE (a from-scratch learner with NO game knowledge — it only watches your inputs and what they do to Mario) reports: in situations like this, "${best[0]}" has worked best so far (avg ${best[1].mean.toFixed(2)} over ${best[1].n} tries). You know the game — weigh its observation.`;
+    if (entries.length > 1 && worst[1].mean < 0) {
+        h += ` It has watched "${worst[0]}" FAIL here repeatedly (avg ${worst[1].mean.toFixed(2)}) — probably avoid it.`;
+    }
+    // Exploration: if nothing tried here is actually working, nudge toward an
+    // untried category (this is how it discovers e.g. "wait" beats "jump" on a lift).
+    if (best[1].mean < 0.1) {
+        const tried = new Set(entries.map(e => e[0]));
+        const cand = ['forward', 'backward', 'turn', 'jump-forward', 'wait'].filter(c => !tried.has(c));
+        if (cand.length) h += ` It hasn't seen anything work here yet — maybe try something it hasn't, like "${cand[0]}".`;
+    }
     return h;
 }
 function setAdaptiveBrain(on) {
@@ -1561,8 +1627,134 @@ function setBrainBias(b) {
     try { localStorage.setItem('sm64_brain_bias', _brainBias); } catch {}
 }
 function loadQTable() { try { _qTable = JSON.parse(localStorage.getItem('sm64_qtable')) || {}; } catch { _qTable = {}; } }
-function clearQTable() { _qTable = {}; try { localStorage.removeItem('sm64_qtable'); } catch {} }
+function clearQTable() {
+    _qTable = {}; try { localStorage.removeItem('sm64_qtable'); } catch {}
+    _trainStats = { episodes: 0, turns: 0, overrides: 0, overrideGood: 0, overrideBad: 0, taught: 0, bestRegionRank: 0 }; _saveTrainStats();
+    if (typeof _setChildTrust === 'function') _setChildTrust(0.15);   // back to a fresh, untrusted child
+}
 window.sm64Brain = (on) => setAdaptiveBrain(on);
+
+// ── SELF-TRAINING STATS — the child (RL) growing up across sessions ──────
+// Cumulative across reloads (the whole point: it accumulates experience).
+let _trainStats = (() => { try { return JSON.parse(localStorage.getItem('sm64_trainstats')) || {}; } catch { return {}; } })();
+_trainStats.episodes ??= 0; _trainStats.turns ??= 0; _trainStats.overrides ??= 0; _trainStats.bestRegionRank ??= 0;
+function _saveTrainStats() { try { localStorage.setItem('sm64_trainstats', JSON.stringify(_trainStats)); } catch {} }
+const _REGION_RANK = { unknown: 0, title: 0, demo: 0, 'outside-castle': 1, 'castle-foyer': 2 };
+function _regionRank(r) { return /in-level/.test(r || '') ? 3 : (_REGION_RANK[r] ?? 0); }
+
+// ── APPRENTICE STEP-IN — the child (RL) assists the parent (LLM) ──────────
+// Roles: the PARENT (text LLM) knows the game but fumbles the loose controls; the
+// CHILD (RL) started empty and has learned, purely by watching inputs→results,
+// which moves actually work mechanically. The child DEFERS to the knowledgeable
+// parent — it only steps in when the parent is visibly STUCK and the child has
+// SOLID evidence (≥2 samples each) that the parent's pick keeps failing here while
+// another move works. Early on (no experience) it never fires. Toggleable.
+let _brainAssistControl = (() => { try { const v = localStorage.getItem('sm64_brain_assist'); return v == null ? true : v === '1'; } catch { return true; } })();
+function setBrainAssist(on) { _brainAssistControl = !!on; try { localStorage.setItem('sm64_brain_assist', _brainAssistControl ? '1' : '0'); } catch {} }
+window.sm64BrainAssist = (on) => setBrainAssist(on);
+
+// TRUST (0..1) — how grown-up the parent considers the child. The parent (LLM)
+// sets it via child_trust, and it auto-drifts with the child's measured results.
+// Trust is the dial that decides how OFTEN the child gets to take the controller.
+let _childTrust = (() => { try { const v = parseFloat(localStorage.getItem('sm64_child_trust')); return Number.isFinite(v) ? v : 0.15; } catch { return 0.15; } })();
+function _saveChildTrust() { try { localStorage.setItem('sm64_child_trust', String(_childTrust)); } catch {} }
+function _setChildTrust(t) { _childTrust = Math.max(0, Math.min(1, t)); _saveChildTrust(); }
+window.sm64Trust = (t) => { if (t != null) _setChildTrust(t > 1 ? t / 100 : t); return _childTrust; };
+
+// ── ELDER MODE — learn from the HUMAN'S manual play (demonstration) ───────
+// The human is the elder. When YOU take the controls, the child WATCHES: it banks
+// what your inputs do to Mario as positive demonstrations, the way a kid learns by
+// watching a grown-up actually play. Show it a level by hand and it grows up
+// faster, then the parent can lean on it. Needs the AI player ON (for the vision
+// stream) but paused because you're driving. Gated by _elderLearn.
+let _elderLearn = (() => { try { const v = localStorage.getItem('sm64_elder_learn'); return v == null ? true : v === '1'; } catch { return true; } })();
+function setElderLearn(on) { _elderLearn = !!on; try { localStorage.setItem('sm64_elder_learn', _elderLearn ? '1' : '0'); } catch {} }
+let _elderLoop = null, _elderPrevFrame = null, _lastTaughtCat = null;
+function startElderWatch() {
+    if (_elderLoop) return;
+    _elderLoop = setInterval(async () => {
+        if (!_adaptiveBrain || !_elderLearn || !aiPlayerActive || _agentOnly) { _elderPrevFrame = null; return; }
+        if (!playerMovementDetected) { _elderPrevFrame = null; return; }   // only while the human drives
+        const cat = _categorizeCodes([...playerInputs]);
+        if (!cat) return;
+        const ss = await captureScreen(aiStream).catch(() => null);
+        if (!ss) return;
+        if (_elderPrevFrame) {
+            const vm = await _frameDiffScore(_elderPrevFrame, ss);
+            if (vm != null) {
+                // A human's deliberate movement is a GOOD demonstration. Reward by how
+                // much it changed the view, with a positive floor (the elder is trusted).
+                _qUpdate(_brainState(), cat, Math.max(0.12, Math.min(0.8, vm * 1.2)));
+                _trainStats.taught = (_trainStats.taught || 0) + 1; _saveTrainStats();
+                _setChildTrust(_childTrust + 0.004);   // watching a human grows it up a touch
+                _lastTaughtCat = cat;
+                updateDebugHUD();
+            }
+        }
+        _elderPrevFrame = ss;
+    }, 700);
+}
+function stopElderWatch() { if (_elderLoop) { clearInterval(_elderLoop); _elderLoop = null; } _elderPrevFrame = null; }
+// Power-user: hand-grade the human's most recent demonstrated move from the console.
+window.sm64Teach = (reward = 0.6) => { if (_lastTaughtCat) _qUpdate(_brainState(), _lastTaughtCat, Math.max(-1, Math.min(1.5, reward))); return _lastTaughtCat; };
+
+let _turnFlip = false;   // alternate override turn direction so it can't spin one way forever
+// Map a learned action CATEGORY back to one concrete, sane move group.
+function _catToAction(cat) {
+    switch (cat) {
+        case 'forward':      return [{ keys: ['ArrowUp'], hold_ms: 1500 }];
+        case 'backward':     return ['back_up'];
+        case 'turn':         { _turnFlip = !_turnFlip; return [{ keys: [_turnFlip ? 'ArrowLeft' : 'ArrowRight'], hold_ms: 400 }]; }
+        case 'jump-forward': return ['run_jump'];
+        case 'jump':         return [{ keys: ['jump'], hold_ms: 220 }];
+        case 'action':       return [{ keys: ['action'], hold_ms: 220 }];
+        case 'crouch':       return [{ keys: ['crouch'], hold_ms: 260 }];
+        case 'wait':         return ['wait'];
+        default:             return null;
+    }
+}
+// Decide whether the brain should take over this step. Returns {cat, from, actions} or null.
+function _brainOverride(response, stateKey) {
+    if (!_adaptiveBrain || !_brainAssistControl) return null;
+    const s = _qTable[stateKey];
+    if (!s) return null;
+    const ranked = Object.entries(s).filter(([, v]) => v.n >= 2).sort((a, b) => b[1].mean - a[1].mean);
+    if (ranked.length < 2) return null;
+    const llmCat = _actionCat(response.actions);
+    const cur = s[llmCat];
+    if (_brainBias === 'chaos') {
+        // Chaos: let the child grab the controller toward the jankiest move, sometimes.
+        const worst = ranked[ranked.length - 1];
+        if (worst[0] !== llmCat && worst[1].mean < -0.1 && Math.random() < 0.5) {
+            const act = _catToAction(worst[0]);
+            if (act) return { cat: worst[0], from: llmCat, actions: act };
+        }
+        return null;
+    }
+    // TRUST scales how eager the child is — the whole "hand it down more as it
+    // grows up" mechanic lives here.
+    const t = _childTrust;
+    const best = ranked[0];
+    // Until it's reasonably trusted (≥50%), the child only helps when the parent
+    // is visibly STUCK. Past that, it may also act proactively.
+    if (t < 0.5 && _stuckCount < 1) return null;
+    const badThresh  = -0.2 + t * 0.15;   // more trust → readier to call the parent's pick "bad"
+    const goodThresh =  0.3 - t * 0.2;    // more trust → the child's best needn't be as proven
+    const llmBad   = cur && cur.n >= 2 && cur.mean < badThresh;
+    const eligible = (llmBad && best[0] !== llmCat && best[1].mean > goodThresh);
+    // High trust: step in proactively when the child is VERY confident, even if the
+    // parent's pick wasn't clearly wrong.
+    const proactive = t >= 0.7 && best[0] !== llmCat && best[1].mean > 0.6;
+    if (eligible || proactive) {
+        // Hand-down PROBABILITY rises with trust: ~25% of eligible moments when
+        // barely trusted, up to 100% once the child has grown up. This is the
+        // "let it take the controller more often" dial.
+        if (Math.random() > 0.25 + 0.75 * t) return null;
+        const act = _catToAction(best[0]);
+        if (act) return { cat: best[0], from: llmCat, actions: act };
+    }
+    return null;
+}
 
 // ── DEPTH / STRUCTURE READ (lightweight heuristic, NOT a neural net) ──
 // Splits the frame into L/C/R thirds and estimates, per side, brightness + edge
@@ -1609,8 +1801,12 @@ function updateDebugHUD() {
     if (!_debugHUD) { el.style.display = 'none'; return; }
     el.style.display = 'block';
     const flags = [_preplanMode && 'preplan', _turboMode && 'turbo', _rapidFireActive && 'rapid', _agentOnly && 'agent-only', _adaptiveBrain && 'brain'].filter(Boolean).join(' ') || '—';
+    const _rankName = ['title', 'outside', 'foyer', 'in-level'][_trainStats.bestRegionRank] || 'title';
+    const _og = _trainStats.overrideGood || 0, _ob = _trainStats.overrideBad || 0;
     const brainLine = _adaptiveBrain
-        ? `<div>brain: ${Object.keys(_qTable).length} states learned (${_brainBias})</div>`
+        ? `<div>child: ${Object.keys(_qTable).length} states · lastR: ${_lastReward == null ? '—' : _lastReward.toFixed(2)} (${_brainBias})</div>` +
+          `<div>trust: ${Math.round(_childTrust * 100)}% · steps ✓${_og}/✗${_ob} · best:${_rankName}</div>` +
+          `<div>trained: ${_trainStats.episodes}ep · ${_trainStats.turns}turns · taught:${_trainStats.taught || 0}</div>`
         : '';
     el.innerHTML =
         `<b>🐞 SM64-AI debug</b>` +
@@ -1991,8 +2187,11 @@ async function aiThink() {
             : await captureScreen(aiStream);
         if (!screenshot) { updateAIStatus('❌ Failed to capture game view'); _isThinking = false; return null; }
         // Skip if the frame is identical to recent ones (nothing changed).
-        // Advanced turbo (max overdrive) never skips — it always re-thinks.
-        const skipIdentical = !(_turboMode && _turboCfg.advanced);
+        // Advanced turbo AND Multi-request both RE-REQUEST on purpose, so they must
+        // NOT skip "identical" frames. That idle-skip is exactly why multi-request
+        // mode appeared to stall: it executes one tiny move, the frame barely
+        // changes, and the very next think got skipped → no new request fired.
+        const skipIdentical = !(_turboMode && (_turboCfg.advanced || _turboCfg.multi));
         if (skipIdentical && isFrameIdentical(screenshot)) {
             updateAIStatus('💤 Screen unchanged — skipping inference');
             _isThinking = false;
@@ -2048,12 +2247,24 @@ async function aiThink() {
 
         const memOn = gameState != null;   // false when memory reading is disabled
 
-        // ── Adaptive brain (experimental): reward the last action, learn, hint ──
-        let _curStateKey = '', brainCtx = '', depthCtx = '';
+        // ── Apprentice (parent LLM + child RL): score last action, learn, hint, trust ──
+        let _curStateKey = '', brainCtx = '', depthCtx = '', rewardCtx = '', trustCtx = '';
         if (_adaptiveBrain) {
             _brainLearn();                       // score the previous action's outcome
             _curStateKey = _brainState();
             brainCtx = _brainHint(_curStateKey);
+            if (_lastReward != null) {
+                const verdict = _lastReward >= 0.25 ? 'REWARDED ✅ (that helped)'
+                              : _lastReward <= -0.25 ? 'PUNISHED ❌ (that did NOT work)'
+                              : 'neutral (little effect)';
+                rewardCtx = `\n\n🎓 OUTCOME of your LAST move (this is also how the apprentice scored it): ${verdict} — ${_lastReward.toFixed(2)}.` +
+                    (_lastReward <= -0.25 ? ' Choose a DIFFERENT category of move this turn — do not repeat the last one.' : '');
+            }
+            // You decide how much to trust the child. As it proves it can play, raise
+            // child_trust so it takes the controller more often; lower it if it flails.
+            const tp = Math.round(_childTrust * 100);
+            const og = _trainStats.overrideGood || 0, ob = _trainStats.overrideBad || 0, tg = _trainStats.taught || 0;
+            trustCtx = `\n\n🤝 APPRENTICE TRUST: ${tp}%. The child (an empty-brained learner that only watches inputs→results) has taken ${og + ob} step(s) for you so far — ${og} helped, ${ob} backfired${tg ? `; it has also watched a human play ${tg} move(s)` : ''}. Set "child_trust" (0-100) to grade it: RAISE it as it proves reliable so it plays more, LOWER it if it's flailing. At low trust it only acts when you're stuck.`;
             if (screenshot) depthCtx = await _depthRead(screenshot);
         }
 
@@ -2164,7 +2375,7 @@ READING THE SCREEN — depth & obstacles (you are bad at this; slow down and loo
 - WALL vs PATH: a WALL is a solid surface that fills the view and STOPS you (you stop moving, the view freezes). A TUNNEL / DOORWAY / PATH is a DARKER opening or gap that RECEDES into the distance — you can pass THROUGH it. Unsure? Nudge forward briefly: if the view keeps changing it's a path; if it freezes it's a wall — then back up (ArrowDown) and go around.
 - DOORS vs PAINTINGS: a DOOR is a flat panel at FLOOR level you WALK through. A PAINTING is a framed picture on a wall that you JUMP INTO to enter a level. They are NOT the same — never try to jump into a door or walk into a painting.
 - DEPTH cues: things LOWER/LARGER on screen are CLOSER; HIGHER/SMALLER are FARTHER. An edge with empty space or sky beyond it is a DROP — don't walk off unless you mean to.
-- MOVING PLATFORMS (lifts, elevators, rotating bridges) are your natural enemy: do NOT chase them. Wait at the edge until the platform lines up next to you, step on when it's adjacent, ride it, step off at the far side. Only jump when it's right beside you.
+- MOVING PLATFORMS (lifts, elevators, rotating bridges) are your #1 nemesis — most deaths happen here. Do NOT chase them and do NOT jump at a gap hoping it arrives. PROTOCOL: stand at the edge and use the "wait" / "observe" move to watch ONE full cycle; only when the platform is RIGHT NEXT TO you (adjacent, basically touching) do you step or short-hop on; ride it; then step off the instant the far side lines up. Patience beats reflexes here — "wait" is a real, valid move, use it.
 
 NAVIGATION & UN-STICKING:
 - The castle ENTRANCE is the pair of big wooden DOORS in the front wall across the bridge — not every arch/tunnel. Face it, hold forward into it.
@@ -2191,7 +2402,7 @@ RULES:
 - ${memOn
     ? 'You may use tools (get_game_state, set_game_speed for tricky jumps, save_move/play_move for reusable sequences) when helpful, but don\'t call tools every turn.'
     : 'There is no reliable game memory — judge everything from the image. You may use set_game_speed, is_stuck/is_trapped, or save_move/play_move when helpful, but don\'t call tools every turn.'}
-${brainmapCtx}${brainCtx}${depthCtx}${movementCtx}${planCtx}${lastActCtx}${preplanCtx}${memStateCtx}${motionCtx}${memoryCtx}${notesCtx}${instrCtx}
+${brainmapCtx}${brainCtx}${trustCtx}${rewardCtx}${depthCtx}${movementCtx}${planCtx}${lastActCtx}${preplanCtx}${memStateCtx}${motionCtx}${memoryCtx}${notesCtx}${instrCtx}
 
 ${_cmdFormat === 'simple'
 ? `Reply in this SIMPLE LINE FORMAT (one field per line, NO JSON, NO markdown):
@@ -2201,6 +2412,7 @@ TARGET: what you're heading to + its grid cell
 GOAL: your multi-turn plan
 DO: step | step | step          (each step is "keys hold_ms" or a macro; keys joined by +)
 SAY: short commentary (optional)
+TRUST: 0-100 (optional — how much you trust the RL apprentice to take steps for you)
 DONE: a milestone you just completed (optional, e.g. "entered castle")
 Example:
 REGION: castle-foyer
@@ -2221,11 +2433,12 @@ SAY: heading into my first level!`
   "done": "a milestone I just completed, or null (e.g. 'entered castle')",
   "mistake": "error noticed or null",
   "notes": ["optional NEW insight — omit or [] if none"],
+  "child_trust": "0-100, optional — how much you trust the RL apprentice to take steps for you; RAISE as it proves it can play, LOWER if it flails",
   "preplan": false,
   "rapid_fire": false
 }`}
 
-A "step"/group is {"keys":[...simultaneous...], "hold_ms": N} OR a macro word ("run_jump","enter_painting","long_jump","dive","triple_jump","ground_pound","wall_kick","back_up","turn_around","swim_up","backflip"). Hold guide: FORWARD/BACKWARD 1200–2500ms; TURN 250–500ms (short!); jump/dialog 150–350ms. ${_preplanMode ? `PRE-PLAN: give a full ${capTxt}-step script.` : 'Normally 1–5 steps (more only if preplan:true).'}
+A "step"/group is {"keys":[...simultaneous...], "hold_ms": N} OR a macro word ("run_jump","enter_painting","long_jump","dive","triple_jump","ground_pound","wall_kick","back_up","turn_around","swim_up","backflip","wait","observe"). The "wait"/"observe" macro presses NOTHING — use it to hold still and watch a moving platform/lift before committing. Hold guide: FORWARD/BACKWARD 1200–2500ms; TURN 250–500ms (short!); jump/dialog 150–350ms. ${_preplanMode ? `PRE-PLAN: give a full ${capTxt}-step script.` : 'Normally 1–5 steps (more only if preplan:true).'}
 Valid keys (THESE ARE THE ONLY ONES — there is no camera key): ArrowUp(forward), ArrowDown(BACKWARD — opposite of forward, USE IT), ArrowLeft(turn left), ArrowRight(turn right), jump(=A), action(=B: dive/punch/grab), crouch(=Z: ground-pound in air / long-jump), start(pause/confirm only). Combine arrows for diagonals.`;
 
         // Single-frame perception: the AI acts on ONE current frame, annotated
@@ -2259,9 +2472,39 @@ Valid keys (THESE ARE THE ONLY ONES — there is no camera key): ArrowUp(forward
 
         const response = parseAIResponse(rawContent);
 
-        // Adaptive brain: remember (state, action) so we can reward it next turn.
+        // 🤝 PARENT SETS THE CHILD'S TRUST. The parent (LLM) grades the apprentice
+        // and decides how much to trust it (child_trust 0-100). Trust controls how
+        // often the child is allowed to take a step. Blended (EMA) so it's steady.
+        if (_adaptiveBrain && response) {
+            const ct = response.child_trust ?? response.trust ?? response.trust_child;
+            if (ct != null && ct !== '') {
+                let v = (typeof ct === 'string') ? parseFloat(ct) : ct;
+                if (Number.isFinite(v)) { if (v > 1) v /= 100; _setChildTrust(_childTrust * 0.7 + Math.max(0, Math.min(1, v)) * 0.3); }
+                else if (/up|rais|more|promote|trust/i.test(String(ct))) _setChildTrust(_childTrust + 0.08);
+                else if (/down|low|less|distrust|demote/i.test(String(ct))) _setChildTrust(_childTrust - 0.08);
+            }
+        }
+
+        // The child (RL) steps in — but only as far as the parent TRUSTS it. Early
+        // on (low trust) it only helps when the parent is stuck; as trust grows the
+        // parent hands the controller down more and more often. It always defers to
+        // the knowledgeable parent unless it has genuinely learned better here.
         if (_adaptiveBrain && response?.actions?.length) {
-            _pendingLearn = { stateKey: _curStateKey || _brainState(), actionCat: _actionCat(response.actions) };
+            const ov = _brainOverride(response, _curStateKey || _brainState());
+            if (ov) {
+                response.actions = ov.actions;
+                response._override = ov;
+                _trainStats.overrides++; _saveTrainStats();
+                if (typeof pushChatlog === 'function')
+                    pushChatlog(`<span class="cl-cmd">🧒 apprentice takes a step (trust ${Math.round(_childTrust * 100)}%) — parent's "${_esc(ov.from)}" keeps failing here; child has learned "${_esc(ov.cat)}" works</span>`, 'cl-tool');
+            }
+        }
+
+        // Adaptive brain: remember (state, action) so we can reward it next turn.
+        // (Uses the FINAL actions — if the child overrode, we credit what actually ran,
+        // and flag it so trust can react to the child's OWN track record when playing.)
+        if (_adaptiveBrain && response?.actions?.length) {
+            _pendingLearn = { stateKey: _curStateKey || _brainState(), actionCat: _actionCat(response.actions), wasOverride: !!response._override };
         }
 
         // Persist the multi-turn plan for navigation continuity. Keep pursuing the
@@ -2290,6 +2533,10 @@ Valid keys (THESE ARE THE ONLY ONES — there is no camera key): ArrowUp(forward
                 _region = newRegion; _regionAge = 0;
                 _progressLog.push(`entered ${newRegion}`);
                 _bmEvent('region', `entered ${newRegion}`);
+                // Self-training: record the furthest the child has ever gotten.
+                if (_regionRank(newRegion) > _trainStats.bestRegionRank) {
+                    _trainStats.bestRegionRank = _regionRank(newRegion); _saveTrainStats();
+                }
             } else _regionAge++;
         } else _regionAge++;
         // Milestones the model reports completing this turn
@@ -2385,7 +2632,15 @@ function _normalizeGroup(g, fast) {
     if (Array.isArray(g)) keys = g;
     else if (g && typeof g === 'object') { keys = g.keys || g.actions || []; ms = g.hold_ms ?? g.ms ?? g.duration ?? null; }
     else if (typeof g === 'string') keys = [g];
-    keys = (Array.isArray(keys) ? keys : [keys]).filter(k => keyMap[k]);
+    const rawKeys = Array.isArray(keys) ? keys : [keys];
+    // A WAIT/OBSERVE group presses nothing — it just holds still for ms so the AI
+    // can watch a moving platform's cycle. Detect it BEFORE the keyMap filter drops
+    // the '_wait' sentinel, and return a sane pause duration.
+    if (rawKeys.some(k => k === '_wait' || k === 'wait' || k === 'observe')) {
+        const wms = (ms == null ? 700 : ms);
+        return { keys: [], ms: Math.max(200, Math.min(2000, wms)) / gameSpeed, wait: true };
+    }
+    keys = rawKeys.filter(k => keyMap[k]);
     // Resolve to physical key CODES so aliases ("up", "forward") classify correctly.
     const codes = keys.map(k => keyMap[k]);
     // Smarter movement defaults when the model omits hold_ms:
@@ -2402,7 +2657,7 @@ function _normalizeGroup(g, fast) {
     // Clamp: turns get a tighter ceiling so the AI can't accidentally spin in circles.
     const maxMs = isTurnOnly ? (fast ? 700 : 900) : (fast ? 1800 : 4000);
     ms = Math.max(80, Math.min(maxMs, ms));
-    return { keys, ms: ms / gameSpeed };
+    return { keys, ms: ms / gameSpeed, wait: false };
 }
 
 let _lastActions = null;        // last sequence executed (for save_move/play_move)
@@ -2446,6 +2701,12 @@ const _MACROS = {
     wall_kick:      [{ keys: ['ArrowUp', 'jump'], hold_ms: 260 }, { keys: ['jump'], hold_ms: 280 }],
     turn_around:    [{ keys: ['ArrowDown'], hold_ms: 500 }],
     back_up:        [{ keys: ['ArrowDown'], hold_ms: 700 }],
+    // Patience primitive — hold STILL and watch (no keys pressed). Essential vs
+    // moving platforms/lifts/rotating bridges: wait for one to line up next to you
+    // instead of chasing it or mis-timing a jump. The RL brain rewards this when
+    // chasing keeps failing.
+    wait:           [{ keys: ['_wait'], hold_ms: 700 }],
+    observe:        [{ keys: ['_wait'], hold_ms: 950 }],
     // Surface in water: hold DOWN (aims Mario UP) and stroke with jump.
     swim_up:        [{ keys: ['ArrowDown', 'jump'], hold_ms: 220 }, { keys: ['ArrowDown', 'jump'], hold_ms: 220 }, { keys: ['ArrowDown', 'jump'], hold_ms: 220 }],
 };
@@ -2507,6 +2768,7 @@ function parseSimpleCommands(text) {
         else if (key === 'THOUGHT' || key === 'THINK') out.thought = val;
         else if (key === 'DONE' || key === 'PROGRESS') out.done = val;
         else if (key === 'PREPLAN') out.preplan = /true|yes|1/i.test(val);
+        else if (key === 'TRUST') out.child_trust = parseFloat(val);
         else if (key === 'SCENE') out.scene = val;
     }
     if (!out.thought) out.thought = out.target || 'acting';
@@ -2555,14 +2817,15 @@ async function aiExecute(response) {
     for (let i = 0; i < groups.length; i++) {
         if (!aiPlayerActive) break;
         if (preplan && playerMovementDetected) { updateAIStatus('✋ Pre-plan aborted — you took control'); break; }
-        const { keys, ms } = _normalizeGroup(groups[i], fast);
-        if (!keys.length) continue;
-        // Hold all keys in the group simultaneously for the (sustained) duration
+        const { keys, ms, wait } = _normalizeGroup(groups[i], fast);
+        if (!wait && !keys.length) continue;
+        // Hold all keys in the group simultaneously for the (sustained) duration.
+        // A wait group presses nothing — it just holds still and observes.
         for (const action of keys) {
             const keyCode = keyMap[action];
             if (keyCode) simulateKeyPress(keyCode, Math.max(70, ms * 0.92));
         }
-        updateAIStatus(`${preplan ? '🧠' : '🎮'} [${i + 1}/${groups.length}] ${keys.join(' + ')} (${Math.round(ms)}ms)`);
+        updateAIStatus(`${preplan ? '🧠' : (wait ? '⏳' : '🎮')} [${i + 1}/${groups.length}] ${wait ? 'wait / observe' : keys.join(' + ')} (${Math.round(ms)}ms)`);
         await delay(ms);
 
         if (watch && i < groups.length - 1) {
@@ -2684,6 +2947,11 @@ async function toggleAIPlayer() {
         _aiGoalAge      = 0;
         _lastActions    = null;
         _lastActionSummary = '';
+        _pendingLearn   = null;     // fresh RL episode — no stale reward/feedback
+        _lastReward     = null;
+        _lastBrainActionCat = null;
+        if (_adaptiveBrain) { _trainStats.episodes++; _saveTrainStats(); }
+        startElderWatch();          // child watches when YOU (the elder) take over
         _resetBrainmap();
         _frameHistory   = [];
         _escapeArmed      = false;
@@ -2764,6 +3032,7 @@ function stopAIPlayer() {
     if (aiInterval)    { clearInterval(aiInterval); aiInterval = null; }
     stopTurboLoop();
     stopLiveLoop();
+    stopElderWatch();
     if (_captureVideo) { _captureVideo.srcObject = null; }
     // Free frame buffers so a long session doesn't pile up base64 strings
     _frameHistory = [];
