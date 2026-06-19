@@ -16,7 +16,8 @@
         <span>SM64 real-time corruptor</span>
       </div>
       <div class="topControls">
-        <button id="focusBtn" type="button" class="ghost">Focus</button>
+        <button id="focusBtn" type="button" class="ghost">Game Input</button>
+        <button id="uiInputBtn" type="button" class="ghost">UI Input</button>
         <button id="fullscreenBtn" type="button" class="ghost">Fullscreen</button>
         <button id="reloadBtn" type="button" class="ghost">Reload</button>
         <div class="status" role="status" aria-live="polite"><span id="runtimeLight" class="dot idle"></span><span id="runtimeStatus">Ready</span></div>
@@ -29,7 +30,7 @@
           <canvas id="canvas" class="gameCanvas" tabindex="0" oncontextmenu="event.preventDefault()"></canvas>
           <div class="boot" id="bootOverlay">
             <h2>Boot SM64</h2>
-            <p>Same-page runner. Stable defaults first; chaos only when you ask for it.</p>
+            <p>Same-page runner. Plan with AI before boot, then apply gentle staged corruptions in-game.</p>
             <div class="bootActions">
               <button id="bootDefaultBtn" type="button">Boot ./sm64.wasm</button>
               <label class="fileBtn">Pick WASM<input id="wasmFile" type="file" accept=".wasm,application/wasm" /></label>
@@ -65,6 +66,8 @@
             <div><span>MarioState</span><strong id="marioStat">unknown</strong></div>
             <div><span>Hot pages</span><strong id="hotStat">0</strong></div>
             <div><span>Writes</span><strong id="pokeCount">0</strong></div>
+            <div><span>Checkpoints</span><strong id="checkpointStat">0</strong></div>
+            <div><span>Input</span><strong id="inputStat">UI</strong></div>
           </div>
           <label class="field">Stability preset
             <select id="presetSelect">
@@ -82,14 +85,14 @@
             <label class="field">Target
               <select id="targetSelect">
                 <option value="auto">Auto</option>
-                <option value="mario">MarioState</option>
+                <option value="mario" selected>MarioState</option>
                 <option value="hot">Hot RAM</option>
                 <option value="heap">Heap range</option>
               </select>
             </label>
             <label class="field">Engine
               <select id="modeSelect">
-                <option value="nudges">Value nudges</option>
+                <option value="nudges" selected>Value nudges</option>
                 <option value="bitflip">Bit flips</option>
                 <option value="xor">XOR taps</option>
                 <option value="swap">Byte swaps</option>
@@ -99,10 +102,10 @@
             </label>
           </div>
           <div class="sliders">
-            <label>Strength <output id="strengthOut">3</output><input id="strength" type="range" min="1" max="32" value="3" /></label>
-            <label>Rate <output id="speedOut">2/s</output><input id="speed" type="range" min="1" max="20" value="2" /></label>
-            <label>Blast cap <output id="capOut">8</output><input id="writeCap" type="range" min="1" max="96" value="8" /></label>
-            <label>Range <output id="rangeOut">22–82%</output><span class="dual"><input id="rangeStart" type="range" min="0" max="99" value="22" /><input id="rangeEnd" type="range" min="1" max="100" value="82" /></span></label>
+            <label>Strength <output id="strengthOut">2</output><input id="strength" type="range" min="1" max="32" value="2" /></label>
+            <label>Rate <output id="speedOut">1/s</output><input id="speed" type="range" min="1" max="20" value="1" /></label>
+            <label>Blast cap <output id="capOut">3</output><input id="writeCap" type="range" min="1" max="96" value="3" /></label>
+            <label>Range <output id="rangeOut">24–78%</output><span class="dual"><input id="rangeStart" type="range" min="0" max="99" value="24" /><input id="rangeEnd" type="range" min="1" max="100" value="78" /></span></label>
           </div>
           <div class="checks">
             <label><input id="crashGuard" type="checkbox" checked /> Crash guard</label>
@@ -118,26 +121,30 @@
             <input id="pollenKey" type="password" placeholder="sk_… user key" autocomplete="off" />
             <button id="pollenSaveBtn" type="button" class="ghost">Save</button>
           </div>
+          <div class="aiTools">
+            <button id="modelsRefreshBtn" type="button" class="ghost">Refresh models</button>
+            <button id="keyCheckBtn" type="button" class="ghost">Check key</button>
+            <span id="accountStat">No account check yet</span>
+          </div>
           <div class="grid2">
             <label class="field">Model
               <select id="aiModel">
                 <option value="openai-fast">openai-fast</option>
                 <option value="openai">openai</option>
-                <option value="gpt-5.5">gpt-5.5</option>
                 <option value="qwen-vision">qwen-vision</option>
-                <option value="qwen-vision-pro">qwen-vision-pro</option>
               </select>
+              <small id="modelMeta">Model list loads live from Pollinations.</small>
             </label>
             <label class="field">App key
               <input id="appKey" type="text" placeholder="optional pk_ client_id" autocomplete="off" />
             </label>
           </div>
-          <textarea id="aiPrompt" rows="3" placeholder="Example: make Mario slippery and kind of stretched, but keep it playable"></textarea>
+          <textarea id="aiPrompt" rows="3" placeholder="Before boot or during gameplay: make Mario slippery, make physics weird, create gentle chaos, etc."></textarea>
           <div class="aiLine">
             <label><input id="aiVision" type="checkbox" /> Screenshot</label>
             <label><input id="aiUnsafe" type="checkbox" /> Unsafe caps</label>
             <button id="aiPlanBtn" type="button">Plan</button>
-            <button id="aiApplyBtn" type="button">Apply</button>
+            <button id="aiApplyBtn" type="button">Apply/Queue</button>
           </div>
           <pre id="aiPlanOut" class="plan">No AI plan yet.</pre>
         </section>

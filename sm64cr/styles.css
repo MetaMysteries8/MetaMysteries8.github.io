@@ -61,7 +61,7 @@ input[type="range"] { padding: 0; accent-color: var(--accent); }
 .actions button { min-height: 44px; font-weight: 700; }
 .microActions, .aiLine { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; }
 .microActions button, .aiLine button { min-height: 32px; padding: 0 8px; font-size: 12px; }
-.metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .metrics div { border: 1px solid var(--line); border-radius: 11px; padding: 8px; background: #141820; min-width: 0; }
 .metrics span { display: block; color: var(--muted); font-size: 11px; margin-bottom: 3px; }
 .metrics strong { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
@@ -75,6 +75,8 @@ input[type="range"] { padding: 0; accent-color: var(--accent); }
 .checks { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; }
 .checks label, .aiLine label { display: flex; align-items: center; border: 1px solid var(--line); border-radius: 9px; padding: 7px 8px; background: #141820; }
 .aiAuth { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px; }
+.aiTools { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 7px; align-items: center; }
+.aiTools span, #modelMeta { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .plan, .log { margin: 0; border: 1px solid var(--line); border-radius: 10px; background: #0e1116; color: #c8d1df; padding: 8px; white-space: pre-wrap; overflow: hidden; font-size: 11px; line-height: 1.28; min-height: 0; }
 .plan { height: clamp(80px, 18dvh, 138px); }
 .stateSave { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
@@ -95,7 +97,7 @@ input[type="range"] { padding: 0; accent-color: var(--accent); }
   .tabPanel { padding: 8px; gap: 7px; }
   .screen { border-radius: 10px; }
   .gameCanvas { width: min(100%, calc((100dvh - 382px) * 1.333)); }
-  .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .metrics { grid-template-columns: repeat(6, minmax(0, 1fr)); }
   .metrics div { padding: 6px; }
   .metrics span { font-size: 10px; }
   .metrics strong { font-size: 11px; }
@@ -110,11 +112,11 @@ input[type="range"] { padding: 0; accent-color: var(--accent); }
   .microActions, .aiLine { grid-template-columns: repeat(4, 1fr); gap: 5px; }
   .microActions button, .aiLine button { font-size: 11px; padding: 0 4px; }
   .grid2 { grid-template-columns: 1fr; }
-  .metrics { grid-template-columns: repeat(2, 1fr); }
+  .metrics { grid-template-columns: repeat(3, 1fr); }
   .checks { grid-template-columns: 1fr 1fr; gap: 5px; }
   .checks label, .aiLine label { padding: 5px; font-size: 11px; }
-  .aiAuth { grid-template-columns: 1fr 1fr; }
-  .aiAuth input { grid-column: 1 / -1; grid-row: 2; }
+  .aiAuth, .aiTools { grid-template-columns: 1fr 1fr; }
+  .aiAuth input, .aiTools span { grid-column: 1 / -1; grid-row: 2; }
   .gameCanvas { width: min(100%, calc((100dvh - 402px) * 1.333)); }
   .boot { padding: 12px; }
   .boot h2 { font-size: 18px; }

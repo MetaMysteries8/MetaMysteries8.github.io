@@ -7,7 +7,13 @@
   const POLLEN_KEY = "cartritilt64.pollen.userKey";
   const APP_KEY = "cartritilt64.pollen.appKey";
   const POLLEN_AUTH = "https://enter.pollinations.ai/authorize";
-  const POLLEN_API = "https://gen.pollinations.ai/v1/chat/completions";
+  const POLLEN_BASE = "https://gen.pollinations.ai";
+  const POLLEN_API = `${POLLEN_BASE}/v1/chat/completions`;
+  const POLLEN_TEXT_MODELS = `${POLLEN_BASE}/text/models`;
+  const POLLEN_ALL_MODELS = `${POLLEN_BASE}/models`;
+  const POLLEN_ACCOUNT_BALANCE = `${POLLEN_BASE}/account/balance`;
+  const POLLEN_ACCOUNT_USAGE_DAILY = `${POLLEN_BASE}/account/usage/daily`;
+  const POLLEN_ACCOUNT_KEY = `${POLLEN_BASE}/account/key`;
 
   const MS_OFF = {
     ACTION: 0x0C,
@@ -27,7 +33,7 @@
     canvas: $("canvas"), shell: $("screenShell"), overlay: $("bootOverlay"), env: $("envNote"),
     status: $("runtimeStatus"), light: $("runtimeLight"), log: $("log"),
     bootDefault: $("bootDefaultBtn"), wasmFile: $("wasmFile"), reload: $("reloadBtn"),
-    focus: $("focusBtn"), fullscreen: $("fullscreenBtn"),
+    focus: $("focusBtn"), uiInput: $("uiInputBtn"), fullscreen: $("fullscreenBtn"),
     arm: $("armBtn"), blast: $("blastBtn"), tilt: $("tiltBtn"), panic: $("panicBtn"),
     probe: $("probeBtn"), undo: $("undoBtn"), snapshot: $("snapshotBtn"), restore: $("restoreBtn"),
     preset: $("presetSelect"), target: $("targetSelect"), mode: $("modeSelect"), strength: $("strength"),
@@ -35,7 +41,9 @@
     crashGuard: $("crashGuard"), protectRuntime: $("protectRuntime"), hotOnly: $("hotOnly"), autoSnapshot: $("autoSnapshot"),
     strengthOut: $("strengthOut"), speedOut: $("speedOut"), capOut: $("capOut"), rangeOut: $("rangeOut"),
     heapStat: $("heapStat"), marioStat: $("marioStat"), hotStat: $("hotStat"), pokeCount: $("pokeCount"),
+    checkpointStat: $("checkpointStat"), inputStat: $("inputStat"),
     pollenAuth: $("pollenAuthBtn"), pollenKey: $("pollenKey"), pollenSave: $("pollenSaveBtn"),
+    modelsRefresh: $("modelsRefreshBtn"), keyCheck: $("keyCheckBtn"), accountStat: $("accountStat"), modelMeta: $("modelMeta"),
     appKey: $("appKey"), aiModel: $("aiModel"), aiPrompt: $("aiPrompt"), aiVision: $("aiVision"), aiUnsafe: $("aiUnsafe"),
     aiPlan: $("aiPlanBtn"), aiApply: $("aiApplyBtn"), aiOut: $("aiPlanOut"),
     stateName: $("stateName"), saveState: $("saveStateBtn"), stateList: $("stateList"),
@@ -49,6 +57,9 @@
     totalWrites: 0,
     lastLayer: [],
     quickSnapshot: null,
+    checkpoints: [],
+    checkpointTimer: 0,
+    lastCheckpointAt: 0,
     heapStates: [],
     bootTime: 0,
     marioBase: -1,
@@ -58,7 +69,12 @@
     prevPageHashes: new Map(),
     lastProbeAt: 0,
     lastPlan: null,
+    queuedPlan: null,
     selectedWasm: null,
+    models: [],
+    keyboardMode: "ui",
+    lastWriteAt: 0,
+    ramp: 0,
   };
 
   const rand = (n) => Math.floor(Math.random() * Math.max(1, n));
@@ -113,7 +129,7 @@
       start: ui.start.value, end: ui.end.value,
       crashGuard: ui.crashGuard.checked, protectRuntime: ui.protectRuntime.checked,
       hotOnly: ui.hotOnly.checked, autoSnapshot: ui.autoSnapshot.checked,
-      aiModel: ui.aiModel.value, appKey: ui.appKey.value.trim(),
+      aiModel: ui.aiModel.value, appKey: ui.appKey.value.trim(), keyboardMode: state.keyboardMode,
     };
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(data)); } catch {}
   }
@@ -128,6 +144,7 @@
         if (typeof data[key] === "boolean") el.checked = data[key];
       }
       ui.appKey.value = data.appKey || localStorage.getItem(APP_KEY) || "";
+      if (data.keyboardMode) state.keyboardMode = data.keyboardMode;
       const savedKey = localStorage.getItem(POLLEN_KEY);
       if (savedKey) ui.pollenKey.placeholder = "saved user key loaded";
     } catch {}
@@ -136,9 +153,9 @@
   function applyPreset(name) {
     if (name === "manual") return;
     const p = {
-      safe:   { strength: 3, speed: 2, cap: 8,  mode: "nudges", target: "auto", guard: true, hot: true, range: [22, 82] },
-      medium: { strength: 6, speed: 4, cap: 18, mode: "bitflip", target: "auto", guard: true, hot: true, range: [18, 88] },
-      wild:   { strength: 10, speed: 7, cap: 34, mode: "xor", target: "hot", guard: true, hot: true, range: [12, 94] },
+      safe:   { strength: 2, speed: 1, cap: 3,  mode: "nudges", target: "mario", guard: true, hot: true, range: [24, 78] },
+      medium: { strength: 4, speed: 2, cap: 6, mode: "float", target: "auto", guard: true, hot: true, range: [22, 82] },
+      wild:   { strength: 8, speed: 4, cap: 14, mode: "bitflip", target: "hot", guard: true, hot: true, range: [18, 88] },
     }[name];
     if (!p) return;
     ui.strength.value = p.strength; ui.speed.value = p.speed; ui.writeCap.value = p.cap;
@@ -148,7 +165,7 @@
 
   function enableRuntime(enabled) {
     [ui.arm, ui.blast, ui.tilt, ui.panic, ui.probe, ui.snapshot].forEach(b => b.disabled = !enabled);
-    ui.restore.disabled = !(enabled && state.quickSnapshot);
+    ui.restore.disabled = !(enabled && (state.quickSnapshot || state.checkpoints.length));
     ui.saveState.disabled = !enabled;
     ui.undo.disabled = !(enabled && state.lastLayer.length);
   }
@@ -180,8 +197,10 @@
         enableRuntime(true);
         updateStats();
         setInterval(lightProbe, 2200);
-        setTimeout(() => probeAll(false), 800);
-        log("SM64 initialized. Defaults are capped so it should glitch before it dies.", "good");
+        if (!state.checkpointTimer) state.checkpointTimer = setInterval(() => maybeAutoCheckpoint("auto"), 5000);
+        setTimeout(() => { probeAll(false); createCheckpoint("boot stable", "boot", true); }, 900);
+        if (state.queuedPlan) log("AI plan is queued. Press Apply/Queue after gameplay starts to apply it.", "warn");
+        log("SM64 initialized. Corruption now uses staged, domain-safe writes by default.", "good");
       }
     };
     if (opts.wasmBinary) window.Module.wasmBinary = opts.wasmBinary;
@@ -326,8 +345,10 @@
     ui.marioStat.textContent = m ? `0x${m.base.toString(16)} · ${m.lives} lives` : (state.marioBase >= 0 ? "stale" : "searching");
     ui.hotStat.textContent = String(state.hotPages.length);
     ui.pokeCount.textContent = String(state.totalWrites);
+    if (ui.checkpointStat) ui.checkpointStat.textContent = String((state.checkpoints?.length || 0) + (state.heapStates?.length || 0));
+    if (ui.inputStat) ui.inputStat.textContent = state.keyboardMode === "game" ? "Game" : "UI";
     ui.undo.disabled = !(state.ready && state.lastLayer.length);
-    ui.restore.disabled = !(state.ready && state.quickSnapshot);
+    ui.restore.disabled = !(state.ready && (state.checkpoints.length || state.quickSnapshot));
   }
 
   function recordBytes(addr, len, layer) {
@@ -406,50 +427,99 @@
     const u8 = heap(), f = HF32();
     if (!u8 || !f) return false;
     let addr = -1, value = 0;
-    for (let tries = 0; tries < 10; tries++) {
+    const tries = ui.crashGuard.checked ? 24 : 64;
+    for (let t = 0; t < tries; t++) {
       addr = pickHeapAddr(4);
+      if (addr < 0 || addr + 4 > u8.length) continue;
       value = f[addr >> 2];
-      if (Number.isFinite(value) && Math.abs(value) > 0.001 && Math.abs(value) < 20000) break;
+      // Only drift floats that look like live gameplay numbers, not pointers/NaNs/code-ish data.
+      if (Number.isFinite(value) && Math.abs(value) > 0.002 && Math.abs(value) < 12000) break;
+      addr = -1;
     }
-    if (addr < 0 || !Number.isFinite(value) || Math.abs(value) > 20000) return false;
-    const factor = 1 + (Math.random() - 0.5) * 0.08 * intensity;
-    return writeF32(addr, clamp(value * factor + (Math.random() - 0.5) * intensity, -30000, 30000), layer);
+    if (addr < 0) return false;
+    const tiny = ui.crashGuard.checked ? 0.012 : 0.035;
+    const factor = 1 + (Math.random() - 0.5) * tiny * clamp(intensity, 1, 8);
+    const add = (Math.random() - 0.5) * clamp(intensity, 1, 8) * (ui.crashGuard.checked ? 0.35 : 1.25);
+    return writeF32(addr, clamp(value * factor + add, -18000, 18000), layer);
+  }
+
+  function softByteNudge(layer, intensity = 1) {
+    const u8 = heap();
+    if (!u8) return false;
+    const addr = pickHeapAddr(1);
+    if (addr < 0) return false;
+    const old = u8[addr];
+    // Tiny drift beats destructive byte chaos in WASM. It makes effects visible without smashing pointers as often.
+    const delta = rand(ui.crashGuard.checked ? 3 : 9) - (ui.crashGuard.checked ? 1 : 4);
+    if (delta === 0) return false;
+    return writeByte(addr, clamp(old + delta * Math.max(1, Math.round(intensity / 8)), 0, 255), layer);
+  }
+
+  function lowBitTap(layer) {
+    const u8 = heap();
+    if (!u8) return false;
+    const addr = pickHeapAddr(1);
+    if (addr < 0) return false;
+    const old = u8[addr];
+    const mask = 1 << rand(ui.crashGuard.checked ? 2 : 4);
+    return writeByte(addr, old ^ mask, layer);
   }
 
   function corruptOnce(layer, mode = ui.mode.value, intensity = Number(ui.strength.value)) {
     const u8 = heap();
     if (!u8) return false;
     const target = ui.target.value;
-    if ((target === "mario" || target === "auto") && Math.random() < 0.68) {
-      if (marioNudge(layer, Math.max(1, intensity / 4))) return true;
+    const safe = ui.crashGuard.checked && !ui.aiUnsafe.checked;
+
+    // In WASM, MarioState/typed-value nudges are far safer than emulator-style random RAM vandalism.
+    if (target === "mario" || target === "auto") {
+      const chance = target === "mario" ? 1 : (safe ? 0.92 : 0.72);
+      if (Math.random() < chance && marioNudge(layer, Math.max(1, intensity / (safe ? 7 : 4)))) return true;
+      if (target === "mario") return false;
     }
-    if (mode === "float") return randomFloatDrift(layer, Math.max(1, intensity / 5));
-    let addr = pickHeapAddr(mode === "swap" ? 1 : 1);
+
+    if (mode === "float" || mode === "swap" || (target === "hot" && Math.random() < 0.65)) {
+      return randomFloatDrift(layer, Math.max(1, intensity / (safe ? 8 : 5)));
+    }
+
+    if (safe) {
+      // Destructive engines are translated into low-bit/tiny-byte versions while crash guard is on.
+      if (mode === "bitflip" || mode === "xor") return lowBitTap(layer);
+      if (mode === "zeroff") return softByteNudge(layer, intensity);
+      return softByteNudge(layer, intensity);
+    }
+
+    const addr = pickHeapAddr(1);
     if (addr < 0) return false;
     const old = u8[addr];
-    if (mode === "bitflip") return writeByte(addr, old ^ (1 << rand(ui.crashGuard.checked ? 4 : 8)), layer);
-    if (mode === "xor") return writeByte(addr, old ^ (1 + rand(ui.crashGuard.checked ? 15 : 255)), layer);
+    if (mode === "bitflip") return writeByte(addr, old ^ (1 << rand(6)), layer);
+    if (mode === "xor") return writeByte(addr, old ^ (1 + rand(63)), layer);
     if (mode === "swap") {
       const addr2 = clamp(addr + (Math.random() < 0.5 ? 1 : -1), 0, u8.length - 1);
       const a = u8[addr], b = u8[addr2];
       writeByte(addr, b, layer); writeByte(addr2, a, layer); return true;
     }
     if (mode === "zeroff") return writeByte(addr, Math.random() < 0.5 ? 0 : 255, layer);
-    return writeByte(addr, clamp(old + rand(7) - 3, 0, 255), layer);
+    return softByteNudge(layer, intensity);
   }
 
   function safeWriteBudget(multiplier = 1) {
     const strength = Number(ui.strength.value);
     const cap = Number(ui.writeCap.value);
-    const guardCap = ui.crashGuard.checked ? 28 : 256;
-    const warm = Date.now() - state.bootTime > 9000;
-    const earlyCap = warm || !ui.crashGuard.checked ? guardCap : 8;
-    return clamp(Math.round(Math.min(cap, strength * multiplier, earlyCap)), 1, ui.aiUnsafe.checked ? 512 : 256);
+    const safe = ui.crashGuard.checked && !ui.aiUnsafe.checked;
+    const warm = Date.now() - state.bootTime > 12000;
+    state.ramp = clamp(state.ramp + 0.2, 0, warm ? 1 : 0.45);
+    const base = safe ? Math.max(1, strength / 8) : Math.max(1, strength / 3);
+    const guardCap = safe ? (warm ? 8 : 3) : 96;
+    return clamp(Math.round(Math.min(cap, base * multiplier * Math.max(0.35, state.ramp), guardCap)), 1, ui.aiUnsafe.checked ? 256 : 32);
   }
 
-  function applyBlast(multiplier = 1, mode = ui.mode.value) {
+  function applyBlast(multiplier = 1, mode = ui.mode.value, opts = {}) {
     if (!state.ready) return;
-    if (ui.autoSnapshot.checked && !state.quickSnapshot) takeSnapshot(false);
+    const safe = ui.crashGuard.checked && !ui.aiUnsafe.checked;
+    const minGap = safe ? 220 : 70;
+    if (!opts.force && Date.now() - state.lastWriteAt < minGap) return;
+    if (opts.manual || multiplier >= 1) maybeAutoCheckpoint("pre-blast");
     lightProbe();
     const layer = [];
     const count = safeWriteBudget(multiplier);
@@ -457,9 +527,10 @@
     for (let i = 0; i < count; i++) if (corruptOnce(layer, mode, Number(ui.strength.value))) ok++;
     if (ok) {
       state.lastLayer = layer;
-      log(`Applied ${ok} write${ok === 1 ? "" : "s"}.`, ok > 24 ? "warn" : "good");
+      state.lastWriteAt = Date.now();
+      log(`Applied ${ok} staged write${ok === 1 ? "" : "s"}.`, ok > 10 ? "warn" : "good");
     } else {
-      log("No live target found; probe or enter gameplay first.", "warn");
+      log("No safe live target found yet. Probe or enter gameplay first.", "warn");
     }
     updateStats();
   }
@@ -467,15 +538,18 @@
   function startCorruptor() {
     if (!state.ready) return;
     if (state.armed) { stopCorruptor(); return; }
+    maybeAutoCheckpoint("pre-blast");
     state.armed = true;
+    state.ramp = 0;
     ui.arm.textContent = "Disarm";
     setStatus("Armed", "warn");
     const tick = () => {
       if (!state.armed) return;
-      applyBlast(0.45);
-      state.timer = window.setTimeout(tick, 1000 / clamp(Number(ui.speed.value), 1, 20));
+      applyBlast(0.38, ui.mode.value);
+      const rate = clamp(Number(ui.speed.value), 1, ui.crashGuard.checked ? 8 : 20);
+      state.timer = window.setTimeout(tick, 1000 / rate);
     };
-    tick();
+    state.timer = window.setTimeout(tick, 350);
   }
 
   function stopCorruptor() {
@@ -489,13 +563,14 @@
   function tiltPulse() {
     if (!state.ready) return;
     stopCorruptor();
-    let pulses = ui.crashGuard.checked ? 5 : 12;
+    maybeAutoCheckpoint("pre-blast");
+    let pulses = ui.crashGuard.checked ? 3 : 8;
     const mode = ui.mode.value === "nudges" ? "float" : ui.mode.value;
     const run = () => {
       if (pulses-- <= 0) { setStatus("Ready", "ready"); return; }
-      applyBlast(0.8, mode);
+      applyBlast(ui.crashGuard.checked ? 0.55 : 0.9, mode, { force: true });
       setStatus("Tilt pulse", "warn");
-      setTimeout(run, ui.crashGuard.checked ? 140 : 70);
+      setTimeout(run, ui.crashGuard.checked ? 260 : 110);
     };
     run();
   }
@@ -514,33 +589,65 @@
 
   function panic() {
     stopCorruptor();
-    undoLast();
-    setStatus("Panic stopped", "warn");
-    log("Panic: stopped loop and undid last layer. Reload if the game itself is already wedged.", "warn");
+    if (state.checkpoints.length) restoreCheckpoint(0);
+    else undoLast();
+    setStatus("Panic restored", "warn");
+    log("Panic: stopped loop and restored the newest full-heap checkpoint. If the WASM thread is already hard-locked, reload is still the browser-level escape.", "warn");
   }
 
-  function takeSnapshot(verbose = true) {
+  function makeHeapCopy() {
+    const u8 = heap();
+    if (!u8) return null;
+    return new Uint8Array(u8);
+  }
+
+  function createCheckpoint(name = "checkpoint", kind = "manual", quiet = false) {
     const u8 = heap();
     if (!u8) return false;
     try {
-      state.quickSnapshot = new Uint8Array(u8);
-      ui.restore.disabled = false;
-      if (verbose) log(`Quick snapshot saved (${fmtBytes(u8.length)}).`, "good");
+      const cp = { name, kind, time: new Date(), bytes: new Uint8Array(u8) };
+      state.checkpoints.unshift(cp);
+      const max = ui.aiUnsafe.checked ? 8 : 5;
+      state.checkpoints = state.checkpoints.slice(0, max);
+      state.quickSnapshot = cp.bytes;
+      state.lastCheckpointAt = Date.now();
+      if (!quiet) log(`Checkpoint saved: ${name} (${fmtBytes(u8.length)}).`, "good");
+      renderStates();
+      updateStats();
       return true;
     } catch (e) {
-      log(`Snapshot failed: ${e.message}`, "bad");
+      log(`Checkpoint failed: ${e.message}`, "bad");
       return false;
     }
   }
 
+  function maybeAutoCheckpoint(reason = "auto") {
+    if (!state.ready || !ui.autoSnapshot.checked) return false;
+    const minGap = reason === "pre-blast" ? 1200 : 4500;
+    if (Date.now() - state.lastCheckpointAt < minGap) return false;
+    return createCheckpoint(reason === "pre-blast" ? "before blast" : "stable auto", reason, true);
+  }
+
+  function takeSnapshot(verbose = true) {
+    return createCheckpoint(verbose ? "manual snapshot" : "auto snapshot", verbose ? "manual" : "auto", !verbose);
+  }
+
   function restoreSnapshot() {
+    restoreCheckpoint(0);
+  }
+
+  function restoreCheckpoint(index = 0) {
     const u8 = heap();
-    if (!u8 || !state.quickSnapshot) return;
-    if (state.quickSnapshot.length !== u8.length) { log("Snapshot size mismatch after heap change.", "bad"); return; }
+    const cp = state.checkpoints[index] || (state.quickSnapshot ? { name: "quick snapshot", bytes: state.quickSnapshot } : null);
+    if (!u8 || !cp) return false;
+    if (cp.bytes.length !== u8.length) { log("Checkpoint size mismatch after heap change.", "bad"); return false; }
     stopCorruptor();
-    u8.set(state.quickSnapshot);
-    log("Quick snapshot restored.", "good");
+    state.lastLayer = [];
+    u8.set(cp.bytes);
+    state.ramp = 0;
+    log(`Restored checkpoint: ${cp.name}.`, "good");
     updateStats();
+    return true;
   }
 
   function saveNamedState() {
@@ -549,10 +656,10 @@
     const name = (ui.stateName.value || `State ${state.heapStates.length + 1}`).trim().slice(0, 28);
     try {
       state.heapStates.unshift({ name, time: new Date(), bytes: new Uint8Array(u8) });
-      state.heapStates = state.heapStates.slice(0, 3);
+      state.heapStates = state.heapStates.slice(0, ui.aiUnsafe.checked ? 8 : 4);
       ui.stateName.value = "";
       renderStates();
-      log(`Saved state: ${name}.`, "good");
+      log(`Saved named state: ${name}.`, "good");
     } catch (e) {
       log(`Save state failed: ${e.message}`, "bad");
     }
@@ -565,26 +672,63 @@
     stopCorruptor();
     if (s.bytes.length !== u8.length) { log("State size mismatch.", "bad"); return; }
     u8.set(s.bytes);
-    log(`Restored state: ${s.name}.`, "good");
+    state.lastLayer = [];
+    log(`Restored named state: ${s.name}.`, "good");
+    updateStats();
+  }
+
+  function deleteCheckpoint(index) {
+    state.checkpoints.splice(index, 1);
+    state.quickSnapshot = state.checkpoints[0]?.bytes || null;
+    renderStates();
+    updateStats();
   }
 
   function renderStates() {
-    if (!state.heapStates.length) { ui.stateList.innerHTML = `<span class="empty">No states yet.</span>`; return; }
+    if (!ui.stateList) return;
     ui.stateList.innerHTML = "";
-    state.heapStates.forEach((s, i) => {
-      const row = document.createElement("div");
-      row.className = "stateRow";
-      row.innerHTML = `<div><strong></strong><small>${s.time.toLocaleTimeString()} · ${fmtBytes(s.bytes.length)}</small></div><button type="button">Load</button><button type="button">X</button>`;
-      row.querySelector("strong").textContent = s.name;
-      row.children[1].onclick = () => restoreNamedState(i);
-      row.children[2].onclick = () => { state.heapStates.splice(i, 1); renderStates(); };
-      ui.stateList.appendChild(row);
-    });
+    const frag = document.createDocumentFragment();
+    const addHeader = (text) => {
+      const h = document.createElement("span");
+      h.className = "empty";
+      h.textContent = text;
+      frag.appendChild(h);
+    };
+    if (!state.checkpoints.length && !state.heapStates.length) {
+      ui.stateList.innerHTML = `<span class="empty">No restore points yet.</span>`;
+      return;
+    }
+    if (state.checkpoints.length) {
+      addHeader("Restore points");
+      state.checkpoints.forEach((s, i) => {
+        const row = document.createElement("div");
+        row.className = "stateRow";
+        row.innerHTML = `<div><strong></strong><small>${s.time.toLocaleTimeString()} · ${s.kind || "heap"} · ${fmtBytes(s.bytes.length)}</small></div><button type="button">Load</button><button type="button">X</button>`;
+        row.querySelector("strong").textContent = s.name;
+        row.children[1].onclick = () => restoreCheckpoint(i);
+        row.children[2].onclick = () => deleteCheckpoint(i);
+        frag.appendChild(row);
+      });
+    }
+    if (state.heapStates.length) {
+      addHeader("Named saves");
+      state.heapStates.forEach((s, i) => {
+        const row = document.createElement("div");
+        row.className = "stateRow";
+        row.innerHTML = `<div><strong></strong><small>${s.time.toLocaleTimeString()} · ${fmtBytes(s.bytes.length)}</small></div><button type="button">Load</button><button type="button">X</button>`;
+        row.querySelector("strong").textContent = s.name;
+        row.children[1].onclick = () => restoreNamedState(i);
+        row.children[2].onclick = () => { state.heapStates.splice(i, 1); renderStates(); };
+        frag.appendChild(row);
+      });
+    }
+    ui.stateList.appendChild(frag);
   }
 
   function readTelemetry() {
     const m = readMario();
     return {
+      booted: state.booted, ready: state.ready,
       heapBytes: heap()?.byteLength || 0,
       marioState: m ? {
         baseHex: `0x${m.base.toString(16)}`,
@@ -595,6 +739,9 @@
         actionHex: `0x${(m.action >>> 0).toString(16)}`,
       } : null,
       hotPages: state.hotPages.slice(0, 16).map(p => `0x${p.toString(16)}`),
+      checkpoints: state.checkpoints.length,
+      namedStates: state.heapStates.length,
+      selectedModel: ui.aiModel.value,
       settings: { target: ui.target.value, mode: ui.mode.value, crashGuard: ui.crashGuard.checked, cap: Number(ui.writeCap.value) },
     };
   }
@@ -623,10 +770,123 @@
     return ui.pollenKey.value.trim() || localStorage.getItem(POLLEN_KEY) || "";
   }
 
+
+  function modelId(m) {
+    return String(m?.id || m?.name || m?.model || m?.slug || "").trim();
+  }
+
+  function hasVision(m) {
+    const id = modelId(m).toLowerCase();
+    const caps = JSON.stringify(m?.capabilities || m?.modalities || m || {}).toLowerCase();
+    return /vision|image/.test(id) || caps.includes("image") || caps.includes("vision");
+  }
+
+  function modelCostLabel(m) {
+    const txt = JSON.stringify(m || {}).toLowerCase();
+    if (txt.includes("paid") || txt.includes("price") || txt.includes("cost")) return "priced";
+    return "cost unknown";
+  }
+
+  function describeModel(m) {
+    const bits = [];
+    if (hasVision(m)) bits.push("vision"); else bits.push("text");
+    const caps = m?.capabilities || {};
+    for (const k of ["tool_calling", "reasoning", "web_search", "code_execution"]) if (caps[k]) bits.push(k.replace("_", " "));
+    bits.push(modelCostLabel(m));
+    return bits.join(" · ");
+  }
+
+  function normalizeModelList(json) {
+    const raw = Array.isArray(json) ? json : (Array.isArray(json?.data) ? json.data : (Array.isArray(json?.models) ? json.models : []));
+    const seen = new Set();
+    const out = [];
+    for (const m of raw) {
+      const id = modelId(m);
+      if (!id || seen.has(id)) continue;
+      seen.add(id); out.push(m);
+    }
+    return out;
+  }
+
+  async function loadTextModels(preferCurrent = true) {
+    const current = ui.aiModel.value;
+    if (ui.modelMeta) ui.modelMeta.textContent = "Loading live model list…";
+    try {
+      let res = await fetch(POLLEN_TEXT_MODELS, { cache: "no-store" });
+      if (!res.ok) res = await fetch(POLLEN_ALL_MODELS, { cache: "no-store" });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const models = normalizeModelList(await res.json()).filter(m => modelId(m));
+      state.models = models;
+      const texty = models.filter(m => {
+        const s = JSON.stringify(m).toLowerCase();
+        return !s.includes('audio-only') && !s.includes('image-only') && !s.includes('embedding');
+      });
+      ui.aiModel.innerHTML = "";
+      for (const m of (texty.length ? texty : models)) {
+        const opt = document.createElement("option");
+        opt.value = modelId(m);
+        opt.textContent = `${modelId(m)}${hasVision(m) ? " 👁" : ""}`;
+        opt.title = describeModel(m);
+        ui.aiModel.appendChild(opt);
+      }
+      if (preferCurrent && current && [...ui.aiModel.options].some(o => o.value === current)) ui.aiModel.value = current;
+      else if ([...ui.aiModel.options].some(o => o.value === "openai-fast")) ui.aiModel.value = "openai-fast";
+      updateModelMeta();
+      log(`Loaded ${ui.aiModel.options.length} Pollinations text model(s).`, "good");
+    } catch (e) {
+      if (ui.modelMeta) ui.modelMeta.textContent = `Model list failed: ${e.message}`;
+      log(`Could not load Pollinations models: ${e.message}`, "warn");
+    }
+  }
+
+  function currentModelInfo() {
+    const id = ui.aiModel.value;
+    return state.models.find(m => modelId(m) === id) || { id };
+  }
+
+  function updateModelMeta() {
+    const m = currentModelInfo();
+    if (ui.modelMeta) ui.modelMeta.textContent = describeModel(m);
+    if (ui.aiVision && ui.aiVision.checked && !hasVision(m)) {
+      log("Selected model does not look vision-capable; screenshot will be skipped unless the endpoint accepts it anyway.", "warn");
+    }
+  }
+
+  async function checkPollenAccount() {
+    const key = getPollenKey();
+    if (!key) { ui.accountStat.textContent = "No key"; log("Paste/connect a Pollen user key first.", "warn"); return; }
+    ui.accountStat.textContent = "Checking…";
+    const auth = { "Authorization": `Bearer ${key}` };
+    const parts = [];
+    try {
+      const keyRes = await fetch(POLLEN_ACCOUNT_KEY, { headers: auth, cache: "no-store" });
+      if (keyRes.ok) {
+        const j = await keyRes.json();
+        parts.push(j.type || j.prefix || "key ok");
+      } else parts.push(`key ${keyRes.status}`);
+    } catch { parts.push("key ?"); }
+    try {
+      const balRes = await fetch(POLLEN_ACCOUNT_BALANCE, { headers: auth, cache: "no-store" });
+      if (balRes.ok) {
+        const b = await balRes.json();
+        const val = b.balance ?? b.pollen ?? b.remaining ?? b.budget ?? JSON.stringify(b).slice(0, 40);
+        parts.push(`balance ${val}`);
+      } else parts.push(`balance ${balRes.status}`);
+    } catch { parts.push("balance ?"); }
+    try {
+      const useRes = await fetch(POLLEN_ACCOUNT_USAGE_DAILY, { headers: auth, cache: "no-store" });
+      if (useRes.ok) parts.push("usage ok");
+      else if (useRes.status === 403) parts.push("usage scope missing");
+      else parts.push(`usage ${useRes.status}`);
+    } catch { parts.push("usage ?"); }
+    ui.accountStat.textContent = parts.join(" · ");
+    log(`Pollen account: ${parts.join(" · ")}`, "good");
+  }
+
   async function requestAiPlan(apply = false) {
     const key = getPollenKey();
     if (!key) { log("Connect Pollen or paste a user key first.", "warn"); ui.aiOut.textContent = "Missing Pollen key."; return; }
-    await probeAll(false);
+    if (state.ready) await probeAll(false);
     const telemetry = readTelemetry();
     const prompt = ui.aiPrompt.value.trim() || "make the game look funny but keep it playable";
     const schema = `Return only JSON with this schema:
@@ -635,11 +895,13 @@
  {"type":"hotpoke","mode":"nudges|bitflip|xor|float","count":1-64,"intensity":1-10},
  {"type":"saveState","name":"optional name"}
 ]}
-Rules: no JavaScript, no code execution, no unbounded loops. Prefer mario actions when MarioState exists. For visual weirdness like big head/stretchy arms, use hotpoke float/nudges with modest count; exact body-part scaling is not guaranteed without symbols.`;
+Rules: no JavaScript, no code execution, no unbounded loops. Prefer mario actions when MarioState exists. If game is not booted yet, still produce a plan that can be queued for later. For visual weirdness like big head/stretchy arms, use hotpoke float/nudges with modest count; exact body-part scaling is not guaranteed without symbols.`;
 
     const textContent = `You are an RTC-style corruption planner for a Super Mario 64 WASM/decomp build. User request: ${prompt}\n\nTelemetry:\n${JSON.stringify(telemetry)}\n\n${schema}`;
     let content = textContent;
-    const img = ui.aiVision.checked ? screenshotDataUrl() : null;
+    const modelInfo = currentModelInfo();
+    const img = (state.ready && ui.aiVision.checked && hasVision(modelInfo)) ? screenshotDataUrl() : null;
+    if (ui.aiVision.checked && !img) log("Screenshot skipped: game not ready, canvas blocked, or selected model is not vision-capable.", "warn");
     if (img) content = [{ type: "text", text: textContent }, { type: "image_url", image_url: { url: img } }];
 
     ui.aiOut.textContent = "Asking Pollinations…";
@@ -647,7 +909,11 @@ Rules: no JavaScript, no code execution, no unbounded loops. Prefer mario action
       const res = await fetch(POLLEN_API, {
         method: "POST",
         headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json", "Pollinations-Safe": "privacy,secrets" },
-        body: JSON.stringify({ model: ui.aiModel.value, messages: [{ role: "system", content: "You generate safe bounded JSON memory-corruption plans for a web game toy." }, { role: "user", content }] })
+        body: JSON.stringify({
+          model: ui.aiModel.value,
+          messages: [{ role: "system", content: "You generate safe bounded JSON memory-corruption plans for a web game toy. Return JSON only." }, { role: "user", content }],
+          temperature: 0.4
+        })
       });
       if (!res.ok) {
         let msg = `${res.status} ${res.statusText}`;
@@ -699,9 +965,15 @@ Rules: no JavaScript, no code execution, no unbounded loops. Prefer mario action
     return ok > 0;
   }
 
-  function applyAiPlan(plan = state.lastPlan) {
-    if (!state.ready || !plan) return;
-    if (ui.autoSnapshot.checked && !state.quickSnapshot) takeSnapshot(false);
+  function applyAiPlan(plan = state.lastPlan || state.queuedPlan) {
+    if (!plan) return;
+    if (!state.ready) {
+      state.queuedPlan = plan;
+      ui.aiOut.textContent = `${JSON.stringify(plan, null, 2)}\n\nQueued. Boot the game, enter gameplay, then press Apply/Queue again.`;
+      log("AI plan queued before boot.", "good");
+      return;
+    }
+    maybeAutoCheckpoint("pre-blast");
     const layer = [];
     const maxActions = ui.aiUnsafe.checked ? 24 : 8;
     const actions = Array.isArray(plan.actions) ? plan.actions.slice(0, maxActions) : [];
@@ -713,8 +985,8 @@ Rules: no JavaScript, no code execution, no unbounded loops. Prefer mario action
         const oldTarget = ui.target.value, oldMode = ui.mode.value;
         ui.target.value = "hot";
         ui.mode.value = ["nudges", "bitflip", "xor", "float"].includes(a.mode) ? a.mode : "nudges";
-        const count = clamp(Number(a.count || 4), 1, ui.aiUnsafe.checked ? 256 : 48);
-        for (let i = 0; i < count; i++) corruptOnce(layer, ui.mode.value, clamp(Number(a.intensity || 3), 1, 10));
+        const count = clamp(Number(a.count || 4), 1, ui.aiUnsafe.checked ? 96 : 18);
+        for (let i = 0; i < count; i++) corruptOnce(layer, ui.mode.value, clamp(Number(a.intensity || 3), 1, ui.aiUnsafe.checked ? 10 : 6));
         ui.target.value = oldTarget; ui.mode.value = oldMode;
       }
       if (a.type === "saveState") {
@@ -723,6 +995,7 @@ Rules: no JavaScript, no code execution, no unbounded loops. Prefer mario action
       }
     }
     if (layer.length) state.lastLayer = layer;
+    state.queuedPlan = null;
     log(`AI applied ${state.totalWrites - writesBefore} write(s).`, "good");
     updateStats();
   }
@@ -745,13 +1018,44 @@ Rules: no JavaScript, no code execution, no unbounded loops. Prefer mario action
     if (appKey) localStorage.setItem(APP_KEY, appKey);
     const params = new URLSearchParams({
       redirect_uri: location.origin + location.pathname,
-      models: "openai,openai-fast,gpt-5.5,qwen-vision,qwen-vision-pro",
+      models: ui.aiModel.value || "openai-fast",
+      scope: "usage",
       budget: "5",
       expiry: "7",
       state: Math.random().toString(36).slice(2),
     });
     if (appKey) params.set("client_id", appKey);
     location.href = `${POLLEN_AUTH}?${params}`;
+  }
+
+
+  function setKeyboardMode(mode) {
+    state.keyboardMode = mode === "game" ? "game" : "ui";
+    if (state.keyboardMode === "game") {
+      ui.canvas.focus({ preventScroll: true });
+      ui.focus.textContent = "Game Input";
+      if (ui.uiInput) ui.uiInput.textContent = "UI Input";
+    } else {
+      try { ui.canvas.blur(); } catch {}
+      ui.focus.textContent = "Game Input";
+      if (ui.uiInput) ui.uiInput.textContent = "UI Locked";
+    }
+    updateStats();
+  }
+
+  function isTextEntry(el) {
+    if (!el) return false;
+    const tag = el.tagName;
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
+  }
+
+  function captureUiKeyboard(e) {
+    if (e.key === "Escape") { panic(); return; }
+    if (isTextEntry(e.target) || state.keyboardMode !== "game") {
+      // SM64's canvas/key handlers can be greedy. Stop UI typing from leaking into the game.
+      e.stopImmediatePropagation();
+      if (e.key.toLowerCase() === "b" && !isTextEntry(e.target) && !e.repeat && state.ready) applyBlast(1, ui.mode.value, { manual: true });
+    }
   }
 
   function wire() {
@@ -761,15 +1065,19 @@ Rules: no JavaScript, no code execution, no unbounded loops. Prefer mario action
       btn.classList.add("active");
       $(`tab-${btn.dataset.tab}`).classList.add("active");
     }));
-    [ui.strength, ui.speed, ui.writeCap, ui.start, ui.end, ui.mode, ui.target, ui.crashGuard, ui.protectRuntime, ui.hotOnly, ui.autoSnapshot, ui.aiModel, ui.appKey].forEach(el => el.addEventListener("input", syncOutputs));
+    [ui.strength, ui.speed, ui.writeCap, ui.start, ui.end, ui.mode, ui.target, ui.crashGuard, ui.protectRuntime, ui.hotOnly, ui.autoSnapshot, ui.aiModel, ui.appKey].forEach(el => el && el.addEventListener("input", syncOutputs));
+    ui.aiModel.addEventListener("change", () => { updateModelMeta(); saveSettings(); });
     ui.preset.addEventListener("change", () => applyPreset(ui.preset.value));
     ui.bootDefault.addEventListener("click", bootDefault);
     ui.wasmFile.addEventListener("change", (e) => bootPicked(e.target.files?.[0]));
     ui.reload.addEventListener("click", () => location.reload());
-    ui.focus.addEventListener("click", () => ui.canvas.focus({ preventScroll: true }));
+    ui.focus.addEventListener("click", () => setKeyboardMode("game"));
+    if (ui.uiInput) ui.uiInput.addEventListener("click", () => setKeyboardMode("ui"));
+    ui.canvas.addEventListener("pointerdown", () => setKeyboardMode("game"));
+    document.querySelector(".panel")?.addEventListener("pointerdown", () => setKeyboardMode("ui"), { capture: true });
     ui.fullscreen.addEventListener("click", () => ui.shell.requestFullscreen?.());
     ui.arm.addEventListener("click", startCorruptor);
-    ui.blast.addEventListener("click", () => applyBlast(1.5));
+    ui.blast.addEventListener("click", () => applyBlast(1.15, ui.mode.value, { manual: true, force: true }));
     ui.tilt.addEventListener("click", tiltPulse);
     ui.panic.addEventListener("click", panic);
     ui.probe.addEventListener("click", () => probeAll(true));
@@ -786,12 +1094,11 @@ Rules: no JavaScript, no code execution, no unbounded loops. Prefer mario action
       log("Saved Pollen user key locally in this browser.", "good");
     });
     ui.pollenAuth.addEventListener("click", connectPollen);
+    if (ui.modelsRefresh) ui.modelsRefresh.addEventListener("click", () => loadTextModels(false));
+    if (ui.keyCheck) ui.keyCheck.addEventListener("click", checkPollenAccount);
     ui.aiPlan.addEventListener("click", () => requestAiPlan(false));
-    ui.aiApply.addEventListener("click", () => state.lastPlan ? applyAiPlan(state.lastPlan) : requestAiPlan(true));
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") panic();
-      if (e.key.toLowerCase() === "b" && !e.repeat && state.ready) applyBlast(1);
-    });
+    ui.aiApply.addEventListener("click", () => (state.lastPlan || state.queuedPlan) ? applyAiPlan(state.lastPlan || state.queuedPlan) : requestAiPlan(true));
+    document.addEventListener("keydown", captureUiKeyboard, true);
   }
 
   function init() {
@@ -801,6 +1108,8 @@ Rules: no JavaScript, no code execution, no unbounded loops. Prefer mario action
     syncOutputs();
     wire();
     renderStates();
+    setKeyboardMode("ui");
+    loadTextModels(true);
     setStatus("Ready", "idle");
     window.CartriTilt64 = { probe: probeAll, readTelemetry, applyAiPlan, stop: stopCorruptor, panic, state };
   }
