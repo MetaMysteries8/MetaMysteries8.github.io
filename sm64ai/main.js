@@ -1670,38 +1670,64 @@ window.sm64Trust = (t) => { if (t != null) _setChildTrust(t > 1 ? t / 100 : t); 
 let _elderLearn = (() => { try { const v = localStorage.getItem('sm64_elder_learn'); return v == null ? true : v === '1'; } catch { return true; } })();
 function setElderLearn(on) { _elderLearn = !!on; try { localStorage.setItem('sm64_elder_learn', _elderLearn ? '1' : '0'); } catch {} }
 let _elderLoop = null, _elderPrevFrame = null, _lastTaughtCat = null;
+// Grading window: we accumulate the moves you make over a few seconds, then the
+// parent LLM grades the WINDOW (anchor frame → now). This is robust to tappy play —
+// it no longer needs you to be holding a key at the exact throttle tick.
+let _gradeAnchor = null, _gradeCats = [], _gradeInputs = '';
+let _gradeBusy = false;
+function _modeOf(arr) {
+    const c = {}; let best = arr[0], bestN = 0;
+    for (const a of arr) { c[a] = (c[a] || 0) + 1; if (c[a] > bestN) { bestN = c[a]; best = a; } }
+    return best;
+}
 function startElderWatch() {
     if (_elderLoop) return;
+    _gradeAnchor = null; _gradeCats = []; _gradeInputs = ''; _lastGradeTime = 0;
     _elderLoop = setInterval(async () => {
         // Only learns from your play in Player-Teach mode (and never during a show-off).
-        if (!_adaptiveBrain || !_elderLearn || !aiPlayerActive || _agentOnly || _playMode !== 'player-teach' || _showoffRunning) { _elderPrevFrame = null; return; }
-        if (!playerMovementDetected) { _elderPrevFrame = null; return; }   // only while the human drives
-        const cat = _categorizeCodes([...playerInputs]);
-        if (!cat) return;
+        if (!_adaptiveBrain || !_elderLearn || !aiPlayerActive || _playMode !== 'player-teach' || _showoffRunning) {
+            _elderPrevFrame = null; return;
+        }
         const ss = await captureScreen(aiStream).catch(() => null);
         if (!ss) return;
-        if (_elderPrevFrame) {
-            const vm = await _frameDiffScore(_elderPrevFrame, ss);
-            if (vm != null) {
-                // Fast heuristic teaching signal every tick (movement = positive demo).
-                _qUpdate(_brainState(), cat, Math.max(0.12, Math.min(0.8, vm * 1.2)));
-                _trainStats.taught = (_trainStats.taught || 0) + 1; _saveTrainStats();
-                _setChildTrust(_childTrust + 0.004);
-                _lastTaughtCat = cat;
-                // Richer, controls-aware grade from the PARENT LLM (throttled, costs a
-                // call): it judges whether YOUR move was good/bad and teaches the child
-                // your right & wrong — so you never hand-rate your own play.
-                if (Date.now() - _lastGradeTime > 3500) {
-                    _lastGradeTime = Date.now();
-                    _gradeHumanMove(_elderPrevFrame, ss, cat, _brainState(), _inputsToText([...playerInputs]));
+        const cat = playerMovementDetected ? _categorizeCodes([...playerInputs]) : null;
+
+        if (cat) {
+            // Fast heuristic teaching signal each tick you move (movement = positive demo).
+            if (_elderPrevFrame) {
+                const vm = await _frameDiffScore(_elderPrevFrame, ss);
+                if (vm != null) {
+                    _qUpdate(_brainState(), cat, Math.max(0.12, Math.min(0.8, vm * 1.2)));
+                    _trainStats.taught = (_trainStats.taught || 0) + 1; _saveTrainStats();
+                    _setChildTrust(_childTrust + 0.004);
+                    _lastTaughtCat = cat;
                 }
-                updateDebugHUD();
             }
+            // Accumulate this move into the current grading window.
+            _gradeCats.push(cat);
+            _gradeInputs = _inputsToText([...playerInputs]);
+            if (!_gradeAnchor) _gradeAnchor = _elderPrevFrame || ss;
         }
         _elderPrevFrame = ss;
+
+        // On cadence, if you've made ANY moves this window, the parent LLM grades the
+        // dominant move (anchor → now). Costs one call; never silent on failure.
+        if (!_gradeBusy && _gradeAnchor && _gradeAnchor !== ss && _gradeCats.length && Date.now() - _lastGradeTime > 3500) {
+            _lastGradeTime = Date.now();
+            const domCat = _modeOf(_gradeCats);
+            const anchor = _gradeAnchor, after = ss, inputs = _gradeInputs || domCat;
+            _gradeAnchor = ss; _gradeCats = []; _gradeInputs = '';
+            _gradeBusy = true;
+            updateAIStatus('👨‍🏫 parent is grading your play…');
+            _gradeHumanMove(anchor, after, domCat, _brainState(), inputs).finally(() => { _gradeBusy = false; });
+        }
+        updateDebugHUD();
     }, 700);
 }
-function stopElderWatch() { if (_elderLoop) { clearInterval(_elderLoop); _elderLoop = null; } _elderPrevFrame = null; }
+function stopElderWatch() {
+    if (_elderLoop) { clearInterval(_elderLoop); _elderLoop = null; }
+    _elderPrevFrame = null; _gradeAnchor = null; _gradeCats = []; _gradeBusy = false;
+}
 // Power-user: hand-grade the human's most recent demonstrated move from the console.
 window.sm64Teach = (reward = 0.6) => { if (_lastTaughtCat) _qUpdate(_brainState(), _lastTaughtCat, Math.max(-1, Math.min(1.5, reward))); return _lastTaughtCat; };
 let _lastGradeTime = 0;
@@ -1893,10 +1919,17 @@ async function _gradeHumanMove(before, after, cat, stateKey, inputStr) {
             _qUpdate(stateKey, cat, g);
             _trainStats.graded = (_trainStats.graded || 0) + 1; _saveTrainStats();
             if (typeof pushChatlog === 'function')
-                pushChatlog(`<span class="cl-cmd">👨‍🏫 parent graded your "${_esc(cat)}": ${g.toFixed(2)} (${g >= 0.2 ? 'good' : g <= -0.2 ? 'bad' : 'meh'})</span>`, 'cl-tool');
+                pushChatlog(`<span class="cl-cmd">👨‍🏫 parent graded your "${_esc(cat)}" [${_esc(inputStr)}]: ${g.toFixed(2)} (${g >= 0.2 ? 'good 👍' : g <= -0.2 ? 'bad 👎' : 'meh'})</span>`, 'cl-tool');
+            updateAIStatus(`👨‍🏫 graded your "${cat}": ${g.toFixed(2)} ${g >= 0.2 ? 'good' : g <= -0.2 ? 'bad' : 'meh'}`);
             updateDebugHUD();
+        } else if (typeof pushChatlog === 'function') {
+            pushChatlog(`<span class="cl-cmd">⚠ parent couldn't grade that move (no clear verdict) — will retry next window</span>`, 'cl-tool');
         }
-    } catch {}
+    } catch (err) {
+        updateAIStatus(`⚠ grading failed: ${err.message}`);
+        if (typeof pushChatlog === 'function')
+            pushChatlog(`<span class="cl-cmd">⚠ grading call failed: ${_esc(err.message || 'error')}</span>`, 'cl-tool');
+    }
 }
 
 let _turnFlip = false;   // alternate override turn direction so it can't spin one way forever
@@ -3200,6 +3233,11 @@ function _startSelectedMode() {
         return;
     }
     if (_playMode === 'player-teach') {
+        // These two are REQUIRED for teaching to work, so force them on:
+        // Agent-Only would block your keyboard; the learner must be enabled to grade.
+        if (_agentOnly) setAgentOnly(false);
+        if (!_adaptiveBrain) setAdaptiveBrain(true);
+        if (!_elderLearn) setElderLearn(true);
         updateAIStatus('🧓 Player-Teach — YOU play; the parent grades your moves, the child learns. Click the game!');
         tts.speak('Player teach mode. You play. I will grade your moves and the child will learn.');
         _showElderBanner(true);
