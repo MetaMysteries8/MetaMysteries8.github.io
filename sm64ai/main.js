@@ -392,7 +392,7 @@ const AI_TOOLS = [
     _tool('de_water', 'EMERGENCY water-escape (rapid-fire toward shore). LOCKED until is_stuck or is_trapped confirms true.'),
     _tool('is_stuck', 'Fresh check of the last few frames: is Mario stuck (position/camera not changing)? Returns true/false. A true result UNLOCKS the escape tools (de_water/load_state/reset_game) and starts rapid-fire recovery.'),
     _tool('is_trapped', 'Analyze the last few frames: is Mario trapped with no way out? Returns true/false. A true result UNLOCKS the escape tools and starts rapid-fire recovery.'),
-    _tool('look_around', 'Rotate the camera to survey the surroundings (helps you see exits/paths you may be facing away from).'),
+    _tool('look_around', 'Turn Mario in place to survey the surroundings (the camera follows him, revealing exits/paths you were facing away from).'),
     _tool('set_goal', 'Set a persistent short-term goal you will keep pursuing across turns.',
         { goal: { type: 'string', description: 'e.g. "enter the castle door"' } }, ['goal']),
     _tool('study_guide', 'Re-read the SM64 strategy guides and refresh your study notes (use if you are unsure how to progress).'),
@@ -482,8 +482,10 @@ async function executeTool(name, args = {}) {
                 return `is_trapped → ${v.positive} :: ${v.text}`;
             }
             case 'look_around': {
-                for (let i = 0; i < 4 && aiPlayerActive; i++) { simulateKeyPress('KeyZ', 120); await delay(160); }
-                return 'Rotated the camera to survey the surroundings.';
+                // No keyboard camera in this build — turn Mario right in steps so
+                // the camera swings around behind him and reveals the surroundings.
+                for (let i = 0; i < 4 && aiPlayerActive; i++) { simulateKeyPress('ArrowRight', 200); await delay(220); }
+                return 'Turned Mario to survey the surroundings (camera follows him).';
             }
             case 'set_goal': {
                 const g = String(args.goal || '').slice(0, 200);
@@ -871,6 +873,23 @@ function buildProviderPanel() {
     visRow.appendChild(visSel);
     panel.appendChild(visRow);
 
+    // Command format — JSON (smart models) vs Simple text (weaker models)
+    const fmtRow = document.createElement('div');
+    fmtRow.className = 'provider-row';
+    const fmtLabel = document.createElement('label');
+    fmtLabel.className = 'provider-label';
+    fmtLabel.textContent = 'AI reply format';
+    const fmtSel = document.createElement('select');
+    fmtSel.className = 'provider-select';
+    fmtSel.innerHTML = `
+        <option value="json">🧩 JSON (smart models, default)</option>
+        <option value="simple">📝 Simple text (best for weaker models)</option>`;
+    fmtSel.value = _cmdFormat;
+    fmtSel.addEventListener('change', () => setCmdFormat(fmtSel.value));
+    fmtRow.appendChild(fmtLabel);
+    fmtRow.appendChild(fmtSel);
+    panel.appendChild(fmtRow);
+
     // Connect / reconnect button
     const connectBtn = document.createElement('button');
     connectBtn.className = 'provider-save-btn';
@@ -898,6 +917,13 @@ document.getElementById('provider-btn')?.addEventListener('click', openProviderP
 document.getElementById('provider-backdrop')?.addEventListener('click', closeProviderPanel);
 document.getElementById('close-provider-btn')?.addEventListener('click', closeProviderPanel);
 
+function setCmdFormat(fmt) {
+    _cmdFormat = (fmt === 'simple') ? 'simple' : 'json';
+    try { localStorage.setItem('sm64_cmd_format', _cmdFormat); } catch {}
+    updateAIStatus(`📝 AI reply format: ${_cmdFormat === 'simple' ? 'Simple text' : 'JSON'}`);
+}
+window.sm64CmdFormat = setCmdFormat;   // console helper too
+
 // Pollinations-only: nothing extra to restore (auth handled by initAuth).
 function restoreProviderState() {}
 
@@ -905,14 +931,14 @@ function restoreProviderState() {}
 // 8. CONTROLS GUIDE  (one AI call, cached in localStorage)
 // ────────────────────────────────────────────────────────────
 const CONTROLS_STATIC = [
-    { key: '↑ ↓ ← →',  action: 'Move Mario' },
-    { key: 'X',         action: 'Jump / Skip dialog' },
-    { key: 'Space',     action: 'Crouch / Duck' },
-    { key: 'C',         action: 'Dive / Punch / Grab' },
-    { key: 'Enter',     action: 'Pause / Skip dialog' },
-    { key: 'Z',         action: 'Camera left' },
-    { key: 'X + ↑',    action: 'Long jump (run first)' },
-    { key: 'X + X',    action: 'Double / Triple jump' },
+    { key: '↑ / ↓',     action: 'Move forward / backward' },
+    { key: '← / →',     action: 'Turn left / right' },
+    { key: 'X',         action: 'A — Jump / skip dialog' },
+    { key: 'C',         action: 'B — Dive / punch / grab / read' },
+    { key: 'Space',     action: 'Z — Crouch / ground-pound' },
+    { key: 'Enter',     action: 'Start — Pause / confirm menu' },
+    { key: '↑ then X',  action: 'Run then jump (cross gaps, paintings)' },
+    { key: '↑+Space+X',  action: 'Long jump (big leap)' },
 ];
 
 let controlsGuide = null;
@@ -1364,8 +1390,23 @@ let _isThinking      = false;   // prevent concurrent calls
 let _prevScreenshot  = null;    // data URL from the previous think
 let _prevGameState   = null;    // RAM state from the previous think
 let _stuckCount      = 0;       // consecutive near-zero-movement decisions
+let _sceneCutCount   = 0;       // consecutive whole-screen changes (demo/cutscene tell)
 let _aiGoal          = '';      // persistent multi-turn plan (navigation continuity)
 let _aiGoalAge       = 0;       // turns the current goal has been pursued
+
+// ── BRAINMAP: the AI's running sense of WHERE it is and WHAT it's done ──
+// Persists across turns and is replayed into every prompt so the model stops
+// forgetting it already entered the castle / which area it's in.
+let _region   = 'unknown';      // outside-castle | castle-foyer | in-level:<name> | unknown
+let _regionAge = 0;             // turns spent in the current region
+let _progressLog = [];          // milestones achieved, newest last ("entered castle", …)
+let _checklist = [];            // [{ text, done }] short-term to-do the AI manages
+function _resetBrainmap() { _region = 'unknown'; _regionAge = 0; _progressLog = []; _checklist = []; _sceneCutCount = 0; }
+
+// Command format the model must reply in. 'json' (structured) or 'simple' (a
+// plain line format that weak models handle far more reliably). We always try
+// the other as a fallback, so a malformed reply still usually works.
+let _cmdFormat = (() => { try { return localStorage.getItem('sm64_cmd_format') || 'json'; } catch { return 'json'; } })();
 
 // Rapid-fire mode state
 let _rapidFireActive = false;
@@ -1460,16 +1501,26 @@ function updateTurboUI() {
 const aiBtn    = document.getElementById('ai-player-btn');
 const aiStatus = document.getElementById('ai-status');
 
+// VERIFIED controls for THIS build (match the original working project):
+//   Arrows = analog stick · KeyX = A (jump) · KeyC = B (punch/dive/grab) ·
+//   Space = Z (crouch / ground-pound / long-jump) · Enter = Start (pause/confirm).
+// There is NO keyboard camera control in this build — Mario must TURN (Left/Right)
+// to re-orient; the camera follows him. (Don't invent camera keys; they're no-ops.)
 const keyMap = {
     ArrowUp:    'ArrowUp',
     ArrowDown:  'ArrowDown',
     ArrowLeft:  'ArrowLeft',
     ArrowRight: 'ArrowRight',
-    jump:       'KeyX',
-    crouch:     'Space',
-    action:     'KeyC',
-    start:      'Enter',
-    cameraLeft: 'KeyZ',   // rotate camera (helps look around / re-orient)
+    jump:       'KeyX',   // A button
+    crouch:     'Space',  // Z button (crouch / ground-pound / long-jump)
+    action:     'KeyC',   // B button (punch / dive / grab / read sign)
+    start:      'Enter',  // Start (pause / confirm menus)
+    // Aliases so weak models that emit natural words still resolve to a real key:
+    up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight',
+    back: 'ArrowDown', backward: 'ArrowDown', forward: 'ArrowUp',
+    a: 'KeyX', b: 'KeyC', x: 'KeyX', c: 'KeyC',
+    jump_key: 'KeyX', dive: 'KeyC', punch: 'KeyC',
+    z: 'Space', groundpound: 'Space', duck: 'Space',
 };
 
 let playerInputs = new Set();
@@ -1662,8 +1713,6 @@ async function aiThink() {
         _frameHistory.push(screenshot);            // keep recent frames for is_stuck/is_trapped
         if (_frameHistory.length > 6) _frameHistory.shift();
 
-        const { t1, t2, strategy, tasKnow } = await loadTrainingData();
-
         const memStateCtx = gameState
             ? `\n\n${gameStateToText(gameState)}\n  (If the screen is a TITLE/FILE-SELECT/DEMO, these numbers are from a background demo — ignore them and follow the SCREEN guidance.)`
             : '';
@@ -1696,6 +1745,15 @@ async function aiThink() {
                 if (_stuckCount >= 2) {
                     motionCtx += `\n⚠ STUCK — the screen has barely changed for ${_stuckCount} turns, so your last move is NOT working. Do something DIFFERENT: turn to face a new direction (Left/Right), back up, jump over the obstacle, or pick another path. Do NOT repeat the previous action.`;
                 }
+                // Scene-cut detector: a HUGE change you didn't cause = a demo/cutscene.
+                // A small input can't flip the whole screen; entering a door/painting can,
+                // but so does the title-screen ATTRACT DEMO jumping between levels.
+                if (vm > 0.55) {
+                    _sceneCutCount++;
+                    motionCtx += `\n🎬 The WHOLE scene just changed (${pct}%). Unless you just entered a door/painting/warp, you did NOT cause this — it's almost certainly a TITLE-SCREEN DEMO or a cutscene playing on its own. ${_sceneCutCount >= 2 ? 'It has cut scenes MULTIPLE times now — this is a DEMO. Press start (Enter) to exit it, then begin the game properly.' : 'If you are not certain you are controlling Mario, press start (Enter) to exit any demo.'}`;
+                } else {
+                    _sceneCutCount = 0;
+                }
             }
         }
 
@@ -1715,6 +1773,18 @@ async function aiThink() {
 2) ANTI-STUCK TOOLS — if you genuinely can't tell whether you're moving or you look stuck/softlocked, call is_stuck / is_trapped before doing anything drastic.`;
 
         const movementCtx = '\n\nNOTE: The player is idle (no input detected).';
+        // BRAINMAP — replay the AI's running sense of place + progress so it stops
+        // forgetting it already went inside, which level it's in, etc.
+        const regionLabel = {
+            'outside-castle': 'OUTSIDE the castle (open sky, grass, moat/bridge, castle exterior)',
+            'castle-foyer':   'INSIDE the castle foyer (enclosed room, paintings on walls, stairs — do NOT walk back out the front door)',
+        }[_region] || _region;
+        const brainmapCtx =
+            `\n\n🗺️ BRAINMAP (your memory — trust it, update it):\n` +
+            `- WHERE YOU ARE: ${regionLabel} (for ${_regionAge} turn(s)).\n` +
+            (_progressLog.length ? `- DONE SO FAR: ${_progressLog.slice(-8).join(' → ')}.\n` : '') +
+            (_checklist.length ? `- CHECKLIST: ${_checklist.map(c => `${c.done ? '✅' : '⬜'} ${c.text || c}`).join(' | ')}.\n` : '') +
+            `- Update "region" every turn from what you SEE. If you just walked through the castle's front doors, your region is now "castle-foyer" — you are INSIDE; do not turn around and leave.`;
         const planCtx = _aiGoal
             ? `\n\nYOUR CURRENT PLAN (you set this ${_aiGoalAge} turn(s) ago — KEEP pursuing it unless the screen clearly shows it's done, impossible, or wrong): ${_aiGoal}`
             : '';
@@ -1735,17 +1805,9 @@ async function aiThink() {
         const instrCtx    = userInstruction
             ? `\n\nUSER INSTRUCTION (follow this): ${userInstruction}`
             : '';
-        const trainingCtx = (t1 || t2)
-            ? `\n\nTRAINING DATA:\n=== SET 1 ===\n${t1.slice(0, 3500)}\n\n=== SET 2 ===\n${t2.slice(0, 3500)}`
-            : '';
-        // Speedrun-informed strategy reference. Explicitly framed as KNOWLEDGE to
-        // reason with, NOT a script to replay — so it can't be used to cheat.
-        const strategyCtx = strategy
-            ? `\n\nSPEEDRUN STRATEGY REFERENCE (knowledge to guide your decisions — NOT inputs to copy; play legitimately from what you SEE):\n${strategy.slice(0, 4000)}`
-            : '';
-        const tasMetaCtx = tasKnow
-            ? `\n\nTAS ARCHIVE KNOWLEDGE (reference facts on optimal routes/times — NOT inputs to copy; you must still play from what you see):\n${tasKnow.slice(0, 2500)}`
-            : '';
+        // NOTE: the heavy speedrun/TAS/training guides are NO LONGER dumped into
+        // every gameplay turn (that bloated context + cost). They're distilled
+        // once by Study into aiNotes (fed via notesCtx) and used there instead.
 
         const systemPrompt = `You are an AI playing Super Mario 64. Decide what actions to take.
 ${perceptionNote}
@@ -1755,26 +1817,40 @@ ${hierarchyNote}
 FIRST, IDENTIFY THE SCREEN — this is critical:
 - TITLE SCREEN ("Press Start", the big rotating Mario face/logo): press start (Enter) to begin.
 - FILE SELECT (a menu of Mario-head save files A/B/C/D, or Peach/coins icons): press jump (X) to pick a file and enter the game.
-- ATTRACT-MODE DEMO (gameplay is happening but YOU aren't moving Mario — the camera pans cinematically, scenes change on their own, often shows random levels/Bowser): you are NOT in control and the live stats are from the demo, NOT real. Press start (Enter) to exit the demo back to the menu.
+- ATTRACT-MODE DEMO — the game plays ITSELF when left idle on the title. ⚠ This is the #1 thing you confuse with real play. DEMO TELLS: (a) Mario moves/jumps/fights on his OWN without you pressing anything; (b) the camera pans cinematically by itself; (c) the scene CUTS between different levels (a 🎬 note below flags this); (d) you often see "PRESS START", the © Nintendo logo, or a level you never chose. If ANY of these, you are NOT in control. Press start (Enter) to exit the demo, then press start AGAIN on the title to actually begin.
 - DIALOG BOX (a white text box / sign / character speaking): press jump (X) to advance/close it.
-- ACTUAL GAMEPLAY (you can see Mario respond to your inputs on the castle grounds or in a level): now you actually play.
-If you are NOT clearly in ACTUAL GAMEPLAY, do not platform — just do the one correct button above to progress toward gameplay. Ignore "in water"/stuck logic on menus and demos.
+- ACTUAL GAMEPLAY: you are in control ONLY if your inputs visibly move Mario the way you intended AND the scene is NOT cutting around on its own. Confirm control before you trust it.
+TEST FOR CONTROL: if you're unsure whether it's a demo, the brainmap region is "unknown", or the scene keeps cutting — assume DEMO/menu and press start (Enter). Do NOT platform, swim, or run "stuck" logic on a menu/demo.
+At session start you are almost always on the TITLE or a DEMO, not in gameplay — get to FILE SELECT → gameplay first.
+
+WHERE AM I? — figure this out EVERY turn and put it in "region". You keep mixing these up:
+- OUTSIDE-CASTLE: you can see OPEN SKY, green grass, the moat/water, the stone BRIDGE, and the castle's exterior walls/towers ahead. Goal here: cross to the big front DOORS and go in. (Grass alone does NOT mean "near the entrance" — lots of places have grass.)
+- CASTLE-FOYER: you are INDOORS — an enclosed room, NO sky, stone/checkered floor, PAINTINGS hanging on the walls, staircases, warm indoor lighting. If you see this you ALREADY WENT INSIDE — do NOT walk back out the front door behind you. Goal: reach a painting and jump in.
+- IN-LEVEL: you're inside a course with its own theme (grassy hills+mountain = Bob-omb Battlefield, snow = Cool Cool Mountain, water = a water level, lava = a fire level…). Goal: head to the obvious objective (usually up/forward).
+Use the BRAINMAP below: if it says you're castle-foyer, you're INSIDE even if part of the room looks open — don't go back outside.
 
 GAME OBJECTIVE (once you control Mario):
-1. Start outside the castle — head to the entrance bridge and go inside
-2. Advance/skip any dialog box by pressing jump (X) — NOT start
-3. Once inside, do NOT run back out — proceed forward
-4. Find the first door (no star requirement) and enter it
-5. Jump into the painting to start the first level
-6. Collect stars to progress
+1. OUTSIDE: head across the bridge to the big front DOORS and walk into them → you are now INSIDE (set region = castle-foyer).
+2. Advance/skip any dialog box by pressing jump (X) — NOT start.
+3. INSIDE the foyer: do NOT run back out. Walk up to a PAINTING on the wall and jump INTO it (use the enter_painting move).
+4. IN a level: go for the obvious star objective.
+5. Collect stars to progress.
 
 CONTROLS — how Mario ACTUALLY works (read carefully, you keep getting these wrong):
-- ArrowUp/Down/Left/Right move Mario RELATIVE TO THE CAMERA. Up = away from the camera (the way Mario's back faces). Left/Right STEER and turn him.
-- You MUST hold a direction long enough to travel. A quick tap barely moves him. To cross open ground, hold ArrowUp for 1–3 SECONDS (set "hold_ms": 1500+). This single thing matters most.
-- To head toward something that is NOT straight ahead, TURN FIRST: hold ArrowLeft or ArrowRight (or rotate the camera with cameraLeft/Z), THEN hold ArrowUp. The target is often to your SIDE, not dead ahead.
-- jump (X) = jump; it ALSO advances/closes dialog boxes. (Long jump = run forward, then crouch+jump.)
-- crouch (Space) = duck / crawl / set up a long jump.  action (C) = dive / punch / grab / read a sign.
-- start (Enter) = title/demo CONFIRM only. During real gameplay it just PAUSES — do NOT press it while playing. Use jump (X) for dialog.
+- ArrowUp = forward, ArrowDown = BACKWARD (yes you CAN back up / turn around — use it when wedged or facing a wall), ArrowLeft/Right = steer/turn. All RELATIVE TO THE CAMERA (Up = away from camera).
+- You MUST hold a direction long enough to travel. A quick tap barely moves him. To cross open ground, hold ArrowUp for 1–3 SECONDS (hold_ms 1500+). This matters most.
+- Target not straight ahead? TURN FIRST (hold Left/Right ~300ms), THEN hold ArrowUp.
+- SIMULTANEOUS keys: put multiple keys in ONE group to press them together — ["ArrowUp","jump"] = jump while running forward (this is how you jump ACROSS gaps and INTO paintings). ["ArrowUp","crouch","jump"] = long jump.
+- jump (X) = jump + advances dialog. crouch (Space) = duck / ground-pound. action (C) = dive / punch / grab / read sign.
+- start (Enter) = title/demo CONFIRM only; in gameplay it PAUSES — never press it while playing.
+
+MACRO MOVES — easiest way to do tricky things; just put the word in "actions":
+- "run_jump" = run then jump (cross a gap, hop a ledge).
+- "enter_painting" = run forward and jump INTO the painting in front of you (use this to start a level).
+- "long_jump" = big horizontal leap.  "dive" = fast forward lunge.  "triple_jump" = highest jump.
+- "back_up" = move backward a bit.  "turn_around" = face the other way.  "swim_up" = stroke upward in water.
+- backflip = jump straight up from standstill.
+Example actions: ["run_jump"]  or  [{"keys":["ArrowLeft"],"hold_ms":350},{"keys":["ArrowUp"],"hold_ms":1600},"enter_painting"]
 
 WATER — you keep failing this:
 - You do NOT "jump out" of water. Jumping does nothing useful in water.
@@ -1784,7 +1860,7 @@ WATER — you keep failing this:
 NAVIGATION:
 - The castle entrance is the pair of big wooden DOORS set into the castle wall, across the bridge — not every archway/tunnel. Pick the visible target, face it, then hold forward toward it.
 - The route is rarely a straight line — expect to move diagonally, sideways, and around obstacles.
-- If you barely moved last turn you are probably facing a wall or the wrong way — TURN (Left/Right) or rotate the camera; do NOT keep mashing forward.
+- If you barely moved last turn you are probably facing a wall or the wrong way — TURN (hold Left or Right to spin Mario; the camera follows him); do NOT keep mashing forward. There is NO separate camera control — re-orient by turning Mario.
 
 UNDERSTAND BEFORE YOU ACT (do this every turn, in your head, then fill the JSON):
 1. SCENE: what screen is this? (title / file_select / demo / dialog / gameplay)
@@ -1806,24 +1882,42 @@ RULES:
 - ${memOn
     ? 'You may use tools (get_game_state, set_game_speed for tricky jumps, save_move/play_move for reusable sequences) when helpful, but don\'t call tools every turn.'
     : 'There is no reliable game memory — judge everything from the image. You may use set_game_speed, is_stuck/is_trapped, or save_move/play_move when helpful, but don\'t call tools every turn.'}
-${movementCtx}${planCtx}${lastActCtx}${preplanCtx}${memStateCtx}${motionCtx}${memoryCtx}${notesCtx}${instrCtx}${strategyCtx}${tasMetaCtx}${trainingCtx}
+${brainmapCtx}${movementCtx}${planCtx}${lastActCtx}${preplanCtx}${memStateCtx}${motionCtx}${memoryCtx}${notesCtx}${instrCtx}
 
-Respond with ONLY valid JSON (no markdown fences):
+${_cmdFormat === 'simple'
+? `Reply in this SIMPLE LINE FORMAT (one field per line, NO JSON, NO markdown):
+REGION: outside-castle | castle-foyer | in-level:<name> | unknown
+SCENE: gameplay | title | file_select | demo | dialog
+TARGET: what you're heading to + its grid cell
+GOAL: your multi-turn plan
+DO: step | step | step          (each step is "keys hold_ms" or a macro; keys joined by +)
+SAY: short commentary (optional)
+DONE: a milestone you just completed (optional, e.g. "entered castle")
+Example:
+REGION: castle-foyer
+SCENE: gameplay
+TARGET: Bob-omb painting (T cell)
+GOAL: jump into the first painting
+DO: left 350 | up 1500 | enter_painting
+SAY: heading into my first level!`
+: `Respond with ONLY valid JSON (no markdown fences):
 {
+  "region": "outside-castle | castle-foyer | in-level:<name> | unknown",
   "scene": "gameplay | title | file_select | demo | dialog",
   "target": "what I'm heading to + its grid cell, e.g. 'castle doors in TR cell'",
   "goal": "my multi-turn plan, e.g. 'cross the bridge and enter the castle doors'",
-  "actions": [ {"keys":["ArrowLeft"], "hold_ms": 400}, {"keys":["ArrowUp"], "hold_ms": 1800}, {"keys":["ArrowUp","jump"], "hold_ms": 300} ],
-  "thought": "scene, where Mario is, target cell, which way I must turn, did last move work",
-  "speech": "short streamer commentary (max 15 words) — omit if rapid_fire is true",
+  "actions": [ {"keys":["ArrowLeft"], "hold_ms": 400}, {"keys":["ArrowUp"], "hold_ms": 1800}, "enter_painting" ],
+  "thought": "where I am (region), target cell, which way I must turn, did last move work",
+  "speech": "short streamer commentary (max 15 words) — omit if rapid_fire",
+  "done": "a milestone I just completed, or null (e.g. 'entered castle')",
   "mistake": "error noticed or null",
-  "notes": ["optional NEW insight worth remembering — omit or [] if none"],
+  "notes": ["optional NEW insight — omit or [] if none"],
   "preplan": false,
   "rapid_fire": false
-}
+}`}
 
-Each group is {"keys":[...simultaneous...], "hold_ms": N}; plain arrays like ["ArrowUp"] also work with a default hold. Hold guide: FORWARD travel 1200–2500ms (go far); a TURN to re-aim (Left/Right alone) 250–500ms (short, or you spin in circles); jumps/dialog 150–350ms. ${_preplanMode ? `In PRE-PLAN mode give a full ${capTxt}-group script.` : 'Normally 1–5 groups (more only if you set preplan:true).'}
-Valid keys: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jump, start, crouch, action, cameraLeft`;
+A "step"/group is {"keys":[...simultaneous...], "hold_ms": N} OR a macro word ("run_jump","enter_painting","long_jump","dive","triple_jump","back_up","turn_around","swim_up","backflip"). Hold guide: FORWARD 1200–2500ms; TURN 250–500ms (short!); jump/dialog 150–350ms. ${_preplanMode ? `PRE-PLAN: give a full ${capTxt}-step script.` : 'Normally 1–5 steps (more only if preplan:true).'}
+Valid keys (THESE ARE THE ONLY ONES — there is no camera key): ArrowUp(forward), ArrowDown(backward), ArrowLeft(turn left), ArrowRight(turn right), jump(=A), action(=B: dive/punch/grab), crouch(=Z: ground-pound/long-jump), start(pause/confirm only).`;
 
         // Single-frame perception: the AI acts on ONE current frame, annotated
         // with a nav grid + compass. (The previous-frame comparison was removed —
@@ -1852,10 +1946,9 @@ Valid keys: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jump, start, crouch, acti
         const rawContent = await callChatWithTools([
             { role: 'system', content: systemPrompt },
             userMessage,
-        ], { json: true, max_tokens: maxTokens });
+        ], { json: _cmdFormat !== 'simple', max_tokens: maxTokens });
 
-        const clean    = rawContent.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-        const response = JSON.parse(clean);
+        const response = parseAIResponse(rawContent);
 
         // Persist the multi-turn plan for navigation continuity. Keep pursuing the
         // same goal across turns; only reset the age-counter when it genuinely changes.
@@ -1866,6 +1959,28 @@ Valid keys: ArrowUp, ArrowDown, ArrowLeft, ArrowRight, jump, start, crouch, acti
         } else if (_aiGoal) {
             _aiGoalAge++;   // model didn't restate it — assume it's still in effect
         }
+
+        // ── Brainmap updates: where am I, what have I accomplished ──
+        const newRegion = (response.region || '').trim().toLowerCase();
+        if (newRegion && newRegion !== 'unknown') {
+            if (newRegion !== _region) {
+                _region = newRegion; _regionAge = 0;
+                // Crossing into the castle is the exact thing it kept forgetting.
+                _progressLog.push(`entered ${newRegion}`);
+            } else _regionAge++;
+        } else _regionAge++;
+        // Milestones the model reports completing this turn
+        const done = response.done || response.progress;
+        if (done && typeof done === 'string' && done.trim()) {
+            const d = done.trim();
+            if (!_progressLog.includes(d)) _progressLog.push(d);
+        }
+        if (Array.isArray(response.done)) for (const d of response.done) {
+            if (d && !_progressLog.includes(d)) _progressLog.push(String(d));
+        }
+        while (_progressLog.length > 12) _progressLog.shift();
+        // Optional checklist the model maintains
+        if (Array.isArray(response.checklist)) _checklist = response.checklist.slice(0, 8);
 
         const thoughtLine = response.target
             ? `🎯 ${response.target} — ${response.thought || ''}`
@@ -1946,14 +2061,14 @@ function _normalizeGroup(g, fast) {
     else if (g && typeof g === 'object') { keys = g.keys || g.actions || []; ms = g.hold_ms ?? g.ms ?? g.duration ?? null; }
     else if (typeof g === 'string') keys = [g];
     keys = (Array.isArray(keys) ? keys : [keys]).filter(k => keyMap[k]);
+    // Resolve to physical key CODES so aliases ("up", "forward") classify correctly.
+    const codes = keys.map(k => keyMap[k]);
     // Smarter movement defaults when the model omits hold_ms:
-    //  • FORWARD/back travel → long hold so Mario actually covers ground (the #1
-    //    reason the original travelled further than brief taps).
+    //  • FORWARD/back travel → long hold so Mario actually covers ground.
     //  • TURN-ONLY (Left/Right, no Up/Down) → short tap so he re-aims without
-    //    spinning past the target.
-    //  • jumps / dialog / actions → brief press.
-    const hasForward = keys.includes('ArrowUp') || keys.includes('ArrowDown');
-    const isTurnOnly = !hasForward && (keys.includes('ArrowLeft') || keys.includes('ArrowRight'));
+    //    spinning past the target.   • jumps / actions → brief press.
+    const hasForward = codes.includes('ArrowUp') || codes.includes('ArrowDown');
+    const isTurnOnly = !hasForward && (codes.includes('ArrowLeft') || codes.includes('ArrowRight'));
     if (ms == null) {
         if (hasForward)      ms = fast ? 750 : 1400;
         else if (isTurnOnly) ms = fast ? 240 : 380;
@@ -1985,9 +2100,102 @@ function _isPreplan(response) {
     return _preplanMode || response?.preplan === true;
 }
 
+// ── MACRO MOVES ───────────────────────────────────────────────────────
+// Named composite moves so the model can emit ONE token (e.g. "run_jump")
+// instead of hand-building multi-key arrays it usually gets wrong. Each expands
+// into a sequence of simultaneous-key groups (this is also where "simultaneous
+// controls" really matter — e.g. a long jump is Up+crouch+jump at once).
+const _MACROS = {
+    run_jump:       [{ keys: ['ArrowUp'], hold_ms: 700 }, { keys: ['ArrowUp', 'jump'], hold_ms: 300 }],
+    long_jump:      [{ keys: ['ArrowUp'], hold_ms: 550 }, { keys: ['ArrowUp', 'crouch', 'jump'], hold_ms: 320 }],
+    dive:           [{ keys: ['ArrowUp'], hold_ms: 450 }, { keys: ['ArrowUp', 'action'], hold_ms: 320 }],
+    enter_painting: [{ keys: ['ArrowUp'], hold_ms: 750 }, { keys: ['ArrowUp', 'jump'], hold_ms: 340 }],
+    jump_forward:   [{ keys: ['ArrowUp', 'jump'], hold_ms: 320 }],
+    triple_jump:    [{ keys: ['ArrowUp', 'jump'], hold_ms: 280 }, { keys: ['ArrowUp', 'jump'], hold_ms: 280 }, { keys: ['ArrowUp', 'jump'], hold_ms: 340 }],
+    backflip:       [{ keys: ['crouch'], hold_ms: 130 }, { keys: ['jump'], hold_ms: 280 }],
+    turn_around:    [{ keys: ['ArrowDown'], hold_ms: 500 }],
+    back_up:        [{ keys: ['ArrowDown'], hold_ms: 700 }],
+    swim_up:        [{ keys: ['ArrowUp', 'jump'], hold_ms: 200 }, { keys: ['ArrowUp', 'jump'], hold_ms: 200 }, { keys: ['ArrowUp', 'jump'], hold_ms: 200 }],
+};
+function _macroName(g) {
+    let s = null;
+    if (typeof g === 'string') s = g;
+    else if (g && typeof g === 'object' && g.move) s = g.move;
+    return s ? String(s).toLowerCase().trim().replace(/[\s-]+/g, '_') : null;
+}
+// Replace any macro entries with their expanded group sequences.
+function _expandGroups(groups) {
+    const out = [];
+    for (const g of (groups || [])) {
+        const m = _macroName(g);
+        if (m && _MACROS[m]) out.push(..._MACROS[m].map(x => ({ ...x })));
+        else out.push(g);
+    }
+    return out;
+}
+
+// ── COMMAND PARSING (JSON  +  simple-text fallback) ──────────────────
+// Weak models routinely produce broken JSON. The "simple" format is line-based
+// and far easier for them. We parse whichever, and cross-fall-back on failure.
+//
+// SIMPLE format example:
+//   REGION: castle-foyer
+//   TARGET: bob painting (T cell)
+//   GOAL: jump into the first painting
+//   DO: up 1500 | left 350 | enter_painting
+//   SAY: heading into the painting!
+//   DONE: entered the castle
+function _parseStep(tok) {
+    // "up+jump 300" → {keys:['ArrowUp','jump'], hold_ms:300};  "run_jump" → macro string
+    tok = tok.trim();
+    if (!tok) return null;
+    const m = tok.match(/^(.*?)(?:\s+(\d{2,5}))?$/);
+    const keysPart = (m?.[1] || tok).trim();
+    const ms = m?.[2] ? parseInt(m[2], 10) : null;
+    const lower = keysPart.toLowerCase().replace(/[\s-]+/g, '_');
+    if (_MACROS[lower]) return lower;                         // a macro name
+    const keys = keysPart.split(/[+&]/).map(k => k.trim()).filter(k => keyMap[k] || keyMap[k.toLowerCase()]);
+    if (!keys.length) return null;
+    const norm = keys.map(k => (keyMap[k] ? k : k.toLowerCase()));
+    return ms ? { keys: norm, hold_ms: ms } : { keys: norm };
+}
+function parseSimpleCommands(text) {
+    const out = { actions: [] };
+    for (const rawLine of String(text).split(/\r?\n/)) {
+        const line = rawLine.trim();
+        const mm = line.match(/^([A-Za-z_]+)\s*[:=]\s*(.*)$/);
+        if (!mm) continue;
+        const key = mm[1].toUpperCase(); const val = mm[2].trim();
+        if (key === 'DO' || key === 'ACTIONS' || key === 'MOVE' || key === 'MOVES') {
+            out.actions = val.split('|').map(_parseStep).filter(Boolean);
+        } else if (key === 'REGION') out.region = val;
+        else if (key === 'TARGET') out.target = val;
+        else if (key === 'GOAL') out.goal = val;
+        else if (key === 'SAY' || key === 'SPEECH') out.speech = val;
+        else if (key === 'THOUGHT' || key === 'THINK') out.thought = val;
+        else if (key === 'DONE' || key === 'PROGRESS') out.done = val;
+        else if (key === 'PREPLAN') out.preplan = /true|yes|1/i.test(val);
+        else if (key === 'SCENE') out.scene = val;
+    }
+    if (!out.thought) out.thought = out.target || 'acting';
+    return out;
+}
+// Unified parse: prefer the requested format, fall back to the other.
+function parseAIResponse(raw) {
+    const clean = String(raw).replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+    const tryJson = () => { const r = JSON.parse(clean); if (!r || typeof r !== 'object') throw 0; return r; };
+    const trySimple = () => { const r = parseSimpleCommands(clean); if (!r.actions?.length && !r.scene && !r.region) throw 0; return r; };
+    const order = _cmdFormat === 'simple' ? [trySimple, tryJson] : [tryJson, trySimple];
+    for (const fn of order) { try { return fn(); } catch {} }
+    // Last resort: pull a JSON object substring if the model wrapped it in prose
+    const m = clean.match(/\{[\s\S]*\}/);
+    if (m) { try { return JSON.parse(m[0]); } catch {} }
+    throw new Error('Could not parse model reply');
+}
+
 async function aiExecute(response) {
     if (!response?.actions?.length) return;
-    let groups = response.actions;
+    let groups = _expandGroups(response.actions);   // turn macros into key-groups
     const preplan = _isPreplan(response);
 
     if (preplan) {
@@ -2143,6 +2351,7 @@ async function toggleAIPlayer() {
         _aiGoalAge      = 0;
         _lastActions    = null;
         _lastActionSummary = '';
+        _resetBrainmap();
         _frameHistory   = [];
         _escapeArmed      = false;
         _escapeExtraTurns = 0;
@@ -2229,6 +2438,7 @@ function stopAIPlayer() {
     _aiGoalAge        = 0;
     _lastActions      = null;
     _lastActionSummary = '';
+    _resetBrainmap();
     _escapeArmed      = false;
     _escapeExtraTurns = 0;
     aiManualState    = 'idle';
