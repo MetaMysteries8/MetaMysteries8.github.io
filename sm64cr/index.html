@@ -3,132 +3,156 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#07070c" />
-  <title>CartriTilt64 — Anti-crash SM64 RTC Corrupter</title>
+  <meta name="theme-color" content="#101216" />
+  <title>CartriTilt64 — SM64 RTC Corrupter</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <main class="app" id="app">
     <header class="topbar">
-      <a class="backLink" href="../" title="Back to projects">← Projects</a>
+      <a class="back" href="../" aria-label="Back to site">←</a>
       <div class="brand">
-        <span class="logo" aria-hidden="true">▣</span>
-        <div>
-          <h1>CartriTilt64</h1>
-          <p>supervised RTC-style SM64 WASM corrupter</p>
-        </div>
+        <h1>CartriTilt64</h1>
+        <span>SM64 real-time corruptor</span>
       </div>
-      <div class="statusPill" role="status" aria-live="polite">
-        <span id="runtimeLight" class="light idle"></span>
-        <span id="runtimeStatus">Idle</span>
+      <div class="topControls">
+        <button id="focusBtn" type="button" class="ghost">Focus</button>
+        <button id="fullscreenBtn" type="button" class="ghost">Fullscreen</button>
+        <button id="reloadBtn" type="button" class="ghost">Reload</button>
+        <div class="status" role="status" aria-live="polite"><span id="runtimeLight" class="dot idle"></span><span id="runtimeStatus">Ready</span></div>
       </div>
     </header>
 
-    <section class="layout">
-      <section class="stageCard" aria-label="SM64 game runner">
-        <div class="stageToolbar">
-          <span id="envNote">Sandbox runner: parent UI stays outside the game runtime.</span>
-          <div class="toolbarButtons">
-            <button id="focusBtn" class="tiny" type="button">Focus game</button>
-            <button id="fullscreenBtn" class="tiny" type="button">Fullscreen</button>
-            <button id="detachBtn" class="tiny" type="button">Detached tab</button>
-          </div>
-        </div>
-
-        <div id="screenShell" class="screenShell">
-          <iframe id="runnerFrame" class="runnerFrame" title="CartriTilt64 isolated SM64 runner" sandbox="allow-scripts allow-pointer-lock allow-popups allow-modals" allow="autoplay; fullscreen" allowfullscreen></iframe>
-          <div id="bootOverlay" class="bootOverlay">
-            <h2>Insert cart</h2>
-            <p>Boots <code>./sm64.wasm</code> through the supervisor, then runs SM64 inside a sandboxed runner.</p>
-            <div class="bootButtons">
+    <section class="workspace">
+      <section class="stage">
+        <div class="screen" id="screenShell">
+          <canvas id="canvas" class="gameCanvas" tabindex="0" oncontextmenu="event.preventDefault()"></canvas>
+          <div class="boot" id="bootOverlay">
+            <h2>Boot SM64</h2>
+            <p>Same-page runner. Stable defaults first; chaos only when you ask for it.</p>
+            <div class="bootActions">
               <button id="bootDefaultBtn" type="button">Boot ./sm64.wasm</button>
-              <label class="fileDrop" id="dropZone">
-                <span>Pick/drop WASM</span>
-                <input id="wasmFile" type="file" accept=".wasm,application/wasm" />
-              </label>
+              <label class="fileBtn">Pick WASM<input id="wasmFile" type="file" accept=".wasm,application/wasm" /></label>
             </div>
-            <small>If the game hangs, use Panic / Force reboot. The control UI lives outside the runner.</small>
+            <small id="envNote">Drop sm64.wasm beside this page for GitHub Pages.</small>
           </div>
         </div>
       </section>
 
-      <aside class="controls" aria-label="CartriTilt64 controls">
-        <section class="card quickCard">
-          <div class="buttonGrid mainActions">
+      <aside class="panel">
+        <nav class="tabs" aria-label="Controls">
+          <button class="tab active" type="button" data-tab="main">Main</button>
+          <button class="tab" type="button" data-tab="tune">Tune</button>
+          <button class="tab" type="button" data-tab="ai">AI</button>
+          <button class="tab" type="button" data-tab="states">States</button>
+        </nav>
+
+        <section id="tab-main" class="tabPanel active">
+          <div class="actions">
             <button id="armBtn" type="button" disabled>Arm</button>
             <button id="blastBtn" type="button" disabled>Blast</button>
             <button id="tiltBtn" type="button" disabled>Tilt</button>
-            <button id="panicBtn" class="danger" type="button" disabled>Panic</button>
+            <button id="panicBtn" type="button" class="danger" disabled>Panic</button>
           </div>
-          <div class="buttonGrid rebootActions">
-            <button id="forceRebootBtn" class="warn" type="button">Force reboot runner</button>
-            <button id="softPanicBtn" type="button" disabled>Soft restore</button>
-          </div>
-          <div class="meterLine"><span>Runner</span><strong id="runnerHealth">not booted</strong></div>
-          <div class="meterLine"><span>Live target</span><strong id="liveTarget">waiting</strong></div>
-          <div class="meterLine"><span>Pokes</span><strong id="pokeCount">0</strong></div>
-        </section>
-
-        <section class="card compactCard">
-          <h2>Corruptor</h2>
-          <label>
-            Target
-            <select id="targetSelect">
-              <option value="auto">Auto: MarioState + hot RAM</option>
-              <option value="mario">MarioState / visible game state</option>
-              <option value="hot">Hot RAM pages only</option>
-              <option value="heap">Guarded heap spray</option>
-            </select>
-          </label>
-          <label>
-            Engine
-            <select id="modeSelect">
-              <option value="tilt">Cart tilt — drifting values</option>
-              <option value="bitflip">Nightmare bits — masked flips</option>
-              <option value="xor">Static XOR — noisy bytes</option>
-              <option value="swap">Swapstorm — byte swaps</option>
-              <option value="zeroff">Void pulse — 00/FF taps</option>
-              <option value="numeric">Number gremlin — floats/shorts</option>
-            </select>
-          </label>
-
-          <div class="sliderRow">
-            <label>Strength <output id="strengthOut">6</output><input id="strength" type="range" min="1" max="64" value="6" /></label>
-            <label>Speed <output id="speedOut">6/s</output><input id="speed" type="range" min="1" max="30" value="6" /></label>
-          </div>
-          <label>Chaos bias <output id="tiltOut">28%</output><input id="tiltBias" type="range" min="0" max="100" value="28" /></label>
-        </section>
-
-        <details class="card" open>
-          <summary>Crash guard + targeting</summary>
-          <div class="rangeGrid">
-            <label>Heap start <output id="startOut">20%</output><input id="rangeStart" type="range" min="0" max="98" value="20" /></label>
-            <label>Heap end <output id="endOut">86%</output><input id="rangeEnd" type="range" min="1" max="100" value="86" /></label>
-          </div>
-          <label class="check"><input id="protectLow" type="checkbox" checked /> Protect low/runtime memory</label>
-          <label class="check"><input id="smartGuard" type="checkbox" checked /> Prefer changing/hot RAM</label>
-          <label class="check"><input id="crashGuard" type="checkbox" checked /> Cap writes per tick</label>
-          <label class="check"><input id="autoRecover" type="checkbox" checked /> Auto-reboot frozen runner</label>
-          <label class="check"><input id="visualFx" type="checkbox" checked /> Screen glitch FX</label>
-          <label class="check"><input id="autoBoot" type="checkbox" /> Auto-boot ./sm64.wasm</label>
-          <div class="buttonGrid">
+          <div class="microActions">
+            <button id="probeBtn" type="button" disabled>Probe</button>
+            <button id="undoBtn" type="button" disabled>Undo</button>
             <button id="snapshotBtn" type="button" disabled>Snapshot</button>
             <button id="restoreBtn" type="button" disabled>Restore</button>
-            <button id="undoBtn" type="button" disabled>Undo blast</button>
-            <button id="bootDefaultSideBtn" type="button">Boot</button>
-            <button id="bootPickedBtn" type="button">Boot picked</button>
-            <button id="resetUiBtn" type="button">Reset UI</button>
           </div>
-        </details>
+          <div class="metrics">
+            <div><span>Heap</span><strong id="heapStat">—</strong></div>
+            <div><span>MarioState</span><strong id="marioStat">unknown</strong></div>
+            <div><span>Hot pages</span><strong id="hotStat">0</strong></div>
+            <div><span>Writes</span><strong id="pokeCount">0</strong></div>
+          </div>
+          <label class="field">Stability preset
+            <select id="presetSelect">
+              <option value="safe" selected>Safe funny</option>
+              <option value="medium">Medium weird</option>
+              <option value="wild">Wild, still capped</option>
+              <option value="manual">Manual</option>
+            </select>
+          </label>
+          <div class="notice" id="guardNotice">Crash guard is on. Tiny reversible writes, cooldowns, and hot-memory targeting are active.</div>
+        </section>
 
-        <details class="card">
-          <summary>Console</summary>
+        <section id="tab-tune" class="tabPanel">
+          <div class="grid2">
+            <label class="field">Target
+              <select id="targetSelect">
+                <option value="auto">Auto</option>
+                <option value="mario">MarioState</option>
+                <option value="hot">Hot RAM</option>
+                <option value="heap">Heap range</option>
+              </select>
+            </label>
+            <label class="field">Engine
+              <select id="modeSelect">
+                <option value="nudges">Value nudges</option>
+                <option value="bitflip">Bit flips</option>
+                <option value="xor">XOR taps</option>
+                <option value="swap">Byte swaps</option>
+                <option value="zeroff">00/FF taps</option>
+                <option value="float">Float drift</option>
+              </select>
+            </label>
+          </div>
+          <div class="sliders">
+            <label>Strength <output id="strengthOut">3</output><input id="strength" type="range" min="1" max="32" value="3" /></label>
+            <label>Rate <output id="speedOut">2/s</output><input id="speed" type="range" min="1" max="20" value="2" /></label>
+            <label>Blast cap <output id="capOut">8</output><input id="writeCap" type="range" min="1" max="96" value="8" /></label>
+            <label>Range <output id="rangeOut">22–82%</output><span class="dual"><input id="rangeStart" type="range" min="0" max="99" value="22" /><input id="rangeEnd" type="range" min="1" max="100" value="82" /></span></label>
+          </div>
+          <div class="checks">
+            <label><input id="crashGuard" type="checkbox" checked /> Crash guard</label>
+            <label><input id="protectRuntime" type="checkbox" checked /> Protect runtime area</label>
+            <label><input id="hotOnly" type="checkbox" checked /> Prefer hot pages</label>
+            <label><input id="autoSnapshot" type="checkbox" checked /> Snapshot before blast</label>
+          </div>
+        </section>
+
+        <section id="tab-ai" class="tabPanel">
+          <div class="aiAuth">
+            <button id="pollenAuthBtn" type="button">Connect Pollen</button>
+            <input id="pollenKey" type="password" placeholder="sk_… user key" autocomplete="off" />
+            <button id="pollenSaveBtn" type="button" class="ghost">Save</button>
+          </div>
+          <div class="grid2">
+            <label class="field">Model
+              <select id="aiModel">
+                <option value="openai-fast">openai-fast</option>
+                <option value="openai">openai</option>
+                <option value="gpt-5.5">gpt-5.5</option>
+                <option value="qwen-vision">qwen-vision</option>
+                <option value="qwen-vision-pro">qwen-vision-pro</option>
+              </select>
+            </label>
+            <label class="field">App key
+              <input id="appKey" type="text" placeholder="optional pk_ client_id" autocomplete="off" />
+            </label>
+          </div>
+          <textarea id="aiPrompt" rows="3" placeholder="Example: make Mario slippery and kind of stretched, but keep it playable"></textarea>
+          <div class="aiLine">
+            <label><input id="aiVision" type="checkbox" /> Screenshot</label>
+            <label><input id="aiUnsafe" type="checkbox" /> Unsafe caps</label>
+            <button id="aiPlanBtn" type="button">Plan</button>
+            <button id="aiApplyBtn" type="button">Apply</button>
+          </div>
+          <pre id="aiPlanOut" class="plan">No AI plan yet.</pre>
+        </section>
+
+        <section id="tab-states" class="tabPanel">
+          <div class="stateSave">
+            <input id="stateName" type="text" maxlength="28" placeholder="name this corruption" />
+            <button id="saveStateBtn" type="button" disabled>Save state</button>
+          </div>
+          <div id="stateList" class="stateList"><span class="empty">No states yet.</span></div>
           <pre id="log" class="log" aria-live="polite"></pre>
-        </details>
+        </section>
       </aside>
     </section>
   </main>
-
-  <script src="controller.js"></script>
+  <script src="cartritilt64.js"></script>
 </body>
 </html>
