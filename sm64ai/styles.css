@@ -176,6 +176,17 @@ body {
 .hud-btn.active.green  { background: #e53935; }
 .hud-btn.active.orange { background: var(--green); }
 
+/* Play-mode dropdown — needs its own readable styling (the .hud-btn class has
+   white text with no background, which renders a <select> white-on-white). */
+#play-mode {
+    padding: 6px 10px; border-radius: 7px; border: 1px solid #3b4252;
+    background: #2a2f3a; color: #fff;
+    font-family: "Noto Sans", sans-serif; font-size: 12px; font-weight: 600;
+    cursor: pointer; transition: filter 0.15s;
+}
+#play-mode:hover { filter: brightness(1.15); }
+#play-mode option { background: #1b1f28; color: #fff; }
+
 /* ── AI status bar ──────────────────────────────────────── */
 #ai-status {
     position: fixed;

@@ -3122,9 +3122,18 @@ function scheduleAILoop() {
 // 17. TOGGLE AI PLAYER
 // ────────────────────────────────────────────────────────────
 async function toggleAIPlayer() {
-    // Pollinations vision model sees the game canvas directly.
-    const key = getActiveKey();
-    if (!key) {
+    if (!aiPlayerActive) {
+        // Source of truth for the mode is the dropdown's CURRENT value at press time
+        // (don't rely only on the change event having fired).
+        const _modeSel = document.getElementById('play-mode');
+        if (_modeSel && ['ai', 'rl', 'player-teach', 'ai-teach'].includes(_modeSel.value)) {
+            _playMode = _modeSel.value;
+            try { localStorage.setItem('sm64_play_mode', _playMode); } catch {}
+        }
+    }
+
+    // Every mode EXCEPT pure RL Play needs the Pollinations LLM (parent/grading).
+    if (_playMode !== 'rl' && !getActiveKey()) {
         document.getElementById('auth-overlay').classList.remove('hidden');
         return;
     }
