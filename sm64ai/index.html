@@ -48,6 +48,8 @@
                 <button id="turbo-btn"           class="hud-icon-btn" title="Consistent rapid fire / turbo">⚡⚡</button>
                 <button id="preplan-btn"         class="hud-icon-btn" title="Pre-plan mode (AI writes a multi-step script)">🧠</button>
                 <button id="agent-only-btn"      class="hud-icon-btn" title="Agent-Only mode: disable manual control + enable the instruction box">🤖</button>
+                <button id="brainmap-btn"        class="hud-icon-btn" title="Brainmap visualizer (watch the AI's sense of place build)">🗺️</button>
+                <button id="debug-btn"           class="hud-icon-btn" title="Debug HUD (live AI state)">🐞</button>
                 <button id="disconnect-btn"      class="hud-icon-btn danger" title="Disconnect account" style="display:none">🔌</button>
             </div>
 
@@ -97,6 +99,22 @@
         <div id="instruction-panel">
             <input type="text" id="ai-instruction" placeholder="Tell AI what to do… (e.g. go find a star)">
             <button id="send-instruction">Send</button>
+        </div>
+
+        <!-- Debug HUD (toggle 🐞) -->
+        <div id="debug-hud"></div>
+
+        <!-- Brainmap visualizer (toggle 🗺️) -->
+        <div id="brainmap-panel">
+            <div id="brainmap-head">
+                <span>🗺️ Brainmap</span>
+                <div class="bm-controls">
+                    <label title="Keep the map across reloads"><input type="checkbox" id="brainmap-persist-toggle"> persist</label>
+                    <button id="brainmap-popout-btn" title="Open in a separate window">⧉</button>
+                    <button id="brainmap-clear-btn" title="Clear the map">🗑</button>
+                </div>
+            </div>
+            <div id="brainmap-body"></div>
         </div>
 
         <!-- Memory modal -->

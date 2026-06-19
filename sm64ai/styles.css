@@ -1171,3 +1171,44 @@ body {
 }
 .cl-cmd     { color: #aab2ff; font-weight: 600; }
 .cl-cmd-res { color: rgba(255,255,255,0.5); font-size: 10.5px; }
+
+/* ── Debug HUD (🐞) ─────────────────────────────────────────── */
+#debug-hud {
+    display: none;
+    position: fixed; bottom: 12px; right: 12px; z-index: 95;
+    font: 11px/1.5 ui-monospace, Menlo, Consolas, monospace;
+    color: #cfe3ff; background: rgba(10,14,20,0.82);
+    border: 1px solid rgba(120,180,255,0.3); border-radius: 8px;
+    padding: 8px 10px; max-width: 280px; backdrop-filter: blur(6px);
+    pointer-events: none; white-space: pre-wrap;
+}
+#debug-hud b { color: #7fd6ff; }
+
+/* ── Brainmap visualizer (🗺️) ──────────────────────────────── */
+#brainmap-panel {
+    display: none;
+    position: fixed; top: 64px; right: 12px; z-index: 96;
+    width: 320px; max-height: 78vh; overflow-y: auto;
+    background: rgba(16,19,26,0.95); color: #e6e9ef;
+    border: 1px solid #2a3344; border-radius: 12px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5); padding: 12px;
+    font-family: system-ui, sans-serif;
+}
+#brainmap-head { display: flex; align-items: center; justify-content: space-between; font-weight: 700; font-size: 14px; margin-bottom: 8px; }
+#brainmap-head .bm-controls { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 400; color: #9aa6bd; }
+#brainmap-head .bm-controls button { background: #1b2230; border: 1px solid #2a3344; color: #cfd6e4; border-radius: 6px; cursor: pointer; padding: 2px 6px; }
+#brainmap-head .bm-controls button:hover { border-color: #4fd1e0; }
+.bm-map { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-bottom: 10px; }
+.bm-node { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 10px; padding: 6px 7px; border-radius: 8px; background: #1b2230; border: 1px solid #2a3344; opacity: .5; }
+.bm-node.active { opacity: 1; border-color: #4fd1e0; box-shadow: 0 0 10px rgba(79,209,224,.5); background: #15303a; }
+.bm-node span { font-size: 17px; }
+.bm-arrow { color: #46506a; }
+.bm-cur { font-size: 14px; margin: 6px 0; }
+.bm-meta { font-size: 11px; color: #9aa6bd; margin-bottom: 8px; }
+.bm-h { font-size: 10px; letter-spacing: .5px; text-transform: uppercase; color: #7a86a0; margin: 10px 0 4px; }
+.bm-check, .bm-evt { font-size: 12px; padding: 3px 6px; border-left: 2px solid #2a3344; margin: 2px 0; }
+.bm-evt { color: #cfd6e4; }
+.bm-ic { margin-right: 3px; }
+.bm-ago { color: #5a647c; font-size: 10px; float: right; }
+/* keep the debug HUD out of broadcasts */
+#app.streamer-mode #debug-hud { display: none !important; }

@@ -890,6 +890,20 @@ function buildProviderPanel() {
     fmtRow.appendChild(fmtSel);
     panel.appendChild(fmtRow);
 
+    // Auto-boot opener toggle
+    const bootRow = document.createElement('label');
+    bootRow.className = 'provider-row';
+    bootRow.style.cursor = 'pointer';
+    bootRow.innerHTML = `<span class="provider-label">Auto-boot into game</span>`;
+    const bootChk = document.createElement('input');
+    bootChk.type = 'checkbox'; bootChk.checked = _autoBoot;
+    bootChk.addEventListener('change', () => {
+        _autoBoot = bootChk.checked;
+        try { localStorage.setItem('sm64_auto_boot', _autoBoot ? '1' : '0'); } catch {}
+    });
+    bootRow.appendChild(bootChk);
+    panel.appendChild(bootRow);
+
     // Connect / reconnect button
     const connectBtn = document.createElement('button');
     connectBtn.className = 'provider-save-btn';
@@ -1234,6 +1248,48 @@ async function _frameDiffScore(urlA, urlB) {
     } catch { return null; }
 }
 
+// Estimate how the SCENE translated between two frames (block-matching on a
+// downscaled grayscale). Returns {dx,dy,conf}: dx>0 = content moved RIGHT on
+// screen, dy>0 = moved DOWN. Used by calibration to learn which way "forward"
+// actually pushes the view right now.
+let _flowCanvas = null, _flowCtx = null;
+async function _estimateFlow(urlA, urlB) {
+    try {
+        const [a, b] = await Promise.all([_loadImage(urlA), _loadImage(urlB)]);
+        const w = 64, h = 48, R = 7;
+        if (!_flowCanvas) { _flowCanvas = document.createElement('canvas'); _flowCtx = _flowCanvas.getContext('2d', { willReadFrequently: true }); }
+        _flowCanvas.width = w; _flowCanvas.height = h;
+        const gray = (img) => {
+            _flowCtx.drawImage(img, 0, 0, w, h);
+            const d = _flowCtx.getImageData(0, 0, w, h).data;
+            const g = new Float32Array(w * h);
+            for (let i = 0, p = 0; i < d.length; i += 4, p++) g[p] = (d[i] + d[i + 1] + d[i + 2]) / 3;
+            return g;
+        };
+        const ga = gray(a), gb = gray(b);
+        let best = { dx: 0, dy: 0, sad: Infinity }, zeroSad = 0;
+        for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+            let sad = 0, n = 0;
+            for (let y = R; y < h - R; y += 2) for (let x = R; x < w - R; x += 2) {
+                sad += Math.abs(ga[y * w + x] - gb[(y + dy) * w + (x + dx)]); n++;
+            }
+            sad /= n;
+            if (dx === 0 && dy === 0) zeroSad = sad;
+            if (sad < best.sad) best = { dx, dy, sad };
+        }
+        // Confidence: how much better the best shift is than no-shift (0..1)
+        const conf = zeroSad > 0 ? Math.max(0, Math.min(1, (zeroSad - best.sad) / zeroSad)) : 0;
+        return { dx: best.dx, dy: best.dy, conf };
+    } catch { return null; }
+}
+// Turn a flow vector into a compass word ("down-left", "up", …).
+function _flowWord(dx, dy) {
+    if (Math.abs(dx) < 2 && Math.abs(dy) < 2) return 'barely at all';
+    const v = []; if (dy > 1) v.push('down'); else if (dy < -1) v.push('up');
+    if (dx > 1) v.push('right'); else if (dx < -1) v.push('left');
+    return v.join('-') || 'sideways';
+}
+
 // Shared offscreen canvas for frame annotation (nav grid + compass overlay).
 let _composeCanvas = null, _composeCtx = null;
 // Draw a faint 3×3 navigation grid + camera-relative compass over a frame.
@@ -1401,7 +1457,191 @@ let _region   = 'unknown';      // outside-castle | castle-foyer | in-level:<nam
 let _regionAge = 0;             // turns spent in the current region
 let _progressLog = [];          // milestones achieved, newest last ("entered castle", …)
 let _checklist = [];            // [{ text, done }] short-term to-do the AI manages
-function _resetBrainmap() { _region = 'unknown'; _regionAge = 0; _progressLog = []; _checklist = []; _sceneCutCount = 0; }
+let _brainmapEvents = [];       // visual timeline: [{ t, kind, text }]
+let _persistBrainmap = (() => { try { return localStorage.getItem('sm64_persist_brainmap') === '1'; } catch { return false; } })();
+
+function _resetBrainmap() {
+    _sceneCutCount = 0; _calibNote = ''; _calibDone = false;
+    // When persistence is ON we KEEP the accumulated map across AI restarts/reloads.
+    if (_persistBrainmap) { updateBrainmapViz?.(); return; }
+    _region = 'unknown'; _regionAge = 0; _progressLog = []; _checklist = []; _brainmapEvents = [];
+    updateBrainmapViz?.();
+}
+function _bmEvent(kind, text) {
+    _brainmapEvents.push({ t: Date.now(), kind, text });
+    while (_brainmapEvents.length > 60) _brainmapEvents.shift();
+}
+function saveBrainmap() {
+    if (!_persistBrainmap) return;
+    try {
+        localStorage.setItem('sm64_brainmap', JSON.stringify({
+            region: _region, regionAge: _regionAge, progressLog: _progressLog,
+            checklist: _checklist, events: _brainmapEvents.slice(-60),
+        }));
+    } catch {}
+}
+function loadBrainmap() {
+    try {
+        const raw = localStorage.getItem('sm64_brainmap');
+        if (!raw) return;
+        const b = JSON.parse(raw);
+        _region = b.region || 'unknown'; _regionAge = b.regionAge || 0;
+        _progressLog = Array.isArray(b.progressLog) ? b.progressLog : [];
+        _checklist = Array.isArray(b.checklist) ? b.checklist : [];
+        _brainmapEvents = Array.isArray(b.events) ? b.events : [];
+    } catch {}
+}
+function setPersistBrainmap(on) {
+    _persistBrainmap = !!on;
+    try { localStorage.setItem('sm64_persist_brainmap', _persistBrainmap ? '1' : '0'); } catch {}
+    if (_persistBrainmap) saveBrainmap(); else { try { localStorage.removeItem('sm64_brainmap'); } catch {} }
+}
+function clearBrainmap() {
+    _region = 'unknown'; _regionAge = 0; _progressLog = []; _checklist = []; _brainmapEvents = [];
+    try { localStorage.removeItem('sm64_brainmap'); } catch {}
+    updateBrainmapViz();
+}
+
+// ── Movement calibration: measure what "forward" actually does on screen ──
+let _calibNote = '';      // short grounding note fed to the model for a few turns
+let _calibTurns = 0;      // how many more turns to keep showing _calibNote
+let _calibDone = false;   // calibrated this episode/region yet?
+let _needCalib = false;   // request a calibration before the next think
+async function runCalibration() {
+    if (!aiPlayerActive || !aiStream || _calibrating) return;
+    _calibrating = true;
+    try {
+        updateAIStatus('🧭 Calibrating movement…');
+        const before = await captureScreen(aiStream);
+        if (before) {
+            simulateKeyPress('ArrowUp', 600);   // tap forward
+            await delay(660);
+            const after = await captureScreen(aiStream);
+            if (after) {
+                const mag = await _frameDiffScore(before, after);
+                const flow = await _estimateFlow(before, after);
+                _calibDone = true; _calibTurns = 4;
+                if (mag != null && mag < 0.04) {
+                    _calibNote = '🧭 CALIBRATION: pressing ArrowUp barely changed the view — forward is BLOCKED (a wall ahead) or you are not in control. Turn (Left/Right) or back up instead of pushing forward.';
+                } else if (flow && flow.conf > 0.15) {
+                    _calibNote = `🧭 CALIBRATION: forward (ArrowUp) WORKS — Mario moved and the scene shifted ${_flowWord(flow.dx, flow.dy)}. Use the on-frame compass (Up = away from camera) to aim; turn before running toward side targets.`;
+                } else {
+                    _calibNote = '🧭 CALIBRATION: forward (ArrowUp) moved you (the view changed). Trust the on-frame compass for directions.';
+                }
+            }
+        }
+    } catch {} finally { _calibrating = false; }
+}
+let _calibrating = false;
+
+// ── BOOT OPENER: deterministically mash through title / demo / file-select ──
+// Getting from the title (or an attract DEMO) into actual gameplay is a fixed
+// sequence the model wastes many turns on. This just does it: Start exits a demo
+// and advances the title; X picks the save file and skips the intro dialog. After
+// it, the AI takes over (and calibration runs once a gameplay region is seen).
+let _autoBoot = (() => { try { return localStorage.getItem('sm64_auto_boot') !== '0'; } catch { return true; } })();
+let _bootRunning = false;
+async function runBootOpener() {
+    if (!aiPlayerActive || !_autoBoot || _bootRunning) return;
+    _bootRunning = true;
+    try {
+        updateAIStatus('🎬 Booting in (skipping menus/demo)…');
+        const seq = ['Enter', 'Enter', 'KeyX', 'KeyX', 'KeyX'];   // Start,Start, X,X,X
+        for (const code of seq) {
+            if (!aiPlayerActive || playerMovementDetected) break;
+            simulateKeyPress(code, 150);
+            await delay(1400);
+        }
+        updateAIStatus('🎮 In game — AI taking over');
+    } finally { _bootRunning = false; }
+}
+
+// ── DEBUG HUD: live readout of what the AI is thinking/doing ──
+let _debugHUD = (() => { try { return localStorage.getItem('sm64_debug_hud') === '1'; } catch { return false; } })();
+let _lastVisualPct = null;   // most recent objective visual-change %
+function updateDebugHUD() {
+    const el = document.getElementById('debug-hud');
+    if (!el) return;
+    if (!_debugHUD) { el.style.display = 'none'; return; }
+    el.style.display = 'block';
+    const flags = [_preplanMode && 'preplan', _turboMode && 'turbo', _rapidFireActive && 'rapid', _agentOnly && 'agent-only'].filter(Boolean).join(' ') || '—';
+    el.innerHTML =
+        `<b>🐞 SM64-AI debug</b>` +
+        `<div>region: <b>${_esc(_region)}</b> (${_regionAge}t)</div>` +
+        `<div>last: ${_esc(_lastActionSummary || '—')}</div>` +
+        `<div>visualΔ: ${_lastVisualPct == null ? '—' : _lastVisualPct + '%'} · stuck:${_stuckCount} · cut:${_sceneCutCount}</div>` +
+        `<div>calib: ${_calibDone ? 'done' : '—'} · fmt:${_cmdFormat}</div>` +
+        `<div>mode: ${flags}</div>` +
+        `<div>done: ${_esc(_progressLog.slice(-3).join(' → ') || '—')}</div>`;
+}
+function toggleDebugHUD(on) {
+    _debugHUD = (on == null) ? !_debugHUD : !!on;
+    try { localStorage.setItem('sm64_debug_hud', _debugHUD ? '1' : '0'); } catch {}
+    document.getElementById('debug-btn')?.classList.toggle('active', _debugHUD);
+    updateDebugHUD();
+}
+window.sm64Debug = toggleDebugHUD;
+document.getElementById('debug-btn')?.addEventListener('click', () => toggleDebugHUD());
+
+// ── BRAINMAP VISUALIZER (in-UI panel + experimental pop-out window) ──
+function _bmNode(id, label, icon) {
+    const active = _region === id || (id === 'in-level' && /in-level/.test(_region));
+    return `<div class="bm-node${active ? ' active' : ''}">${icon}<span>${label}</span></div>`;
+}
+function renderBrainmapHTML() {
+    const map = `<div class="bm-map">${_bmNode('title', 'Title', '🎬')}<span class="bm-arrow">→</span>${_bmNode('outside-castle', 'Outside', '🌳')}<span class="bm-arrow">→</span>${_bmNode('castle-foyer', 'Foyer', '🏰')}<span class="bm-arrow">→</span>${_bmNode('in-level', 'In Level', '🎨')}</div>`;
+    const cur = `<div class="bm-cur">📍 <b>${_esc(_region)}</b> <small>(${_regionAge} turns here)</small></div>`;
+    const calib = `<div class="bm-meta">${_calibDone ? '🧭 calibrated' : '🧭 not calibrated'} · 🎯 ${_esc(_aiGoal || 'no goal yet')}</div>`;
+    const checklist = _checklist.length
+        ? `<div class="bm-h">Checklist</div>` + _checklist.map(c => `<div class="bm-check">${c.done ? '✅' : '⬜'} ${_esc(c.text || c)}</div>`).join('')
+        : '';
+    const events = `<div class="bm-h">Timeline — watch it build ↓ (newest first)</div>` +
+        (_brainmapEvents.length
+            ? _brainmapEvents.slice(-40).reverse().map(e => {
+                const ic = e.kind === 'region' ? '📍' : e.kind === 'done' ? '⭐' : e.kind === 'event' ? '⚡' : '•';
+                const ago = Math.max(0, Math.round((Date.now() - e.t) / 1000));
+                return `<div class="bm-evt"><span class="bm-ic">${ic}</span> ${_esc(e.text)} <span class="bm-ago">${ago}s</span></div>`;
+            }).join('')
+            : '<div class="bm-evt">— nothing yet —</div>');
+    return `<div class="bm-wrap">${map}${cur}${calib}${checklist}${events}</div>`;
+}
+let _bmPopup = null;
+function updateBrainmapViz() {
+    const html = renderBrainmapHTML();
+    const body = document.getElementById('brainmap-body');
+    if (body) body.innerHTML = html;
+    if (_bmPopup && !_bmPopup.closed) {
+        try { const r = _bmPopup.document.getElementById('bm-root'); if (r) r.innerHTML = html; } catch {}
+    }
+}
+const _BM_POPUP_CSS = `body{margin:0;font-family:system-ui,sans-serif;background:#10131a;color:#e6e9ef;padding:12px}
+.bm-map{display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-bottom:10px}
+.bm-node{display:flex;flex-direction:column;align-items:center;gap:2px;font-size:11px;padding:6px 8px;border-radius:8px;background:#1b2230;border:1px solid #2a3344;opacity:.5}
+.bm-node.active{opacity:1;border-color:#4fd1e0;box-shadow:0 0 10px rgba(79,209,224,.5);background:#15303a}
+.bm-node span{font-size:18px}.bm-arrow{color:#46506a}
+.bm-cur{font-size:14px;margin:6px 0}.bm-meta{font-size:11px;color:#9aa6bd;margin-bottom:8px}
+.bm-h{font-size:10px;letter-spacing:.5px;text-transform:uppercase;color:#7a86a0;margin:10px 0 4px}
+.bm-check,.bm-evt{font-size:12px;padding:3px 6px;border-left:2px solid #2a3344;margin:2px 0}
+.bm-evt{color:#cfd6e4}.bm-ic{margin-right:3px}.bm-ago{color:#5a647c;font-size:10px;float:right}`;
+function openBrainmapPopup() {
+    _bmPopup = window.open('', 'sm64brainmap', 'width=380,height=600');
+    if (!_bmPopup) { updateAIStatus('⚠ Pop-out blocked — allow popups for this site'); return; }
+    _bmPopup.document.title = 'SM64 AI — Brainmap';
+    _bmPopup.document.body.innerHTML = `<style>${_BM_POPUP_CSS}</style><h3 style="margin:0 0 8px;font-size:14px">🗺️ Brainmap (live)</h3><div id="bm-root"></div>`;
+    updateBrainmapViz();
+}
+function toggleBrainmapPanel() {
+    const p = document.getElementById('brainmap-panel');
+    if (!p) return;
+    const show = p.style.display !== 'block';
+    p.style.display = show ? 'block' : 'none';
+    document.getElementById('brainmap-btn')?.classList.toggle('active', show);
+    if (show) updateBrainmapViz();
+}
+document.getElementById('brainmap-btn')?.addEventListener('click', toggleBrainmapPanel);
+document.getElementById('brainmap-popout-btn')?.addEventListener('click', openBrainmapPopup);
+document.getElementById('brainmap-clear-btn')?.addEventListener('click', clearBrainmap);
+document.getElementById('brainmap-persist-toggle')?.addEventListener('change', (e) => setPersistBrainmap(e.target.checked));
 
 // Command format the model must reply in. 'json' (structured) or 'simple' (a
 // plain line format that weak models handle far more reliably). We always try
@@ -1740,6 +1980,7 @@ async function aiThink() {
             const vm = await _frameDiffScore(_prevScreenshot, screenshot);
             if (vm != null) {
                 const pct = Math.round(vm * 100);
+                _lastVisualPct = pct;
                 if (vm < 0.05) _stuckCount++; else _stuckCount = 0;
                 motionCtx = `\n\nVISUAL CHANGE since your last action: ${pct}% (objective screen-pixel difference). Under ~8% means you BARELY MOVED — you probably faced a wall or pressed the wrong key, so change direction. A large value means the view changed a lot.`;
                 if (_stuckCount >= 2) {
@@ -1785,6 +2026,9 @@ async function aiThink() {
             (_progressLog.length ? `- DONE SO FAR: ${_progressLog.slice(-8).join(' → ')}.\n` : '') +
             (_checklist.length ? `- CHECKLIST: ${_checklist.map(c => `${c.done ? '✅' : '⬜'} ${c.text || c}`).join(' | ')}.\n` : '') +
             `- Update "region" every turn from what you SEE. If you just walked through the castle's front doors, your region is now "castle-foyer" — you are INSIDE; do not turn around and leave.`;
+        // Calibration grounding (measured: what "forward" actually did on screen)
+        const calibCtx = (_calibTurns > 0 && _calibNote) ? `\n\n${_calibNote}` : '';
+        if (_calibTurns > 0) _calibTurns--;
         const planCtx = _aiGoal
             ? `\n\nYOUR CURRENT PLAN (you set this ${_aiGoalAge} turn(s) ago — KEEP pursuing it unless the screen clearly shows it's done, impossible, or wrong): ${_aiGoal}`
             : '';
@@ -1882,7 +2126,7 @@ RULES:
 - ${memOn
     ? 'You may use tools (get_game_state, set_game_speed for tricky jumps, save_move/play_move for reusable sequences) when helpful, but don\'t call tools every turn.'
     : 'There is no reliable game memory — judge everything from the image. You may use set_game_speed, is_stuck/is_trapped, or save_move/play_move when helpful, but don\'t call tools every turn.'}
-${brainmapCtx}${movementCtx}${planCtx}${lastActCtx}${preplanCtx}${memStateCtx}${motionCtx}${memoryCtx}${notesCtx}${instrCtx}
+${brainmapCtx}${calibCtx}${movementCtx}${planCtx}${lastActCtx}${preplanCtx}${memStateCtx}${motionCtx}${memoryCtx}${notesCtx}${instrCtx}
 
 ${_cmdFormat === 'simple'
 ? `Reply in this SIMPLE LINE FORMAT (one field per line, NO JSON, NO markdown):
@@ -1961,26 +2205,41 @@ Valid keys (THESE ARE THE ONLY ONES — there is no camera key): ArrowUp(forward
         }
 
         // ── Brainmap updates: where am I, what have I accomplished ──
+        const GAMEPLAY_REGION = /outside-castle|castle-foyer|in-level/;
         const newRegion = (response.region || '').trim().toLowerCase();
         if (newRegion && newRegion !== 'unknown') {
             if (newRegion !== _region) {
+                // Region CHANGED. If we were in a level and the scene also just cut
+                // hard, that's most likely a DEATH or level-exit (the death screen
+                // flashes by too fast to catch) — log the inference so the model
+                // re-orients instead of acting on stale assumptions.
+                if (/in-level/.test(_region) && _sceneCutCount >= 1 && !GAMEPLAY_REGION.test(newRegion)) {
+                    _progressLog.push(`left ${_region} (died or exited?) — re-assessing`);
+                    _bmEvent('event', `left ${_region} — died/exited?`);
+                }
                 _region = newRegion; _regionAge = 0;
-                // Crossing into the castle is the exact thing it kept forgetting.
                 _progressLog.push(`entered ${newRegion}`);
+                _bmEvent('region', `entered ${newRegion}`);
+                // Re-calibrate forward whenever we enter a NEW gameplay area (camera differs).
+                if (GAMEPLAY_REGION.test(newRegion)) { _calibDone = false; _needCalib = true; }
             } else _regionAge++;
         } else _regionAge++;
+        // First time we ever confirm a gameplay region, calibrate.
+        if (!_calibDone && GAMEPLAY_REGION.test(_region)) _needCalib = true;
         // Milestones the model reports completing this turn
         const done = response.done || response.progress;
         if (done && typeof done === 'string' && done.trim()) {
             const d = done.trim();
-            if (!_progressLog.includes(d)) _progressLog.push(d);
+            if (!_progressLog.includes(d)) { _progressLog.push(d); _bmEvent('done', d); }
         }
         if (Array.isArray(response.done)) for (const d of response.done) {
-            if (d && !_progressLog.includes(d)) _progressLog.push(String(d));
+            if (d && !_progressLog.includes(d)) { _progressLog.push(String(d)); _bmEvent('done', String(d)); }
         }
         while (_progressLog.length > 12) _progressLog.shift();
         // Optional checklist the model maintains
         if (Array.isArray(response.checklist)) _checklist = response.checklist.slice(0, 8);
+        saveBrainmap();        // persist if enabled
+        updateBrainmapViz();   // refresh the live visualizer
 
         const thoughtLine = response.target
             ? `🎯 ${response.target} — ${response.thought || ''}`
@@ -2250,8 +2509,16 @@ async function aiThinkAndAct() {
     if (!aiPlayerActive || _busyCycle) return;
     _busyCycle = true;
     try {
+        // Calibrate forward movement when we just entered a gameplay area (skip in
+        // turbo/rapid — it would steal time from the fast loop).
+        if (_needCalib && !_turboMode && !_rapidFireActive) {
+            _needCalib = false;
+            await runCalibration();
+            if (!aiPlayerActive) return;
+        }
         const resp = await aiThink();
         if (resp && aiPlayerActive) await aiExecute(resp);
+        updateDebugHUD();   // refresh the debug panel after each decision
     } finally {
         _busyCycle = false;
     }
@@ -2371,7 +2638,9 @@ async function toggleAIPlayer() {
             tts.speak(_turboMode ? 'Turbo AI active. Going as fast as I can.' : 'AI player activated. Analyzing the screen now.');
             scheduleAILoop();   // routes to turbo loop if turbo is on
             if (_turboMode && _turboCfg.live) startLiveLoop();
-            aiThinkAndAct();
+            updateDebugHUD();
+            // Mash through the title/demo/file-select into gameplay first, then think.
+            runBootOpener().then(() => { if (aiPlayerActive) aiThinkAndAct(); });
         } else {
             aiManualState = 'idle';
             aiBtn.textContent = '🧠 Think';
@@ -3122,6 +3391,11 @@ window.sm64MemDebug = (limit = 12) => {
 // 22. BOOT
 // ────────────────────────────────────────────────────────────
 restoreProviderState();
+if (_persistBrainmap) loadBrainmap();   // restore the AI's map across reloads
+const _bmPersistEl = document.getElementById('brainmap-persist-toggle');
+if (_bmPersistEl) _bmPersistEl.checked = _persistBrainmap;
+if (_debugHUD) document.getElementById('debug-btn')?.classList.add('active');
+updateBrainmapViz();
 fetchVisionModels();   // Pollinations vision-model list
 initAuth();
 renderControlsGuide(null);   // show static controls immediately
