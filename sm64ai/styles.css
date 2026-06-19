@@ -251,8 +251,19 @@ body {
 /* ── Instruction panel ──────────────────────────────────── */
 #instruction-panel {
     position: fixed; bottom: 12px; left: 12px;
-    display: flex; gap: 8px; z-index: 10;
+    display: none; gap: 8px; z-index: 10;   /* hidden until Agent-Only mode */
     width: min(420px, calc(100vw - 24px));
+}
+/* The instruction box only works (and only shows) in Agent-Only mode, where the
+   game ignores your keystrokes so you can actually type. */
+#app.agent-only #instruction-panel { display: flex; }
+/* Small "AGENT ONLY" badge so it's obvious manual control is off */
+#app.agent-only #instruction-panel::before {
+    content: "🤖 AGENT-ONLY";
+    position: absolute; top: -20px; left: 2px;
+    font-size: 10px; font-weight: 700; letter-spacing: 0.5px;
+    color: var(--cyan, #4fd1e0);
+    text-shadow: 0 1px 2px rgba(0,0,0,0.6);
 }
 #ai-instruction {
     flex: 1; padding: 9px 13px;
@@ -1069,11 +1080,18 @@ body {
 #auth-credit a { color: var(--cyan); text-decoration: none; }
 #auth-credit a:hover { text-decoration: underline; }
 
-/* Subtle persistent credit to the original project (bottom-left during play) */
-#origin-credit {
+/* Persistent project credits — bottom-RIGHT during normal play */
+#origin-credits {
     position: fixed;
-    bottom: 8px; left: 10px;
+    bottom: 8px; right: 10px;
     z-index: 90;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    pointer-events: auto;
+}
+#improved-credit,
+#origin-credit {
     font-size: 11px;
     color: rgba(255,255,255,0.35);
     text-decoration: none;
@@ -1081,11 +1099,11 @@ body {
     padding: 3px 8px; border-radius: 6px;
     backdrop-filter: blur(4px);
     transition: color 0.15s;
-    pointer-events: auto;
 }
+#improved-credit { color: rgba(120,220,160,0.55); cursor: default; }
 #origin-credit:hover { color: var(--cyan); }
 /* Hidden in streamer mode (the streamer watermark takes over) */
-#app.streamer-mode #origin-credit { display: none; }
+#app.streamer-mode #origin-credits { display: none; }
 
 /* ── AI thought-stream chatlog (top-right, streamer mode) ──── */
 #ai-chatlog {

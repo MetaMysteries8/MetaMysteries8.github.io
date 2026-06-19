@@ -47,6 +47,7 @@
                 <button id="energy-config-btn"   class="hud-icon-btn" title="AI energy bar settings">⚡</button>
                 <button id="turbo-btn"           class="hud-icon-btn" title="Consistent rapid fire / turbo">⚡⚡</button>
                 <button id="preplan-btn"         class="hud-icon-btn" title="Pre-plan mode (AI writes a multi-step script)">🧠</button>
+                <button id="agent-only-btn"      class="hud-icon-btn" title="Agent-Only mode: disable manual control + enable the instruction box">🤖</button>
                 <button id="disconnect-btn"      class="hud-icon-btn danger" title="Disconnect account" style="display:none">🔌</button>
             </div>
 
@@ -255,9 +256,12 @@
             </div>
         </div>
 
-        <!-- Persistent original-project credit -->
-        <a id="origin-credit" href="https://websim.com/@Tenslant/super-mario-64-web" target="_blank" rel="noopener"
-           title="Original SM64 Web project by Tenslant on websim">SM64 Web by Tenslant ↗</a>
+        <!-- Persistent project credits (bottom-right, non-streamer mode) -->
+        <div id="origin-credits">
+            <span id="improved-credit" title="This Pollinations-powered build">SM64AI Improved</span>
+            <a id="origin-credit" href="https://websim.com/@Tenslant/super-mario-64-web" target="_blank" rel="noopener"
+               title="Original SM64 Web project by Tenslant on websim">SM64AI Original ↗</a>
+        </div>
 
         <!-- ── Streamer mode: broadcast overlay + AI vision view ─────── -->
         <div id="streamer-overlay">
@@ -304,6 +308,7 @@
                 <button id="so-memory-btn" class="so-ctrl purple" title="View AI memory & notes">🧠 Memory</button>
                 <button id="so-turbo-btn" class="so-ctrl" title="Consistent rapid fire (AI can't disable it)">⚡ Turbo</button>
                 <button id="so-preplan-btn" class="so-ctrl" title="Pre-plan mode (AI writes a multi-step script)">🧠 Pre-Plan</button>
+                <button id="so-agent-btn" class="so-ctrl" title="Agent-Only mode (no manual control; type to instruct)">🤖 Agent-Only</button>
                 <button id="so-mute-btn"  class="so-ctrl" title="Mute game audio">🔊</button>
             </div>
         </div>
