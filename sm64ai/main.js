@@ -1542,7 +1542,14 @@ let _qTable = {};            // stateKey -> { actionCat: { n, mean } }
 // "model" in your browser. When off, learning lives only for the session. When on,
 // it survives reloads and can be exported/imported to share a trained child.
 let _rlPersist = (() => { try { return localStorage.getItem('sm64_rl_persist') === '1'; } catch { return false; } })();
-function _lsSet(k, v) { if (_rlPersist) { try { localStorage.setItem(k, v); } catch {} } }
+// Debounced persistence: RL Play updates the model a few times a second, so we
+// coalesce writes (≤1 flush / 800ms) instead of stringifying the whole table on
+// every step. Flushed on page hide so nothing is lost.
+const _lsPending = {}; let _lsTimer = null;
+function _lsFlush() { _lsTimer = null; for (const k in _lsPending) { try { localStorage.setItem(k, _lsPending[k]); } catch {} delete _lsPending[k]; } }
+function _lsSet(k, v) { if (!_rlPersist) return; _lsPending[k] = v; if (!_lsTimer) _lsTimer = setTimeout(_lsFlush, 800); }
+window.addEventListener('beforeunload', _lsFlush);
+document.addEventListener('visibilitychange', () => { if (document.hidden) _lsFlush(); });
 let _pendingLearn = null;    // { stateKey, actionCat } awaiting its reward
 let _prevProgressLen = 0;    // to detect a milestone earned by the last action
 let _lastReward = null;          // RL score handed to the previous action (HUD + LLM feedback)
@@ -3363,6 +3370,7 @@ function _startSelectedMode() {
     aiBtn.classList.add('active');
     aiBtn.textContent = '⏹ Stop';
     if (_playMode === 'rl') {
+        if (!_adaptiveBrain) setAdaptiveBrain(true);   // RL Play IS the learner — it must be on to learn
         updateAIStatus('🧒 RL Player — the child plays on its own (no LLM: free, fast, reactive)');
         tts.speak('R L player active. The child is playing on its own.');
         _showRatingWidget(true);                 // rate its run any time
