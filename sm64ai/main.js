@@ -944,6 +944,28 @@ function buildProviderPanel() {
     elderChk.addEventListener('change', () => setElderLearn(elderChk.checked));
     elderRow.appendChild(elderChk); panel.appendChild(elderRow);
 
+    // Persistent model (experimental) — save the trained RL across reloads.
+    const persRow = document.createElement('label');
+    persRow.className = 'provider-row'; persRow.style.cursor = 'pointer';
+    persRow.innerHTML = `<span class="provider-label">💾 Persistent RL model (experimental)<br><small>Off: learns only this session. On: saves the trained model in your browser across reloads — it's a real model, so you can export/share it</small></span>`;
+    const persChk = document.createElement('input');
+    persChk.type = 'checkbox'; persChk.checked = _rlPersist;
+    persChk.addEventListener('change', () => setRlPersist(persChk.checked));
+    persRow.appendChild(persChk); panel.appendChild(persRow);
+
+    // Export / import the trained model
+    const ioRow = document.createElement('div'); ioRow.className = 'provider-row'; ioRow.style.gap = '8px';
+    const expBtn = document.createElement('button');
+    expBtn.className = 'provider-save-btn'; expBtn.style.flex = '1'; expBtn.textContent = '⬇ Export model';
+    expBtn.addEventListener('click', exportRlModel);
+    const impBtn = document.createElement('button');
+    impBtn.className = 'provider-save-btn'; impBtn.style.flex = '1'; impBtn.textContent = '⬆ Import model';
+    const impFile = document.createElement('input'); impFile.type = 'file'; impFile.accept = 'application/json'; impFile.style.display = 'none';
+    impFile.addEventListener('change', (e) => { if (e.target.files[0]) importRlModel(e.target.files[0]); });
+    impBtn.addEventListener('click', () => impFile.click());
+    ioRow.appendChild(expBtn); ioRow.appendChild(impBtn); ioRow.appendChild(impFile);
+    panel.appendChild(ioRow);
+
     const clearQ = document.createElement('button');
     clearQ.className = 'provider-save-btn'; clearQ.style.background = '#3a2030';
     clearQ.textContent = '🧹 Reset what it has learned';
@@ -1516,10 +1538,34 @@ function clearBrainmap() {
 let _adaptiveBrain = (() => { try { const v = localStorage.getItem('sm64_adaptive'); return v == null ? true : v === '1'; } catch { return true; } })();
 let _brainBias     = (() => { try { return localStorage.getItem('sm64_brain_bias') || 'improve'; } catch { return 'improve'; } })();
 let _qTable = {};            // stateKey -> { actionCat: { n, mean } }
+// PERSISTENCE (experimental, OFF by default): a persisted Q-table is a real saved
+// "model" in your browser. When off, learning lives only for the session. When on,
+// it survives reloads and can be exported/imported to share a trained child.
+let _rlPersist = (() => { try { return localStorage.getItem('sm64_rl_persist') === '1'; } catch { return false; } })();
+function _lsSet(k, v) { if (_rlPersist) { try { localStorage.setItem(k, v); } catch {} } }
 let _pendingLearn = null;    // { stateKey, actionCat } awaiting its reward
 let _prevProgressLen = 0;    // to detect a milestone earned by the last action
 let _lastReward = null;          // RL score handed to the previous action (HUD + LLM feedback)
 let _lastBrainActionCat = null;  // previous turn's action category (repeat-failure detection)
+let _eligTrace = [];             // recent (stateKey, cat) for multi-step credit (chains)
+let _lastOpenSide = null;        // 'L' | 'C' | 'R' — depth read of where the path is open
+// BEHAVIORAL CLONING — what YOU tend to do per state, so the RL can imitate your play.
+let _humanPolicy = (() => { try { return JSON.parse(localStorage.getItem('sm64_human_policy')) || {}; } catch { return {}; } })();
+function _saveHumanPolicy() { _lsSet('sm64_human_policy', JSON.stringify(_humanPolicy)); }
+function _humanPolicyAdd(stateKey, cat) {
+    const s = _humanPolicy[stateKey] || (_humanPolicy[stateKey] = {});
+    s[cat] = (s[cat] || 0) + 1; _saveHumanPolicy();
+}
+function _humanPref(stateKey, cat) {
+    let s = _humanPolicy[stateKey];
+    if (!s) {   // generalize across regions by the stuck|vis context
+        const suffix = stateKey.slice(stateKey.indexOf('|')); const agg = {};
+        for (const [k, v] of Object.entries(_humanPolicy)) if (k.endsWith(suffix)) for (const [a, n] of Object.entries(v)) agg[a] = (agg[a] || 0) + n;
+        s = agg;
+    }
+    const tot = Object.values(s).reduce((a, b) => a + b, 0);
+    return tot ? (s[cat] || 0) / tot : 0;
+}
 
 function _brainState() {
     const region = /in-level/.test(_region) ? 'level' : (_region || 'unknown');
@@ -1543,7 +1589,15 @@ function _categorizeCodes(codes) {
     if (has('Space')) return 'crouch';
     return null;
 }
+// Multi-step COMBOS the RL can learn to deliberately chain (it discovered
+// ground_pound by accident — now it's a first-class action it can choose).
+const _RL_COMBOS = ['run_jump', 'long_jump', 'ground_pound', 'wall_kick', 'triple_jump', 'dive', 'backflip'];
+const _RL_PRIMS  = ['forward', 'backward', 'turn', 'jump-forward', 'jump', 'action', 'crouch', 'wait'];
+const _RL_ACTIONS = [..._RL_PRIMS, ..._RL_COMBOS];
 function _actionCat(actions) {
+    // A combo macro is its OWN category, so the RL/LLM learns the whole chain as a unit.
+    const mname = _macroName((actions || [])[0]);
+    if (mname && _RL_COMBOS.includes(mname)) return mname;
     const g = _expandGroups(actions || [])[0];
     let keys = Array.isArray(g) ? g : (g && (g.keys || g.actions)) || (typeof g === 'string' ? [g] : []);
     keys = Array.isArray(keys) ? keys : [keys];
@@ -1555,7 +1609,7 @@ function _qUpdate(stateKey, actionCat, reward) {
     const s = _qTable[stateKey] || (_qTable[stateKey] = {});
     const a = s[actionCat] || (s[actionCat] = { n: 0, mean: 0 });
     a.n++; a.mean += (reward - a.mean) / a.n;
-    try { localStorage.setItem('sm64_qtable', JSON.stringify(_qTable)); } catch {}
+    _lsSet('sm64_qtable', JSON.stringify(_qTable));
 }
 // Reward (or PUNISH) the PREVIOUS action using the outcome we can now measure.
 // This is the core of the RL loop: did the last move help, do nothing, or hurt?
@@ -1578,6 +1632,19 @@ function _brainLearn() {
     if (_progressLog.length > _prevProgressLen) r += 0.9;           // a milestone = the jackpot
     r = Math.max(-1.2, Math.min(1.5, r));
     _qUpdate(p.stateKey, p.actionCat, r);
+    // ELIGIBILITY TRACE — credit the few PRIOR actions with a decayed share of a
+    // SIGNIFICANT outcome, so the RL learns multi-step CHAINS (the actions that set
+    // up a good result, e.g. jump→crouch, gain value too). Only for big outcomes so
+    // routine little rewards don't smear.
+    if (Math.abs(r) >= 0.3) {
+        let decay = 0.5;
+        for (let i = _eligTrace.length - 1; i >= 0 && i >= _eligTrace.length - 3; i--) {
+            _qUpdate(_eligTrace[i].stateKey, _eligTrace[i].cat, r * decay);
+            decay *= 0.5;
+        }
+    }
+    _eligTrace.push({ stateKey: p.stateKey, cat: p.actionCat });
+    while (_eligTrace.length > 4) _eligTrace.shift();
     _lastReward = r;
     _lastBrainActionCat = p.actionCat;
     // The child grows up by proving itself. When IT took the step, its result
@@ -1626,19 +1693,64 @@ function setBrainBias(b) {
     _brainBias = (b === 'chaos') ? 'chaos' : 'improve';
     try { localStorage.setItem('sm64_brain_bias', _brainBias); } catch {}
 }
-function loadQTable() { try { _qTable = JSON.parse(localStorage.getItem('sm64_qtable')) || {}; } catch { _qTable = {}; } }
+// On boot, load the saved model ONLY if persistence is enabled; otherwise start
+// fresh (session-only learning) and don't let stale storage leak in.
+function loadQTable() {
+    if (!_rlPersist) {   // session-only: start fresh, ignore any stale storage
+        _qTable = {}; _humanPolicy = {}; _childTrust = 0.15;
+        _trainStats = { episodes: 0, turns: 0, overrides: 0, overrideGood: 0, overrideBad: 0, taught: 0, graded: 0, rated: 0, bestRegionRank: 0 };
+        return;
+    }
+    try { _qTable = JSON.parse(localStorage.getItem('sm64_qtable')) || {}; } catch { _qTable = {}; }
+    try { _humanPolicy = JSON.parse(localStorage.getItem('sm64_human_policy')) || {}; } catch { _humanPolicy = {}; }
+}
 function clearQTable() {
-    _qTable = {}; try { localStorage.removeItem('sm64_qtable'); } catch {}
+    _qTable = {}; _humanPolicy = {}; _eligTrace = [];
+    ['sm64_qtable', 'sm64_human_policy'].forEach(k => { try { localStorage.removeItem(k); } catch {} });
     _trainStats = { episodes: 0, turns: 0, overrides: 0, overrideGood: 0, overrideBad: 0, taught: 0, graded: 0, rated: 0, bestRegionRank: 0 }; _saveTrainStats();
     if (typeof _setChildTrust === 'function') _setChildTrust(0.15);   // back to a fresh, untrusted child
 }
+function setRlPersist(on) {
+    _rlPersist = !!on;
+    try { localStorage.setItem('sm64_rl_persist', _rlPersist ? '1' : '0'); } catch {}
+    if (_rlPersist) {   // turning it ON: snapshot the current in-memory model so it survives reloads
+        _lsSet('sm64_qtable', JSON.stringify(_qTable));
+        _lsSet('sm64_human_policy', JSON.stringify(_humanPolicy));
+        _lsSet('sm64_trainstats', JSON.stringify(_trainStats));
+        _lsSet('sm64_child_trust', String(_childTrust));
+    } else {            // OFF: drop the stored model so it doesn't linger
+        ['sm64_qtable', 'sm64_human_policy', 'sm64_trainstats', 'sm64_child_trust'].forEach(k => { try { localStorage.removeItem(k); } catch {} });
+    }
+}
+// Export the trained "model" to a JSON file others can import.
+function exportRlModel() {
+    const blob = new Blob([JSON.stringify({ v: 1, qTable: _qTable, humanPolicy: _humanPolicy, trust: _childTrust, stats: _trainStats }, null, 0)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = `sm64-rl-model-${Date.now()}.json`;
+    a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+function importRlModel(file) {
+    const r = new FileReader();
+    r.onload = () => {
+        try {
+            const m = JSON.parse(r.result);
+            _qTable = m.qTable || {}; _humanPolicy = m.humanPolicy || {};
+            if (Number.isFinite(m.trust)) _childTrust = m.trust;
+            if (m.stats) _trainStats = Object.assign(_trainStats, m.stats);
+            if (_rlPersist) { _lsSet('sm64_qtable', JSON.stringify(_qTable)); _lsSet('sm64_human_policy', JSON.stringify(_humanPolicy)); }
+            updateAIStatus(`📥 Imported model — ${Object.keys(_qTable).length} states`); updateDebugHUD();
+        } catch (e) { updateAIStatus('⚠ Bad model file'); }
+    };
+    r.readAsText(file);
+}
 window.sm64Brain = (on) => setAdaptiveBrain(on);
+window.sm64Export = exportRlModel;
 
 // ── SELF-TRAINING STATS — the child (RL) growing up across sessions ──────
 // Cumulative across reloads (the whole point: it accumulates experience).
 let _trainStats = (() => { try { return JSON.parse(localStorage.getItem('sm64_trainstats')) || {}; } catch { return {}; } })();
 _trainStats.episodes ??= 0; _trainStats.turns ??= 0; _trainStats.overrides ??= 0; _trainStats.bestRegionRank ??= 0;
-function _saveTrainStats() { try { localStorage.setItem('sm64_trainstats', JSON.stringify(_trainStats)); } catch {} }
+function _saveTrainStats() { _lsSet('sm64_trainstats', JSON.stringify(_trainStats)); }
 const _REGION_RANK = { unknown: 0, title: 0, demo: 0, 'outside-castle': 1, 'castle-foyer': 2 };
 function _regionRank(r) { return /in-level/.test(r || '') ? 3 : (_REGION_RANK[r] ?? 0); }
 
@@ -1657,7 +1769,7 @@ window.sm64BrainAssist = (on) => setBrainAssist(on);
 // sets it via child_trust, and it auto-drifts with the child's measured results.
 // Trust is the dial that decides how OFTEN the child gets to take the controller.
 let _childTrust = (() => { try { const v = parseFloat(localStorage.getItem('sm64_child_trust')); return Number.isFinite(v) ? v : 0.15; } catch { return 0.15; } })();
-function _saveChildTrust() { try { localStorage.setItem('sm64_child_trust', String(_childTrust)); } catch {} }
+function _saveChildTrust() { _lsSet('sm64_child_trust', String(_childTrust)); }
 function _setChildTrust(t) { _childTrust = Math.max(0, Math.min(1, t)); _saveChildTrust(); }
 window.sm64Trust = (t) => { if (t != null) _setChildTrust(t > 1 ? t / 100 : t); return _childTrust; };
 
@@ -1703,6 +1815,7 @@ function startElderWatch() {
                     _lastTaughtCat = cat;
                 }
             }
+            _humanPolicyAdd(_brainState(), cat);   // behavioral cloning: learn what YOU do here
             // Accumulate this move into the current grading window.
             _gradeCats.push(cat);
             _gradeInputs = _inputsToText([...playerInputs]);
@@ -1769,20 +1882,33 @@ function _aggregateBySuffix(suffix) {
     return agg;
 }
 function _rlPickAction(stateKey) {
-    const ALL = ['forward', 'backward', 'turn', 'jump-forward', 'jump', 'action', 'crouch', 'wait'];
     let s = _qTable[stateKey];
     if (!s || Object.keys(s).length < 2) {
         const agg = _aggregateBySuffix(stateKey.slice(stateKey.indexOf('|')));
         if (Object.keys(agg).length) s = agg;
     }
-    const eps = 0.25;   // explore a quarter of the time so it keeps discovering
-    if (!s || Math.random() < eps) {
-        const tried = s ? Object.keys(s) : [];
-        const untried = ALL.filter(a => !tried.includes(a));
-        const pool = untried.length ? untried : ALL;
+    s = s || {};
+    const total = Object.values(s).reduce((a, b) => a + (b.n || 0), 0) || 1;
+    // Exploration shrinks as the child grows up (more trusted → exploit more).
+    const eps = Math.max(0.06, 0.28 - _childTrust * 0.15);
+    if (Math.random() < eps) {
+        // Bias random exploration toward what YOU demonstrated here, else something untried.
+        const human = _humanPolicy[stateKey] ? Object.keys(_humanPolicy[stateKey]) : [];
+        const untried = _RL_ACTIONS.filter(a => !(s[a] && s[a].n));
+        const pool = (human.length && Math.random() < 0.5) ? human
+                   : (untried.length ? untried : _RL_ACTIONS);
         return pool[Math.floor(Math.random() * pool.length)];
     }
-    return Object.entries(s).sort((a, b) => b[1].mean - a[1].mean)[0][0];
+    // UCB value + behavioral-cloning prior, across ALL actions (primitives + combos).
+    let best = 'forward', bestSc = -1e9;
+    for (const a of _RL_ACTIONS) {
+        const v = s[a]; const mean = v ? v.mean : 0; const n = v ? v.n : 0;
+        const ucb  = 0.5 * Math.sqrt(Math.log(total + 1) / (n + 1));   // try under-sampled actions
+        const imit = 0.6 * _humanPref(stateKey, a);                    // imitate how YOU play here
+        const sc = mean + ucb + imit + (n === 0 ? 0.05 : 0);
+        if (sc > bestSc) { bestSc = sc; best = a; }
+    }
+    return best;
 }
 async function rlThinkAndAct() {
     if (!aiPlayerActive || _busyCycle || _showoffRunning) return;
@@ -1794,6 +1920,7 @@ async function rlThinkAndAct() {
             const vm = await _frameDiffScore(_prevScreenshot, ss);
             if (vm != null) { _lastVisualPct = Math.round(vm * 100); if (vm < 0.05) _stuckCount++; else _stuckCount = 0; }
         }
+        await _depthAnalyze(ss);               // refresh _lastOpenSide so it steers toward openings
         _brainLearn();                         // reward the previous RL move
         const stateKey = _brainState();
         const cat = _rlPickAction(stateKey);
@@ -1941,13 +2068,18 @@ function _catToAction(cat, fast = false) {
     switch (cat) {
         case 'forward':      return [{ keys: ['ArrowUp'], hold_ms: fwd }];
         case 'backward':     return [{ keys: ['ArrowDown'], hold_ms: back }];
-        case 'turn':         { _turnFlip = !_turnFlip; return [{ keys: [_turnFlip ? 'ArrowLeft' : 'ArrowRight'], hold_ms: turn }]; }
+        case 'turn': {
+            // Turn toward the side depth says is OPEN; else alternate so it can't spin.
+            const k = _lastOpenSide === 'L' ? 'ArrowLeft' : _lastOpenSide === 'R' ? 'ArrowRight'
+                    : ((_turnFlip = !_turnFlip), _turnFlip ? 'ArrowLeft' : 'ArrowRight');
+            return [{ keys: [k], hold_ms: turn }];
+        }
         case 'jump-forward': return fast ? [{ keys: ['ArrowUp', 'jump'], hold_ms: 300 }] : ['run_jump'];
         case 'jump':         return [{ keys: ['jump'], hold_ms: 220 }];
         case 'action':       return [{ keys: ['action'], hold_ms: 220 }];
         case 'crouch':       return [{ keys: ['crouch'], hold_ms: 260 }];
         case 'wait':         return [{ keys: ['_wait'], hold_ms: fast ? 350 : 700 }];
-        default:             return null;
+        default:             return _MACROS[cat] ? [cat] : null;   // a learned COMBO runs as one chain
     }
 }
 // Decide whether the brain should take over this step. Returns {cat, from, actions} or null.
@@ -2000,7 +2132,9 @@ function _brainOverride(response, stateKey) {
 // cheap hint, deliberately conservative — only speaks when a side is clearly
 // different. Honest about being a heuristic.
 let _depthCanvas = null, _depthCtx = null;
-async function _depthRead(url) {
+// Returns { best, worst, flat } column indices (0=L,1=C,2=R) or null. Also caches
+// the open side into _lastOpenSide so the RL can steer toward it.
+async function _depthAnalyze(url) {
     try {
         const img = await _loadImage(url);
         const w = 60, h = 45;
@@ -2014,19 +2148,21 @@ async function _depthRead(url) {
         for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
             const c = Math.min(2, Math.floor(x / third)), g = gray(x, y);
             cols[c].b += g; cols[c].n++;
-            if (x > 0) cols[c].e += Math.abs(g - gray(x - 1, y));   // horizontal edge energy
+            if (x > 0) cols[c].e += Math.abs(g - gray(x - 1, y));
         }
         const score = cols.map(c => ({ bright: c.b / c.n, edge: c.e / c.n }));
-        // "Openness": darker + busier (more edges/detail receding) = likelier a path;
-        // very bright + flat = likelier a near wall.
         const open = score.map(s => (s.edge * 1.2) - (s.bright / 255) * 40);
-        const labels = ['LEFT', 'CENTER', 'RIGHT'];
-        const best = open.indexOf(Math.max(...open));
-        const worst = open.indexOf(Math.min(...open));
-        if (best === worst) return '';
-        const flat = score[worst].edge < 6 && score[worst].bright > 150;
-        return `🔍 DEPTH READ (rough heuristic): the ${labels[best]} looks most open/passable; the ${labels[worst]} looks ${flat ? 'like a near WALL' : 'more blocked'}. Trust your eyes first, use this as a tiebreaker.`;
-    } catch { return ''; }
+        const best = open.indexOf(Math.max(...open)), worst = open.indexOf(Math.min(...open));
+        _lastOpenSide = best === worst ? null : ['L', 'C', 'R'][best];
+        if (best === worst) return null;
+        return { best, worst, flat: score[worst].edge < 6 && score[worst].bright > 150 };
+    } catch { return null; }
+}
+async function _depthRead(url) {
+    const a = await _depthAnalyze(url);
+    if (!a) return '';
+    const labels = ['LEFT', 'CENTER', 'RIGHT'];
+    return `🔍 DEPTH READ (rough heuristic): the ${labels[a.best]} looks most open/passable; the ${labels[a.worst]} looks ${a.flat ? 'like a near WALL' : 'more blocked'}. Trust your eyes first, use this as a tiebreaker.`;
 }
 
 
@@ -3198,6 +3334,7 @@ async function toggleAIPlayer() {
         _pendingLearn   = null;     // fresh RL episode — no stale reward/feedback
         _lastReward     = null;
         _lastBrainActionCat = null;
+        _eligTrace      = [];
         if (_adaptiveBrain) { _trainStats.episodes++; _saveTrainStats(); }
         startElderWatch();          // child watches when YOU (the elder) take over
         _resetBrainmap();
