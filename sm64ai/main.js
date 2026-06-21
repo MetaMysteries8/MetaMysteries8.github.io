@@ -944,6 +944,24 @@ function buildProviderPanel() {
     elderChk.addEventListener('change', () => setElderLearn(elderChk.checked));
     elderRow.appendChild(elderChk); panel.appendChild(elderRow);
 
+    // AI grading (off by default) — in Player-Teach, also have the LLM grade you.
+    const gradeRow = document.createElement('label');
+    gradeRow.className = 'provider-row'; gradeRow.style.cursor = 'pointer';
+    gradeRow.innerHTML = `<span class="provider-label">👨‍🏫 AI grades my play (Player-Teach)<br><small>Off: it just watches & imitates you. On: the LLM also grades each move (costs calls; can be noisy)</small></span>`;
+    const gradeChk = document.createElement('input');
+    gradeChk.type = 'checkbox'; gradeChk.checked = _aiGrading;
+    gradeChk.addEventListener('change', () => setAiGrading(gradeChk.checked));
+    gradeRow.appendChild(gradeChk); panel.appendChild(gradeRow);
+
+    // Real-time RL control — continuous raw controller vs timed presses.
+    const rtRow = document.createElement('label');
+    rtRow.className = 'provider-row'; rtRow.style.cursor = 'pointer';
+    rtRow.innerHTML = `<span class="provider-label">🎮 Real-time RL control<br><small>RL Play holds keys continuously like a real pad (can run + jump/dive together) instead of one timed press at a time</small></span>`;
+    const rtChk = document.createElement('input');
+    rtChk.type = 'checkbox'; rtChk.checked = _rlRealtime;
+    rtChk.addEventListener('change', () => setRlRealtime(rtChk.checked));
+    rtRow.appendChild(rtChk); panel.appendChild(rtRow);
+
     // Persistent model (experimental) — save the trained RL across reloads.
     const persRow = document.createElement('label');
     persRow.className = 'provider-row'; persRow.style.cursor = 'pointer';
@@ -1537,6 +1555,14 @@ function clearBrainmap() {
 // bias leans into what fails (for fun streams). Off by default — experimental.
 let _adaptiveBrain = (() => { try { const v = localStorage.getItem('sm64_adaptive'); return v == null ? true : v === '1'; } catch { return true; } })();
 let _brainBias     = (() => { try { return localStorage.getItem('sm64_brain_bias') || 'improve'; } catch { return 'improve'; } })();
+// AI grading is OFF by default: in Player-Teach the parent just WATCHES your play
+// (heuristic + imitation). Turn it on to ALSO have the LLM grade your moves.
+let _aiGrading = (() => { try { return localStorage.getItem('sm64_ai_grading') === '1'; } catch { return false; } })();
+function setAiGrading(on) { _aiGrading = !!on; try { localStorage.setItem('sm64_ai_grading', _aiGrading ? '1' : '0'); } catch {} }
+// Real-time RL control: hold keys continuously across ticks like a real controller,
+// instead of one-shot timed presses. ON by default for RL Play.
+let _rlRealtime = (() => { try { const v = localStorage.getItem('sm64_rl_realtime'); return v == null ? true : v === '1'; } catch { return true; } })();
+function setRlRealtime(on) { _rlRealtime = !!on; try { localStorage.setItem('sm64_rl_realtime', _rlRealtime ? '1' : '0'); } catch {} }
 let _qTable = {};            // stateKey -> { actionCat: { n, mean } }
 // PERSISTENCE (experimental, OFF by default): a persisted Q-table is a real saved
 // "model" in your browser. When off, learning lives only for the session. When on,
@@ -1588,6 +1614,8 @@ function _categorizeCodes(codes) {
     const c = codes.map(x => alias[x] || x);
     const has = k => c.includes(k);
     if (has('ArrowUp') && has('KeyX')) return 'jump-forward';
+    if (has('ArrowUp') && has('ArrowLeft'))  return 'forward-left';
+    if (has('ArrowUp') && has('ArrowRight')) return 'forward-right';
     if (has('ArrowDown')) return 'backward';
     if (has('ArrowUp')) return 'forward';
     if (has('ArrowLeft') || has('ArrowRight')) return 'turn';
@@ -1599,7 +1627,7 @@ function _categorizeCodes(codes) {
 // Multi-step COMBOS the RL can learn to deliberately chain (it discovered
 // ground_pound by accident — now it's a first-class action it can choose).
 const _RL_COMBOS = ['run_jump', 'long_jump', 'ground_pound', 'wall_kick', 'triple_jump', 'dive', 'backflip'];
-const _RL_PRIMS  = ['forward', 'backward', 'turn', 'jump-forward', 'jump', 'action', 'crouch', 'wait'];
+const _RL_PRIMS  = ['forward', 'backward', 'turn', 'forward-left', 'forward-right', 'jump-forward', 'jump', 'action', 'crouch', 'wait'];
 const _RL_ACTIONS = [..._RL_PRIMS, ..._RL_COMBOS];
 function _actionCat(actions) {
     // A combo macro is its OWN category, so the RL/LLM learns the whole chain as a unit.
@@ -1830,9 +1858,9 @@ function startElderWatch() {
         }
         _elderPrevFrame = ss;
 
-        // On cadence, if you've made ANY moves this window, the parent LLM grades the
-        // dominant move (anchor → now). Costs one call; never silent on failure.
-        if (!_gradeBusy && _gradeAnchor && _gradeAnchor !== ss && _gradeCats.length && Date.now() - _lastGradeTime > 3500) {
+        // OPT-IN LLM grading (off by default — it just watches otherwise). On cadence,
+        // if you've moved this window, the parent grades the dominant move (anchor → now).
+        if (_aiGrading && !_gradeBusy && _gradeAnchor && _gradeAnchor !== ss && _gradeCats.length && Date.now() - _lastGradeTime > 3500) {
             _lastGradeTime = Date.now();
             const domCat = _modeOf(_gradeCats);
             const anchor = _gradeAnchor, after = ss, inputs = _gradeInputs || domCat;
@@ -1941,12 +1969,82 @@ async function rlThinkAndAct() {
 }
 function scheduleRLLoop() {
     if (aiInterval) { clearInterval(aiInterval); aiInterval = null; }
-    // Fast cadence — the _busyCycle guard paces it to the action length, so the
-    // child reacts every few hundred ms (no API cost). This is the foundation for
-    // true frame-by-frame play: RL is local, so it can scale far past the LLM.
+    if (_rlRealtime) { startRealtimeRL(); return; }   // continuous raw-controller mode
+    // Discrete fallback — fast cadence, _busyCycle paces it to the action length.
     const cycle = Math.max(120, 300 / gameSpeed);
     aiInterval = setInterval(() => { if (aiPlayerActive && !_busyCycle && !_showoffRunning) rlThinkAndAct(); }, cycle);
 }
+
+// ── REAL-TIME RL CONTROL — raw controller, not timed one-shot presses ────────
+// The RL HOLDS keys across ticks (true keydown held, keyup only when the choice
+// changes), so Mario runs continuously and the model can layer a jump/dive on top
+// of held movement — exactly like a human on the pad. Combos (ground_pound,
+// wall-kick…) emerge naturally from the per-tick stream + eligibility credit.
+let _rtLoop = null, _rtPrevFrame = null, _rlHeld = new Set();
+function _rlKeyEv(type, code) {
+    const o = { code, key: code, bubbles: true, cancelable: true };
+    canvas.dispatchEvent(new KeyboardEvent(type, o));
+    document.dispatchEvent(new KeyboardEvent(type, o));
+}
+function _rlSetHeld(desiredCodes) {
+    const desired = new Set(desiredCodes);
+    for (const code of _rlHeld) if (!desired.has(code)) { _rlKeyEv('keyup', code); _rlHeld.delete(code); }
+    for (const code of desired) if (!_rlHeld.has(code)) { _rlKeyEv('keydown', code); _rlHeld.add(code); }
+}
+function _rlReleaseAll() { for (const code of _rlHeld) _rlKeyEv('keyup', code); _rlHeld.clear(); }
+// Map an action category to the SET of key codes to hold this tick.
+function _catToHeld(cat) {
+    const turnKey = _lastOpenSide === 'L' ? 'ArrowLeft' : _lastOpenSide === 'R' ? 'ArrowRight'
+                  : ((_turnFlip = !_turnFlip), _turnFlip ? 'ArrowLeft' : 'ArrowRight');
+    switch (cat) {
+        case 'forward':       return ['ArrowUp'];
+        case 'backward':      return ['ArrowDown'];
+        case 'turn':          return [turnKey];
+        case 'forward-left':  return ['ArrowUp', 'ArrowLeft'];
+        case 'forward-right': return ['ArrowUp', 'ArrowRight'];
+        case 'jump-forward':  return ['ArrowUp', 'KeyX'];
+        case 'jump':          return ['KeyX'];
+        case 'action':        return ['ArrowUp', 'KeyC'];   // dive/grab needs forward motion
+        case 'crouch':        return ['Space'];
+        case 'wait':          return [];
+        case 'run_jump':      return ['ArrowUp', 'KeyX'];
+        case 'long_jump':     return ['ArrowUp', 'Space', 'KeyX'];
+        case 'ground_pound':  return ['Space'];             // Z in air = pound
+        case 'wall_kick':     return ['ArrowUp', 'KeyX'];
+        case 'triple_jump':   return ['ArrowUp', 'KeyX'];
+        case 'dive':          return ['ArrowUp', 'KeyC'];
+        case 'backflip':      return ['ArrowDown', 'KeyX'];
+        default:              return ['ArrowUp'];
+    }
+}
+function startRealtimeRL() {
+    if (_rtLoop) return;
+    _rlHeld = new Set(); _rtPrevFrame = null;
+    let busy = false;
+    _rtLoop = setInterval(async () => {
+        if (!aiPlayerActive || _playMode !== 'rl' || _showoffRunning || busy) return;
+        busy = true;
+        try {
+            const ss = await captureScreen(aiStream).catch(() => null);
+            if (!ss) return;
+            if (_rtPrevFrame) {
+                const vm = await _frameDiffScore(_rtPrevFrame, ss);
+                if (vm != null) { _lastVisualPct = Math.round(vm * 100); if (vm < 0.04) _stuckCount++; else _stuckCount = 0; }
+            }
+            await _depthAnalyze(ss);
+            _brainLearn();                          // reward the action held last tick
+            const stateKey = _brainState();
+            const cat = _rlPickAction(stateKey);
+            _pendingLearn = { stateKey, actionCat: cat, wasOverride: false };
+            _pushShowoff(stateKey, cat);
+            _rtPrevFrame = ss;
+            _rlSetHeld(_catToHeld(cat));            // HOLD this combo (continuous control)
+            updateAIStatus(`🧒 RL (real-time): holding ${cat}  ·  ${stateKey}`);
+            updateDebugHUD();
+        } finally { busy = false; }
+    }, Math.max(150, 230 / gameSpeed));
+}
+function stopRealtimeRL() { if (_rtLoop) { clearInterval(_rtLoop); _rtLoop = null; } _rlReleaseAll(); _rtPrevFrame = null; }
 
 // ── RL SHOW-OFF — the child takes temporary full control to demonstrate, then
 // YOU manually rate that run (👍/👎). This is the ONLY place manual rating
@@ -1956,12 +2054,15 @@ let _showoffBuffer = [];   // [{stateKey, cat}] from the current show-off
 function _pushShowoff(stateKey, cat) { _showoffBuffer.push({ stateKey, cat }); while (_showoffBuffer.length > 14) _showoffBuffer.shift(); }
 function _rateShowoff(reward) {
     const r = Math.max(-1, Math.min(1.5, reward));
-    for (const { stateKey, cat } of _showoffBuffer) _qUpdate(stateKey, cat, r);
+    // LIVE rating: the most recent moves get the strongest credit (you're reacting to
+    // what JUST happened), decaying back through the last few.
+    const buf = _showoffBuffer; let w = 1, applied = 0;
+    for (let i = buf.length - 1; i >= 0 && i >= buf.length - 6; i--) { _qUpdate(buf[i].stateKey, buf[i].cat, r * w); w *= 0.7; applied++; }
     _trainStats.rated = (_trainStats.rated || 0) + 1; _saveTrainStats();
     _setChildTrust(_childTrust + (r >= 0.25 ? 0.05 : r <= -0.25 ? -0.06 : 0));
     if (typeof pushChatlog === 'function')
-        pushChatlog(`<span class="cl-cmd">${r >= 0 ? '👍' : '👎'} you rated the RL's run ${r.toFixed(1)} — applied to ${_showoffBuffer.length} move(s)</span>`, 'cl-tool');
-    _showoffBuffer = [];
+        pushChatlog(`<span class="cl-cmd">${r >= 0 ? '👍' : '👎'} ${_playMode === 'rl' ? 'live rating' : 'rated run'} ${r.toFixed(1)} — credited last ${applied} move(s)</span>`, 'cl-tool');
+    _showoffBuffer = [];   // fresh window after each rating
     updateDebugHUD();
 }
 async function rlShowoff(steps = 5) {
@@ -1993,7 +2094,7 @@ function _ensureRatingWidget() {
     if (!w) {
         w = document.createElement('div'); w.id = 'rl-rating';
         w.style.cssText = 'position:fixed;bottom:84px;left:50%;transform:translateX(-50%);z-index:9999;display:none;gap:8px;align-items:center;background:#161b26;border:1px solid #2a3344;padding:8px 12px;border-radius:24px;box-shadow:0 4px 16px rgba(0,0,0,.5);font:600 13px system-ui;color:#e6e9ef';
-        w.innerHTML = `<span>Rate the RL's run:</span>
+        w.innerHTML = `<span id="rl-rate-label">Rate the RL's run:</span>
             <button id="rl-rate-up"   style="cursor:pointer;border:0;background:#19c37d;color:#042;border-radius:14px;padding:5px 11px;font-weight:700">👍 Good</button>
             <button id="rl-rate-down" style="cursor:pointer;border:0;background:#e3556e;color:#fff;border-radius:14px;padding:5px 11px;font-weight:700">👎 Bad</button>
             <button id="rl-rate-skip" style="cursor:pointer;border:0;background:#333a4a;color:#aab;border-radius:14px;padding:5px 9px">skip</button>`;
@@ -2005,7 +2106,12 @@ function _ensureRatingWidget() {
     return w;
 }
 function _afterRate() { _showRatingWidget(_playMode === 'rl'); if (_playMode === 'player-teach') _showElderBanner(true); }
-function _showRatingWidget(on) { _ensureRatingWidget().style.display = on ? 'flex' : 'none'; }
+function _showRatingWidget(on) {
+    const w = _ensureRatingWidget();
+    const lbl = w.querySelector('#rl-rate-label');
+    if (lbl) lbl.textContent = _playMode === 'rl' ? '🔴 Live feedback — is it doing better/worse?' : "Rate the RL's run:";
+    w.style.display = on ? 'flex' : 'none';
+}
 
 // Player-Teach banner (with a "let RL show off" button), created lazily.
 function _showElderBanner(on) {
@@ -2016,7 +2122,7 @@ function _showElderBanner(on) {
             b.style.cssText = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:9998;background:#15303a;color:#cfe;border:1px solid #4fd1e0;padding:6px 14px;border-radius:20px;font:600 13px system-ui;box-shadow:0 2px 12px rgba(0,0,0,.4)';
             document.body.appendChild(b);
         }
-        b.innerHTML = '🧓 Player-Teach: <b>play the game</b> — the parent grades your moves & the child learns. <button id="elder-showoff" style="margin-left:8px;cursor:pointer;border:0;background:#4fd1e0;color:#042;border-radius:12px;padding:3px 9px;font-weight:700">🎬 Let RL show off</button>';
+        b.innerHTML = '🧓 Player-Teach: <b>play the game</b> — the child watches & learns from you. <button id="elder-showoff" style="margin-left:8px;cursor:pointer;border:0;background:#4fd1e0;color:#042;border-radius:12px;padding:3px 9px;font-weight:700">🎬 Let RL show off</button>';
         b.style.display = 'block';
         const sb = b.querySelector('#elder-showoff'); if (sb) sb.onclick = () => rlShowoff(5);
     } else if (b) { b.style.display = 'none'; }
@@ -2032,10 +2138,16 @@ function _inputsToText(codes) {
 }
 // The parent LLM grades a single move from BEFORE→AFTER frames + the EXACT inputs I
 // pressed. Controls are spelled out so the parent understands what the move did.
-async function _llmGradeMove(before, after, cat, inputStr) {
-    const sys = `You are coaching a learner to play Super Mario 64. CONTROLS so you understand the inputs: ↑/ArrowUp=walk FORWARD, ↓/ArrowDown=walk BACKWARD, ←/→=turn, X=jump (A button), C=dive/punch/grab (B), Z/Space=crouch / ground-pound. You see a BEFORE frame then an AFTER frame; the player just pressed: [${inputStr}] (move type "${cat}"). Judge ONLY whether THAT input was a good play: GOOD = sensible progress (moved toward an objective, didn't ram a wall / fall off / go the wrong way / get stuck); BAD = the opposite. Reply EXACTLY one line: "GRADE: <number -1.0..1.0>, <max 6 word reason>".`;
+async function _llmGradeMove(before, after, cat, inputStr, ctx) {
+    const sys = `You grade ONE move in Super Mario 64 to train a learner. CONTROLS: ↑=FORWARD, ↓=BACKWARD, ←/→=turn, X=jump(A), C=dive/punch/grab(B), Z/Space=crouch/ground-pound.
+${ctx ? 'CONTEXT: ' + ctx + '\n' : ''}You see a BEFORE frame then an AFTER frame. The player pressed [${inputStr}] (type "${cat}").
+Grade the RESULT — compare AFTER to BEFORE — for PROGRESS toward the objective, and be GENEROUS:
+- GOOD (+0.3..+1.0): reached new ground, moved toward a door/painting/star/platform/exit, climbed, gained height, or lined up a needed jump. A jump over a gap or a move that LOOKS risky mid-air is still GOOD if AFTER shows it advanced or is on track. Getting CLOSER to success is always GOOD.
+- BAD (−0.3..−1.0): ONLY for a clear mistake VISIBLE IN AFTER — rammed a wall and stopped, fell into a pit/lava/water by mistake, clearly went backward away from the goal, or is stuck/looping.
+- ~0 if little changed or ambiguous.
+Do NOT punish a move for looking risky/mid-action — judge only the outcome in AFTER. Reply EXACTLY one line: "GRADE: <number -1.0..1.0>, <≤6 word reason>".`;
     const content = [
-        { type: 'text', text: `BEFORE then AFTER. Inputs pressed: [${inputStr}] (type: ${cat}). Grade just this play.` },
+        { type: 'text', text: `BEFORE then AFTER. Pressed [${inputStr}] (${cat}). Grade the PROGRESS in AFTER.` },
         { type: 'image_url', image_url: { url: before } },
         { type: 'image_url', image_url: { url: after } },
     ];
@@ -2048,7 +2160,8 @@ async function _llmGradeMove(before, after, cat, inputStr) {
 }
 async function _gradeHumanMove(before, after, cat, stateKey, inputStr) {
     try {
-        const g = await _llmGradeMove(before, after, cat, inputStr);
+        const ctx = `Mario is in: ${_region}.${_aiGoal ? ' Apparent goal: ' + _aiGoal + '.' : ''}`;
+        const g = await _llmGradeMove(before, after, cat, inputStr, ctx);
         if (g != null) {
             _qUpdate(stateKey, cat, g);
             _trainStats.graded = (_trainStats.graded || 0) + 1; _saveTrainStats();
@@ -2074,6 +2187,8 @@ function _catToAction(cat, fast = false) {
     const fwd = fast ? 520 : 1500, turn = fast ? 240 : 400, back = fast ? 420 : 700;
     switch (cat) {
         case 'forward':      return [{ keys: ['ArrowUp'], hold_ms: fwd }];
+        case 'forward-left': return [{ keys: ['ArrowUp', 'ArrowLeft'], hold_ms: fwd }];
+        case 'forward-right':return [{ keys: ['ArrowUp', 'ArrowRight'], hold_ms: fwd }];
         case 'backward':     return [{ keys: ['ArrowDown'], hold_ms: back }];
         case 'turn': {
             // Turn toward the side depth says is OPEN; else alternate so it can't spin.
@@ -3383,8 +3498,8 @@ function _startSelectedMode() {
         if (_agentOnly) setAgentOnly(false);
         if (!_adaptiveBrain) setAdaptiveBrain(true);
         if (!_elderLearn) setElderLearn(true);
-        updateAIStatus('🧓 Player-Teach — YOU play; the parent grades your moves, the child learns. Click the game!');
-        tts.speak('Player teach mode. You play. I will grade your moves and the child will learn.');
+        updateAIStatus('🧓 Player-Teach — YOU play; the child watches & learns from you. (Enable AI grading in settings to also have the LLM grade you.) Click the game!');
+        tts.speak('Player teach mode. You play. The child will watch and learn from you.');
         _showElderBanner(true);
         updateDebugHUD();
         return;                                  // no LLM play loop — elder watch + grading do the work
@@ -3454,6 +3569,7 @@ function stopAIPlayer() {
     stopTurboLoop();
     stopLiveLoop();
     stopElderWatch();
+    stopRealtimeRL();
     _showoffRunning = false; _showoffBuffer = [];
     _showElderBanner(false); _showRatingWidget(false);
     if (_captureVideo) { _captureVideo.srcObject = null; }
