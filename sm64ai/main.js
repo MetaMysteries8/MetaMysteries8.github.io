@@ -1699,7 +1699,7 @@ let _cheaterEnabled = (() => { try { return localStorage.getItem('sm64_cheater')
 let _recentMoves = [];   // recent action cats — the net's input context
 function updateCheaterUI() {
     const b = document.getElementById('cheater-btn');
-    if (b) { b.classList.toggle('active', _cheaterEnabled); b.title = `Cheater's Model (TAS neural net) — ${_cheaterEnabled ? 'ON' : 'OFF'}. Best with RL Play.`; }
+    if (b) { b.classList.toggle('active', _cheaterEnabled); b.title = `Cheater's Model (TAS neural net) — ${_cheaterEnabled ? 'ON' : 'OFF'}. Click to configure / upload a model.`; }
 }
 function setCheater(on) {
     _cheaterEnabled = !!on;
@@ -1711,11 +1711,71 @@ function setCheater(on) {
     if (typeof updateDebugHUD === 'function') updateDebugHUD();
 }
 window.sm64Cheater = (on) => { setCheater(on == null ? !_cheaterEnabled : on); return _cheaterEnabled; };
+// A model is usable if it has a token vocabulary plus either the neural net or an
+// n-gram fallback — so user-uploaded models from the pretrainer just drop in.
+function _validCheaterModel(m) {
+    return !!(m && Array.isArray(m.tokens) && m.tokens.length &&
+        ((m.mlp && Array.isArray(m.mlp.W1) && Array.isArray(m.mlp.W2) && typeof m.mlp.K === 'number' && typeof m.mlp.hidden === 'number') || m.bigram));
+}
 async function loadCheaterModel() {
+    // Prefer a custom model the user uploaded (persisted), else the built-in one.
+    try {
+        const custom = localStorage.getItem('sm64_cheater_custom');
+        if (custom) { const m = JSON.parse(custom); if (_validCheaterModel(m)) { _cheaterModel = m; _cheatNet = null; _cheatInitNet(); console.log('[SM64] Custom Cheater model loaded from storage.'); return; } }
+    } catch {}
     try {
         const r = await fetch('tas/cheater-model.json', { cache: 'force-cache' });
         if (r.ok) { _cheaterModel = await r.json(); _cheatInitNet(); console.log(`[SM64] Cheater's Model loaded — ${_cheaterModel.mlp ? 'neural net' : 'n-gram'}, trained on ${_cheaterModel.trainedOn?.files} TAS runs.`); }
     } catch {}
+}
+// Swap in a new model object (uploaded or reset). Drops any saved online net since
+// it was fine-tuned on the OLD layout, then rebuilds the net from the new weights.
+function _applyCheaterModel(m) {
+    _cheaterModel = m;
+    try { localStorage.removeItem('sm64_cheat_net'); } catch {}
+    _cheatNet = null; _cheatInitNet();
+    _renderCheaterInfo();
+    if (typeof updateDebugHUD === 'function') updateDebugHUD();
+}
+async function _resetCheaterModel() {
+    try { localStorage.removeItem('sm64_cheater_custom'); localStorage.removeItem('sm64_cheat_net'); } catch {}
+    _cheaterModel = null; _cheatNet = null;
+    await loadCheaterModel();
+    _renderCheaterInfo();
+    updateAIStatus('🃏 Reset to the built-in Cheater model');
+}
+function _renderCheaterInfo() {
+    const el = document.getElementById('cheater-info'); if (!el) return;
+    const m = _cheaterModel; let custom = false; try { custom = !!localStorage.getItem('sm64_cheater_custom'); } catch {}
+    if (!m) { el.textContent = 'No model loaded yet.'; return; }
+    const conf = m.meta && m.meta.confidence != null ? ` · ~${m.meta.confidence}% conf` : '';
+    const arch = m.mlp ? `K=${m.mlp.K}, hidden=${m.mlp.hidden}${m.mlp.phase ? `, phase=${m.mlp.phase}` : ''}` : 'n-gram only';
+    el.innerHTML = `current: <b>${custom ? 'custom (uploaded)' : 'built-in'}</b> · ${(m.trainedOn?.files ?? '?')} TAS runs<br>${arch}${conf}`;
+}
+function openCheaterConfig() {
+    const en = document.getElementById('cheater-enabled-chk'), on = document.getElementById('cheater-online-chk');
+    if (en) en.checked = _cheaterEnabled;
+    if (on) on.checked = _cheaterOnline;
+    _renderCheaterInfo();
+    document.getElementById('cheater-modal')?.classList.add('open');
+    document.getElementById('cheater-backdrop')?.classList.add('open');
+}
+function closeCheaterConfig() {
+    document.getElementById('cheater-modal')?.classList.remove('open');
+    document.getElementById('cheater-backdrop')?.classList.remove('open');
+}
+async function _onCheaterFile(e) {
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    try {
+        const txt = await f.text(); const m = JSON.parse(txt);
+        if (!_validCheaterModel(m)) { updateAIStatus('⚠ That JSON is not a valid Cheater model (need tokens + mlp/bigram)'); e.target.value = ''; return; }
+        try { localStorage.setItem('sm64_cheater_custom', txt); } catch {}
+        _applyCheaterModel(m);
+        if (!_cheaterEnabled) setCheater(true);
+        const en = document.getElementById('cheater-enabled-chk'); if (en) en.checked = true;
+        updateAIStatus(`🃏 Custom model loaded — ${(m.trainedOn?.files ?? '?')} runs${m.mlp ? `, K=${m.mlp.K}/h=${m.mlp.hidden}${m.mlp.phase ? '/phase' : ''}` : ''}`);
+    } catch { updateAIStatus('⚠ Could not read that file as JSON'); }
+    e.target.value = '';
 }
 // PHASE conditioning — how far through the current attempt we are (0=start … 1=end),
 // soft-encoded over the model's phase buckets. Returns [[featIndex,value]…] within
@@ -1925,7 +1985,7 @@ async function pretrainOnTAS(opts = {}) {
         if (acc - lastAcc < 0.003) stall++; else stall = 0;
         lastAcc = acc;
         if (opts.target && acc >= opts.target) break;
-        if (stall >= 2) break;                              // plateaued → it's as confident as it gets
+        if (opts.earlyStop && stall >= 2) break;            // plateaued → only if opted in
     }
     const ms = performance.now() - t0, exPerSec = Math.round(totalEx / (ms / 1000));
     _lsSet('sm64_cheat_net', JSON.stringify(_cheatNet));    // persist the warmed-up net (gated)
@@ -2737,7 +2797,13 @@ function toggleDebugHUD(on) {
 }
 window.sm64Debug = toggleDebugHUD;
 document.getElementById('debug-btn')?.addEventListener('click', () => toggleDebugHUD());
-document.getElementById('cheater-btn')?.addEventListener('click', () => setCheater(!_cheaterEnabled));
+document.getElementById('cheater-btn')?.addEventListener('click', openCheaterConfig);
+document.getElementById('cheater-close-btn')?.addEventListener('click', closeCheaterConfig);
+document.getElementById('cheater-backdrop')?.addEventListener('click', closeCheaterConfig);
+document.getElementById('cheater-enabled-chk')?.addEventListener('change', e => setCheater(e.target.checked));
+document.getElementById('cheater-online-chk')?.addEventListener('change', e => setCheaterOnline(e.target.checked));
+document.getElementById('cheater-file')?.addEventListener('change', _onCheaterFile);
+document.getElementById('cheater-reset-btn')?.addEventListener('click', _resetCheaterModel);
 
 // ── BRAINMAP VISUALIZER (in-UI panel + experimental pop-out window) ──
 function _bmNode(id, label, icon) {

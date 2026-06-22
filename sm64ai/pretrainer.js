@@ -78,6 +78,7 @@ async function train() {
     const hidden = Math.max(4, Math.min(128, +$('hidden').value | 0));
     const epochs = Math.max(1, Math.min(80, +$('epochs').value | 0));
     const lr = Math.max(0.001, Math.min(1, +$('lr').value || 0.08));
+    const earlyStop = !!($('earlystop') && $('earlystop').checked);
     const V = SEQ.tokens.length, PB = PHASE_BUCKETS, IN = K * V + PB;
 
     training = true; $('train').disabled = true; $('stop').disabled = false; $('resultCard').style.display = 'none';
@@ -122,7 +123,7 @@ async function train() {
         const acc = correct / N;
         if (acc - lastAcc < 0.003) stall++; else stall = 0;
         lastAcc = acc;
-        if (stall >= 2) break;   // plateaued → as confident as it gets
+        if (earlyStop && stall >= 2) break;   // plateaued → only if the user opted in
     }
     const ms = performance.now() - t0, eps = Math.round(totalEx / (ms / 1000));
     const round = a => a.map(r => Array.isArray(r) ? r.map(x => +x.toFixed(4)) : +r.toFixed(4));

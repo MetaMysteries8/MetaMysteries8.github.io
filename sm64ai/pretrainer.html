@@ -48,6 +48,10 @@
       <label>Passes over the TAS (epochs) <input id="epochs" type="number" value="14" min="1" max="80"></label>
       <label>Learning rate <input id="lr" type="number" value="0.08" step="0.01" min="0.001" max="1"></label>
     </div>
+    <label style="flex-direction:row;align-items:center;gap:8px;margin:-4px 0 12px;cursor:pointer">
+      <input id="earlystop" type="checkbox" style="width:auto;margin:0">
+      Stop early when it plateaus (off = run every pass you asked for)
+    </label>
     <div class="btns">
       <button id="train">▶ Train on all TAS</button>
       <button id="stop" class="ghost" disabled>⏹ Stop</button>

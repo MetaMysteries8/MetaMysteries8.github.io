@@ -202,6 +202,33 @@
         </div>
         <div id="energy-backdrop" class="modal-backdrop"></div>
 
+        <!-- Cheater's Model settings -->
+        <div id="cheater-modal" role="dialog" aria-modal="true" aria-label="Cheater's Model Settings">
+            <div id="cheater-panel">
+                <button id="cheater-close-btn" class="modal-close-btn" aria-label="Close">✕</button>
+                <h3>🃏 Cheater's Model</h3>
+                <p class="provider-desc">A TAS-trained neural net that primes RL Play with how SM64 is actually played — it still learns the "where" live during play. Best paired with RL Play.</p>
+                <label class="energy-field">
+                    <input type="checkbox" id="cheater-enabled-chk">
+                    <span>Enable — prime RL Play with TAS moves</span>
+                </label>
+                <label class="energy-field">
+                    <input type="checkbox" id="cheater-online-chk">
+                    <span>Live learning — fine-tune the net on real reward as it plays</span>
+                </label>
+                <div id="cheater-info" class="provider-desc" style="font-family:ui-monospace,monospace;font-size:12px;margin:6px 0"></div>
+                <label class="energy-field">
+                    <span>Load a custom model (.json from the pretrainer)</span>
+                    <input type="file" id="cheater-file" accept="application/json,.json">
+                </label>
+                <div class="energy-btn-row">
+                    <button id="cheater-reset-btn" class="hud-btn">↺ Reset to built-in</button>
+                    <a id="cheater-pretrain-link" class="hud-btn" href="pretrainer.html" target="_blank" rel="noopener" style="text-decoration:none;text-align:center">🏋️ Open pretrainer</a>
+                </div>
+            </div>
+        </div>
+        <div id="cheater-backdrop" class="modal-backdrop"></div>
+
         <!-- Turbo / consistent rapid-fire settings -->
         <div id="turbo-modal" role="dialog" aria-modal="true" aria-label="Turbo Settings">
             <div id="turbo-panel">
