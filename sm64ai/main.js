@@ -1942,15 +1942,33 @@ async function _visionLoad() {
     _visionStatus = 'loading'; _renderDeepInfo();
     _visLoading = (async () => {
         try {
+            _visionStatus = 'fetching'; _renderDeepInfo();
             const mod = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/+esm');
             mod.env.allowLocalModels = false;
-            _visExtractor = await mod.pipeline('image-feature-extraction', _VIS_MODEL, { device: 'webgpu', dtype: 'fp32' });
+            _visExtractor = await mod.pipeline('image-feature-extraction', _VIS_MODEL, { device: 'webgpu', dtype: 'fp32', progress_callback: _visProgress });
             _visionStatus = 'ready';
         } catch (e) { console.warn('[SM64] vision encoder failed to load:', e); _visionStatus = 'error'; }
         _renderDeepInfo();
         return _visExtractor;
     })();
     return _visLoading;
+}
+// transformers.js fires this repeatedly while pulling the model files — surface real
+// download progress so "nothing's happening" actually shows "⬇ downloading 42%".
+let _visDlPct = 0, _visDlFiles = {};
+function _visProgress(p) {
+    if (!p || !p.status) return;
+    if (p.file && (p.status === 'initiate' || p.status === 'download' || p.status === 'progress')) {
+        _visDlFiles[p.file] = p.status === 'progress' ? (p.progress || 0) : (_visDlFiles[p.file] || 0);
+        _visionStatus = 'downloading';
+    } else if (p.status === 'done' && p.file) { _visDlFiles[p.file] = 100; }
+    const vals = Object.values(_visDlFiles);
+    _visDlPct = vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : 0;
+    if (_visionStatus === 'downloading' && _visDlPct >= 100) _visionStatus = 'loading';   // files in, compiling
+    _renderDeepInfo();
+}
+function _visStatusText() {
+    return ({ off: 'off', fetching: 'fetching library…', downloading: `⬇ downloading ${_visDlPct}%`, loading: 'compiling model…', ready: '✅ ready', unsupported: '❌ no WebGPU', error: '⚠ failed' })[_visionStatus] || _visionStatus;
 }
 // Adaptive average-pool any embedding length → _VIS_EMB, L2-normalized: stable,
 // model-agnostic, bounded features regardless of which encoder is chosen.
@@ -2044,6 +2062,19 @@ function _netFinite() {
 function _fmtDur(s) { s = Math.floor(s); const h = (s / 3600) | 0, m = ((s % 3600) / 60) | 0, ss = s % 60; return (h ? h + 'h ' : '') + (m || h ? m + 'm ' : '') + ss + 's'; }
 function _flashEnv(msg) { const el = _trainEnvEl && _trainEnvEl.querySelector('#te-alert'); if (el) { el.textContent = msg; el.style.display = 'block'; } }
 function _teStopOrClose() { if (_grinding) grindTrain(false); else _closeTrainEnv(); }
+// The grinder only learns from experience that RL self-play banks. If nothing is
+// playing, start RL Play so the buffer actually fills (this is what made it look
+// like "it didn't train"). Returns true if it kicked self-play off.
+function _ensureSelfPlay() {
+    if (typeof aiPlayerActive !== 'undefined' && aiPlayerActive) return false;
+    try {
+        const sel = document.getElementById('play-mode'); if (sel) sel.value = 'rl';
+        if (typeof setPlayMode === 'function') setPlayMode('rl');
+        if (!_cheaterEnabled && typeof setCheater === 'function') setCheater(true);
+        if (typeof toggleAIPlayer === 'function') toggleAIPlayer();   // begins RL self-play → feeds replay
+        return true;
+    } catch (e) { console.warn('[SM64] could not auto-start self-play:', e); return false; }
+}
 function _openTrainEnv() {
     if (_trainEnvEl) return;
     const wrap = document.createElement('div'); wrap.id = 'train-env'; _trainEnvEl = wrap;
@@ -2063,7 +2094,8 @@ function _openTrainEnv() {
         '<div class="te-cell"><div class="te-k">Main-thread lag</div><div class="te-v" id="te-lag">0 ms</div></div>' +
         '<div class="te-cell"><div class="te-k">Experience flow</div><div class="te-v" id="te-flow">idle</div></div>' +
         '</div>' +
-        '<div class="te-controls"><label class="te-ctl">Intensity <input id="te-intensity" type="range" min="1" max="16" value="4"> <span id="te-intensity-val">4×</span></label>' +
+        '<div class="te-controls"><button id="te-selfplay" class="te-btn">▶ Start self-play</button>' +
+        '<label class="te-ctl">Intensity <input id="te-intensity" type="range" min="1" max="16" value="4"> <span id="te-intensity-val">4×</span></label>' +
         '<label class="te-ctl"><input id="te-safety" type="checkbox" checked> Safety auto-stop</label></div>' +
         '<div class="te-ckpt"><label class="te-ctl"><input id="te-ckpt-buf" type="checkbox" checked> include experience</label>' +
         '<button id="te-ckpt-dl" class="te-btn green">💾 Download checkpoint</button>' +
@@ -2075,6 +2107,7 @@ function _openTrainEnv() {
     wrap.querySelector('#te-min').onclick = () => wrap.classList.toggle('te-min');
     wrap.querySelector('#te-ckpt-dl').onclick = _downloadCheckpoint;
     wrap.querySelector('#te-ckpt-file').onchange = _loadCheckpoint;
+    wrap.querySelector('#te-selfplay').onclick = () => { if (!_ensureSelfPlay()) updateAIStatus('Self-play already running'); };
     const inten = wrap.querySelector('#te-intensity'); inten.value = _grindIntensity; wrap.querySelector('#te-intensity-val').textContent = _grindIntensity + '×';
     inten.oninput = e => { _grindIntensity = Math.max(1, Math.min(16, +e.target.value || 4)); wrap.querySelector('#te-intensity-val').textContent = _grindIntensity + '×'; };
     const saf = wrap.querySelector('#te-safety'); saf.checked = _grindSafety; saf.onchange = e => { _grindSafety = e.target.checked; };
@@ -2083,13 +2116,16 @@ function _closeTrainEnv() { if (_trainEnvEl) { _trainEnvEl.remove(); _trainEnvEl
 function _trainMon() {
     if (!_trainEnvEl) return;
     const q = id => _trainEnvEl.querySelector(id), mb = v => (v / 1048576).toFixed(0);
+    if (_grindSteps > 0) { const al = q('#te-alert'); if (al && al.textContent.indexOf('Starting RL') >= 0) al.style.display = 'none'; }
     q('#te-steps').textContent = _grindSteps.toLocaleString();
     q('#te-sps').textContent = _grindEps.toLocaleString();
     q('#te-replay').textContent = _replay.length + '/' + _REPLAY_CAP;
-    q('#te-vis').textContent = _visEmbeds + ' (' + _visionStatus + ')';
+    q('#te-vis').textContent = _visEmbeds + ' · ' + _visStatusText();
     q('#te-reward').textContent = _grindBaseline.toFixed(3);
     q('#te-uptime').textContent = _fmtDur((performance.now() - _trainStart) / 1000);
-    q('#te-flow').textContent = (typeof aiPlayerActive !== 'undefined' && aiPlayerActive) ? 'gathering (self-play on)' : 'idle — start RL Play';
+    const playing = (typeof aiPlayerActive !== 'undefined' && aiPlayerActive);
+    const flowEl = q('#te-flow'); flowEl.textContent = playing ? (_replay.length < 8 ? `warming up (${_replay.length}/8)` : 'gathering (self-play on)') : 'idle — press ▶ Start self-play';
+    flowEl.style.color = playing ? (_replay.length < 8 ? '#ffb454' : '#19c37d') : '#e3556e';
     const heap = _heapInfo();
     if (heap) { q('#te-heap').textContent = mb(heap.used) + ' / ' + mb(heap.limit) + ' MB (' + (heap.pct * 100).toFixed(0) + '%)'; const bar = q('#te-heap-bar'); bar.style.width = (heap.pct * 100).toFixed(0) + '%'; bar.style.background = heap.pct > 0.85 ? '#e3556e' : heap.pct > 0.65 ? '#ffb454' : '#19c37d'; }
     else q('#te-heap').textContent = 'n/a (Chrome only)';
@@ -2141,12 +2177,14 @@ async function grindTrain(on) {
     try { setHyperSpeed(true); } catch {}                  // all power: max game throughput
     _openTrainEnv(); _startLagMon();
     if (_trainMonTimer) clearInterval(_trainMonTimer); _trainMonTimer = setInterval(_trainMon, 500);
+    if (typeof aiPlayerActive === 'undefined' || !aiPlayerActive) { _ensureSelfPlay(); _flashEnv('▶ Starting RL self-play to gather experience…'); }
     _renderDeepInfo();
     updateAIStatus('🧪 Deep Training environment — grinding at full power');
     const lr = 0.02, temp = 0.5, batch = 64, t0 = performance.now();
     try {
         while (_grinding) {
-            if (_replay.length < 32) { await new Promise(r => setTimeout(r, 400)); continue; }  // wait for experience to bank
+            if (_replay.length < 8) { const s = _trainEnvEl && _trainEnvEl.querySelector('#te-state'); if (s) s.textContent = 'waiting for experience…'; await new Promise(r => setTimeout(r, 400)); continue; }  // buffer must warm up first
+            { const s = _trainEnvEl && _trainEnvEl.querySelector('#te-state'); if (s && s.textContent !== 'running') s.textContent = 'running'; }
             const inner = batch * Math.max(1, _grindIntensity);
             for (let b = 0; b < inner; b++) {
                 const t = _replay[(Math.random() * _replay.length) | 0];
@@ -2189,7 +2227,7 @@ function _renderDeepInfo() {
     const gb = document.getElementById('grind-btn');
     if (gb) { gb.textContent = _grinding ? '⏹ Stop grinding' : '▶ Start grinding'; gb.classList.toggle('green', !_grinding); }
     const el = document.getElementById('deep-info'); if (!el) return;
-    const vs = ({ off: 'off', loading: 'loading model…', ready: '✅ ready', unsupported: '❌ no WebGPU (Chrome only)', error: '⚠ failed' })[_visionStatus] || _visionStatus;
+    const vs = _visStatusText();
     el.innerHTML = `vision: <b>${vs}</b>${_visEmbeds ? ` · ${_visEmbeds} frames seen` : ''}<br>` +
         `replay: ${_replay.length}/${_REPLAY_CAP} · grind: ${_grindSteps} steps${_grinding ? ` · ${_grindEps}/s` : ''} · avgR ${_grindBaseline.toFixed(2)}`;
 }
