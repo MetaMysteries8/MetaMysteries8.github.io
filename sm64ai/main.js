@@ -1618,7 +1618,20 @@ function _humanPref(stateKey, cat) {
 let _cheaterModel = null;
 let _cheaterEnabled = (() => { try { return localStorage.getItem('sm64_cheater') === '1'; } catch { return false; } })();
 let _recentMoves = [];   // recent action cats — the net's input context
-function setCheater(on) { _cheaterEnabled = !!on; try { localStorage.setItem('sm64_cheater', _cheaterEnabled ? '1' : '0'); } catch {} }
+function updateCheaterUI() {
+    const b = document.getElementById('cheater-btn');
+    if (b) { b.classList.toggle('active', _cheaterEnabled); b.title = `Cheater's Model (TAS neural net) — ${_cheaterEnabled ? 'ON' : 'OFF'}. Best with RL Play.`; }
+}
+function setCheater(on) {
+    _cheaterEnabled = !!on;
+    try { localStorage.setItem('sm64_cheater', _cheaterEnabled ? '1' : '0'); } catch {}
+    updateCheaterUI();
+    updateAIStatus(_cheaterEnabled
+        ? "🃏 Cheater's Model ON — TAS moves prime RL Play (it still learns the where)"
+        : "🃏 Cheater's Model off");
+    if (typeof updateDebugHUD === 'function') updateDebugHUD();
+}
+window.sm64Cheater = (on) => { setCheater(on == null ? !_cheaterEnabled : on); return _cheaterEnabled; };
 async function loadCheaterModel() {
     try {
         const r = await fetch('tas/cheater-model.json', { cache: 'force-cache' });
@@ -2387,6 +2400,7 @@ function toggleDebugHUD(on) {
 }
 window.sm64Debug = toggleDebugHUD;
 document.getElementById('debug-btn')?.addEventListener('click', () => toggleDebugHUD());
+document.getElementById('cheater-btn')?.addEventListener('click', () => setCheater(!_cheaterEnabled));
 
 // ── BRAINMAP VISUALIZER (in-UI panel + experimental pop-out window) ──
 function _bmNode(id, label, icon) {
@@ -4334,6 +4348,7 @@ restoreProviderState();
 if (_persistBrainmap) loadBrainmap();   // restore the AI's map across reloads
 loadQTable();                            // restore the adaptive brain's learning
 loadCheaterModel();                      // load the TAS-trained neural net (async, non-blocking)
+updateCheaterUI();                       // sync the 🃏 button to the saved state
 const _bmPersistEl = document.getElementById('brainmap-persist-toggle');
 if (_bmPersistEl) _bmPersistEl.checked = _persistBrainmap;
 if (_debugHUD) document.getElementById('debug-btn')?.classList.add('active');

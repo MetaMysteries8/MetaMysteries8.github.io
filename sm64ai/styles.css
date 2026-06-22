@@ -120,6 +120,7 @@ body {
     transition: background 0.15s, color 0.15s; white-space: nowrap;
 }
 .hud-icon-btn:hover { background: rgba(255,255,255,0.14); color: #fff; }
+.hud-icon-btn.active { background: rgba(30,136,229,0.30); color: #fff; border-color: rgba(30,136,229,0.65); box-shadow: 0 0 8px rgba(30,136,229,0.45); }
 .hud-icon-btn.danger:hover { background: rgba(229,34,19,0.22); color: #ff6b6b; border-color: rgba(229,34,19,0.38); }
 
 /* ── Model selector ─────────────────────────────────────── */
