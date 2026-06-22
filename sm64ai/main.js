@@ -1757,6 +1757,7 @@ function openCheaterConfig() {
     if (en) en.checked = _cheaterEnabled;
     if (on) on.checked = _cheaterOnline;
     _renderCheaterInfo();
+    _renderDeepInfo();
     document.getElementById('cheater-modal')?.classList.add('open');
     document.getElementById('cheater-backdrop')?.classList.add('open');
 }
@@ -1837,8 +1838,9 @@ function _noteMove(cat) { _recentMoves.push(cat); while (_recentMoves.length > 8
 // TAS data never had. This is the genuinely-trainable-in-browser RL net.
 let _cheaterOnline = (() => { try { const v = localStorage.getItem('sm64_cheat_online'); return v == null ? true : v === '1'; } catch { return true; } })();
 function setCheaterOnline(on) { _cheaterOnline = !!on; try { localStorage.setItem('sm64_cheat_online', _cheaterOnline ? '1' : '0'); } catch {} if (_cheaterOnline) _cheatInitNet(); }
-const _CHEAT_VIS = 24;          // 6×4 brightness grid — the net's actual "eyes"
-const _CHEAT_OBS = 5 + _CHEAT_VIS;   // [openL,openC,openR,stuckNorm,regionNorm] + the view grid
+const _CHEAT_VIS = 24;          // 6×4 brightness grid — the net's crude built-in "eyes"
+const _VIS_EMB = 48;            // WebGPU vision-encoder embedding — the net's REAL eyes (0s when off)
+const _CHEAT_OBS = 5 + _CHEAT_VIS + _VIS_EMB;   // [open×3,stuck,region] + grid + vision embedding
 const _CHEAT_LR = 0.03;
 let _cheatNet = null, _cheatIdx = null, _cheatFwd = null, _cheatPending = null;
 let _cheatBaseline = 0, _cheatUpdates = 0;
@@ -1858,6 +1860,10 @@ function _cheatObs() {
         Math.min(1, _stuckCount / 3), _regionRank(_region) / 3];
     if (_lastVisGrid) for (let i = 0; i < _CHEAT_VIS; i++) o.push(_lastVisGrid[i] || 0);
     else for (let i = 0; i < _CHEAT_VIS; i++) o.push(0);
+    // REAL EYES: the WebGPU vision encoder's embedding of the current frame (or zeros
+    // when the encoder is off/loading — the net just sees the crude grid then).
+    if (_lastVisEmb && _lastVisEmb.length === _VIS_EMB) for (let i = 0; i < _VIS_EMB; i++) o.push(_lastVisEmb[i]);
+    else for (let i = 0; i < _VIS_EMB; i++) o.push(0);
     return o;
 }
 function _cheatForward(obs) {
@@ -1904,6 +1910,9 @@ function _cheatLearnFromReward() {
     const r = _lastReward == null ? 0 : _lastReward;
     _cheatBaseline += 0.05 * (r - _cheatBaseline);           // running baseline → advantage
     _cheatTrain(_cheatPending.cache, _cheatPending.aIdx, r - _cheatBaseline);
+    // Bank the full (vision-state, move-context, action, reward) transition so the
+    // Deep Trainer can replay it for hours — this is how it learns "what to do where".
+    _replayPush(_cheatPending.cache, _cheatPending.aIdx, r);
     _cheatPending = null;
 }
 // Forward the net for THIS tick's state and remember the choice for next-tick training.
@@ -1911,6 +1920,157 @@ function _cheatStep(cat) {
     if (!_cheaterOnline || !_cheatNet) return;
     const aIdx = _cheatIdx[cat];
     if (aIdx != null && _cheatFwd) _cheatPending = { cache: _cheatFwd, aIdx };
+}
+
+// ── REAL EYES: WebGPU vision encoder (transformers.js) ───────────────────────
+// Chrome + WebGPU only. Lazily loads a small pretrained image encoder, turns each
+// gameplay frame into a compact embedding, and feeds it to the net as observations,
+// so the agent learns from what the screen ACTUALLY shows — the missing "where"
+// that TAS data never had. Degrades to the crude brightness grid when off.
+let _lastVisEmb = null;            // Float32Array(_VIS_EMB) — newest frame embedding
+let _visionOn = (() => { try { return localStorage.getItem('sm64_vision') === '1'; } catch { return false; } })();
+let _visionStatus = 'off';         // off | loading | ready | unsupported | error
+let _visExtractor = null, _visLoading = null, _visBusy = false, _visEmbeds = 0;
+const _VIS_MODEL = (() => { try { return localStorage.getItem('sm64_vision_model') || 'Xenova/mobilevit-small'; } catch { return 'Xenova/mobilevit-small'; } })();
+function _webgpuOK() { return typeof navigator !== 'undefined' && !!navigator.gpu; }
+async function _visionLoad() {
+    if (_visExtractor) return _visExtractor;
+    if (_visLoading) return _visLoading;
+    if (!_webgpuOK()) { _visionStatus = 'unsupported'; _renderDeepInfo(); return null; }
+    _visionStatus = 'loading'; _renderDeepInfo();
+    _visLoading = (async () => {
+        try {
+            const mod = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/+esm');
+            mod.env.allowLocalModels = false;
+            _visExtractor = await mod.pipeline('image-feature-extraction', _VIS_MODEL, { device: 'webgpu', dtype: 'fp32' });
+            _visionStatus = 'ready';
+        } catch (e) { console.warn('[SM64] vision encoder failed to load:', e); _visionStatus = 'error'; }
+        _renderDeepInfo();
+        return _visExtractor;
+    })();
+    return _visLoading;
+}
+// Adaptive average-pool any embedding length → _VIS_EMB, L2-normalized: stable,
+// model-agnostic, bounded features regardless of which encoder is chosen.
+function _poolEmbed(data) {
+    const out = new Float32Array(_VIS_EMB), cnt = new Float32Array(_VIS_EMB), L = data.length;
+    for (let i = 0; i < L; i++) { const b = Math.min(_VIS_EMB - 1, (i * _VIS_EMB / L) | 0); out[b] += data[i]; cnt[b]++; }
+    let norm = 0; for (let i = 0; i < _VIS_EMB; i++) { out[i] /= (cnt[i] || 1); norm += out[i] * out[i]; }
+    norm = Math.sqrt(norm) || 1; for (let i = 0; i < _VIS_EMB; i++) out[i] /= norm;
+    return out;
+}
+// Fire-and-forget per-frame embed (one inference in flight at a time).
+async function _visionUpdate(url) {
+    if (!_visionOn || _visBusy) return;
+    const ex = _visExtractor || await _visionLoad();
+    if (!ex) return;
+    _visBusy = true;
+    try {
+        const out = await ex(url, { pooling: 'mean', normalize: true });
+        const data = out && (out.data || (out.ort_tensor && out.ort_tensor.data));
+        if (data && data.length) { _lastVisEmb = _poolEmbed(data); _visEmbeds++; }
+    } catch { _visionStatus = 'error'; }
+    finally { _visBusy = false; }
+}
+function setVision(on) {
+    _visionOn = !!on; try { localStorage.setItem('sm64_vision', _visionOn ? '1' : '0'); } catch {}
+    if (_visionOn) _visionLoad(); else { _visionStatus = 'off'; _lastVisEmb = null; _renderDeepInfo(); }
+}
+window.sm64Vision = (on) => { setVision(on == null ? !_visionOn : on); return _visionStatus; };
+
+// ── DEEP TRAINER: experience replay + advantage-weighted regression ──────────
+// Banks (vision-state, move-context, action, reward) transitions from real play and
+// trains the net on minibatches sampled from them for as long as you let it (hours).
+// AWR: push the policy toward actions that beat the running reward baseline, away
+// from ones below it — stable offline RL, no target net, fits a from-scratch JS net.
+const _REPLAY_CAP = 5000;
+let _replay = [];
+let _grinding = false, _grindSteps = 0, _grindEps = 0, _grindBaseline = 0;
+function _replayPush(cache, aIdx, r) {
+    if (!cache || aIdx == null || !cache.obs) return;
+    _replay.push({ active: cache.active.slice(), pf: cache.pf ? cache.pf.map(p => p.slice()) : [], obs: Float32Array.from(cache.obs), a: aIdx, r });
+    if (_replay.length > _REPLAY_CAP) _replay.splice(0, _replay.length - _REPLAY_CAP);
+    _grindBaseline += 0.01 * (r - _grindBaseline);
+}
+// One weighted cross-entropy step over a STORED transition (full forward/backward
+// across move + phase + observation inputs). Weight = AWR advantage weight.
+function _cheatReplayStep(t, lr, weight) {
+    const m = _cheatNet, V = _cheaterModel.tokens.length;
+    const { active, pf, obs, a } = t;
+    const h = new Array(m.hidden);
+    for (let j = 0; j < m.hidden; j++) {
+        let s = m.b1[j];
+        for (const i of active) s += m.W1[i][j];
+        for (const [i, val] of pf) s += m.W1[i][j] * val;
+        for (let f = 0; f < m.inObs; f++) { const ov = obs[f]; if (ov) s += m.W1[m.inMoves + f][j] * ov; }
+        h[j] = s > 0 ? s : 0;
+    }
+    const o = new Array(V);
+    for (let c = 0; c < V; c++) { let s = m.b2[c]; for (let j = 0; j < m.hidden; j++) s += h[j] * m.W2[j][c]; o[c] = s; }
+    const mx = Math.max(...o); let sum = 0; const p = o.map(v => { const e = Math.exp(v - mx); sum += e; return e; }); for (let c = 0; c < V; c++) p[c] /= sum;
+    const dO = p.slice(); dO[a] -= 1; const w = lr * weight;
+    const dh = new Array(m.hidden).fill(0);
+    for (let j = 0; j < m.hidden; j++) for (let c = 0; c < V; c++) dh[j] += dO[c] * m.W2[j][c];
+    for (let j = 0; j < m.hidden; j++) for (let c = 0; c < V; c++) m.W2[j][c] -= w * dO[c] * h[j];
+    for (let c = 0; c < V; c++) m.b2[c] -= w * dO[c];
+    for (let j = 0; j < m.hidden; j++) {
+        if (h[j] <= 0) continue; const g = dh[j];
+        for (const i of active) m.W1[i][j] -= w * g;
+        for (const [i, val] of pf) m.W1[i][j] -= w * g * val;
+        for (let f = 0; f < m.inObs; f++) { const ov = obs[f]; if (ov) m.W1[m.inMoves + f][j] -= w * g * ov; }
+        m.b1[j] -= w * g;
+    }
+    return -Math.log(p[a] + 1e-9);
+}
+async function grindTrain(on) {
+    if (on === false || (on == null && _grinding)) { _grinding = false; return; }
+    if (_grinding) return;
+    if (!_cheatNet) _cheatInitNet();
+    if (!_cheatNet) { updateAIStatus('⚠ Deep Trainer: cheater net not ready yet'); return; }
+    _grinding = true; _renderDeepInfo();
+    updateAIStatus('🧪 Deep Trainer grinding — replaying experience to learn what-to-do-where');
+    const lr = 0.02, temp = 0.5, batch = 64, t0 = performance.now();
+    while (_grinding) {
+        if (_replay.length < 32) { await new Promise(r => setTimeout(r, 500)); continue; }  // wait for experience to bank
+        for (let b = 0; b < batch; b++) {
+            const t = _replay[(Math.random() * _replay.length) | 0];
+            const w = Math.min(4, Math.exp((t.r - _grindBaseline) / temp));   // AWR weight (clipped)
+            _cheatReplayStep(t, lr, w); _grindSteps++;
+        }
+        _grindEps = Math.round(_grindSteps / ((performance.now() - t0) / 1000));
+        if (_grindSteps % (batch * 8) === 0) { _lsSet('sm64_cheat_net', JSON.stringify(_cheatNet)); _renderDeepInfo(); }
+        await new Promise(r => setTimeout(r, 0));   // yield each batch — never freeze the tab
+    }
+    _lsSet('sm64_cheat_net', JSON.stringify(_cheatNet));
+    if (_rlPersist) _replaySave();
+    _renderDeepInfo();
+}
+window.sm64Grind = grindTrain;
+// Best-effort replay persistence (only when the user opted into model persistence).
+function _replaySave() {
+    if (!_rlPersist) return;
+    try {
+        const slice = _replay.slice(-1500).map(t => ({ a: t.active, p: t.pf, o: Array.from(t.obs, v => Math.round(v * 1000) / 1000), y: t.a, r: Math.round(t.r * 1000) / 1000 }));
+        localStorage.setItem('sm64_replay', JSON.stringify({ b: _grindBaseline, t: slice }));
+    } catch {}
+}
+function _replayLoad() {
+    try {
+        const raw = localStorage.getItem('sm64_replay'); if (!raw) return;
+        const d = JSON.parse(raw); if (!d || !Array.isArray(d.t)) return;
+        _replay = d.t.map(t => ({ active: t.a || [], pf: t.p || [], obs: Float32Array.from(t.o || []), a: t.y, r: t.r }))
+                     .filter(t => t.obs.length === _CHEAT_OBS && t.a != null);
+        _grindBaseline = d.b || 0;
+    } catch {}
+}
+function _renderDeepInfo() {
+    const vc = document.getElementById('vision-chk'); if (vc) vc.checked = _visionOn;
+    const gb = document.getElementById('grind-btn');
+    if (gb) { gb.textContent = _grinding ? '⏹ Stop grinding' : '▶ Start grinding'; gb.classList.toggle('green', !_grinding); }
+    const el = document.getElementById('deep-info'); if (!el) return;
+    const vs = ({ off: 'off', loading: 'loading model…', ready: '✅ ready', unsupported: '❌ no WebGPU (Chrome only)', error: '⚠ failed' })[_visionStatus] || _visionStatus;
+    el.innerHTML = `vision: <b>${vs}</b>${_visEmbeds ? ` · ${_visEmbeds} frames seen` : ''}<br>` +
+        `replay: ${_replay.length}/${_REPLAY_CAP} · grind: ${_grindSteps} steps${_grinding ? ` · ${_grindEps}/s` : ''} · avgR ${_grindBaseline.toFixed(2)}`;
 }
 
 // ── TAS PRETRAINER — rip through every TAS run in-browser to warm up the net ──
@@ -2740,6 +2900,7 @@ async function _depthAnalyze(url) {
             grid[gi] += g; gcnt[gi]++;
         }
         _lastVisGrid = grid.map((v, i) => (v / (gcnt[i] || 1)) / 255);   // normalized 0..1
+        _visionUpdate(url);   // fire-and-forget: refresh the WebGPU embedding (real eyes)
         const score = cols.map(c => ({ bright: c.b / c.n, edge: c.e / c.n }));
         const open = score.map(s => (s.edge * 1.2) - (s.bright / 255) * 40);
         const best = open.indexOf(Math.max(...open)), worst = open.indexOf(Math.min(...open));
@@ -2804,6 +2965,8 @@ document.getElementById('cheater-enabled-chk')?.addEventListener('change', e => 
 document.getElementById('cheater-online-chk')?.addEventListener('change', e => setCheaterOnline(e.target.checked));
 document.getElementById('cheater-file')?.addEventListener('change', _onCheaterFile);
 document.getElementById('cheater-reset-btn')?.addEventListener('click', _resetCheaterModel);
+document.getElementById('vision-chk')?.addEventListener('change', e => setVision(e.target.checked));
+document.getElementById('grind-btn')?.addEventListener('click', () => grindTrain(_grinding ? false : true));
 
 // ── BRAINMAP VISUALIZER (in-UI panel + experimental pop-out window) ──
 function _bmNode(id, label, icon) {
@@ -4755,6 +4918,8 @@ if (_persistBrainmap) loadBrainmap();   // restore the AI's map across reloads
 loadQTable();                            // restore the adaptive brain's learning
 loadCheaterModel();                      // load the TAS-trained neural net (async, non-blocking)
 updateCheaterUI();                       // sync the 🃏 button to the saved state
+if (_rlPersist) _replayLoad();           // restore banked experience (opt-in)
+if (_visionOn) _visionLoad();            // warm up the WebGPU vision encoder if it was on
 try { if (localStorage.getItem('sm64_hyper') === '1') setHyperSpeed(true); } catch {}
 const _bmPersistEl = document.getElementById('brainmap-persist-toggle');
 if (_bmPersistEl) _bmPersistEl.checked = _persistBrainmap;

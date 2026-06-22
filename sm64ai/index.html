@@ -225,6 +225,18 @@
                     <button id="cheater-reset-btn" class="hud-btn">↺ Reset to built-in</button>
                     <a id="cheater-pretrain-link" class="hud-btn" href="pretrainer.html" target="_blank" rel="noopener" style="text-decoration:none;text-align:center">🏋️ Open pretrainer</a>
                 </div>
+                <hr style="border:0;border-top:1px solid var(--panel-border);margin:16px 0 12px">
+                <h3 style="font-size:15px">🧪 Deep Trainer <span style="font-size:11px;color:#ffb454">Chrome + WebGPU</span></h3>
+                <p class="provider-desc">Gives the agent <b>real eyes</b> (a WebGPU vision encoder) and trains the net on hours of replayed <i>(sight → move → reward)</i> experience from live play — this is how it learns <b>what to do where</b>. Heavy; Chrome only.</p>
+                <label class="energy-field">
+                    <input type="checkbox" id="vision-chk">
+                    <span>👁 Real vision encoder (WebGPU) — first use downloads a model</span>
+                </label>
+                <div id="deep-info" class="provider-desc" style="font-family:ui-monospace,monospace;font-size:12px;margin:6px 0"></div>
+                <div class="energy-btn-row">
+                    <button id="grind-btn" class="hud-btn green">▶ Start grinding</button>
+                </div>
+                <p class="provider-desc" style="font-size:11px">Tip: turn on <b>RL Play</b> + <b>⏩ Hyper-speed</b> to bank experience fast, then let the Deep Trainer grind. It trains the live net, so play keeps improving.</p>
             </div>
         </div>
         <div id="cheater-backdrop" class="modal-backdrop"></div>
