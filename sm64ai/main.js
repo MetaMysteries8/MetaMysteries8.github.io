@@ -981,6 +981,17 @@ function buildProviderPanel() {
     conlChk.addEventListener('change', () => setCheaterOnline(conlChk.checked));
     conlRow.appendChild(conlChk); panel.appendChild(conlRow);
 
+    // Pretrainer — rip through every TAS run to warm up the net (imitation).
+    const ptBtn = document.createElement('button');
+    ptBtn.className = 'provider-save-btn';
+    ptBtn.textContent = _pretraining ? '⏹ Stop pretraining' : '🏋️ Pretrain on all TAS (warm up the net)';
+    ptBtn.addEventListener('click', () => {
+        if (_pretraining) { _pretraining = false; ptBtn.textContent = '🏋️ Pretrain on all TAS (warm up the net)'; return; }
+        ptBtn.textContent = '⏹ Stop pretraining';
+        pretrainOnTAS({ epochs: 12 }).finally(() => { ptBtn.textContent = '🏋️ Pretrain on all TAS (warm up the net)'; });
+    });
+    panel.appendChild(ptBtn);
+
     // Persistent model (experimental) — save the trained RL across reloads.
     const persRow = document.createElement('label');
     persRow.className = 'provider-row'; persRow.style.cursor = 'pointer';
@@ -1762,6 +1773,91 @@ function _cheatStep(cat) {
     const aIdx = _cheatIdx[cat];
     if (aIdx != null && _cheatFwd) _cheatPending = { cache: _cheatFwd, aIdx };
 }
+
+// ── TAS PRETRAINER — rip through every TAS run in-browser to warm up the net ──
+// Supervised imitation (cross-entropy SGD) on the real TAS move sequences, looping
+// TAS-after-TAS until confidence plateaus. This is the proper deep-RL pipeline:
+// PRETRAIN by imitation here, then FINE-TUNE with RL during play. Chunked + yields
+// so it never freezes the tab; reports a web-fit verdict (examples/sec).
+let _tasSeqs = null, _pretraining = false;
+async function loadTasSeqs() {
+    if (_tasSeqs) return _tasSeqs;
+    try { const r = await fetch('tas/tas-sequences.json', { cache: 'force-cache' }); if (r.ok) _tasSeqs = await r.json(); } catch {}
+    return _tasSeqs;
+}
+function _buildTasExamples(seqData) {
+    const V = seqData.tokens.length, K = _cheatNet.K, ex = [];
+    // seqData.tokens order == net token order (both from the same build) → char-48 = index.
+    for (const enc of seqData.seqs) {
+        const ids = []; for (let i = 0; i < enc.length; i++) ids.push(enc.charCodeAt(i) - 48);
+        for (let i = 0; i < ids.length; i++) {
+            const active = []; for (let k = 0; k < K; k++) { const j = i - K + k; if (j >= 0) active.push(k * V + ids[j]); }
+            ex.push({ active, target: ids[i] });
+        }
+    }
+    return ex;
+}
+// One supervised cross-entropy step (gradient DESCENT) — trains the move-flow
+// weights only (TAS has no observations, so obs inputs are 0 and untouched).
+function _cheatSupervisedStep(active, target, lr) {
+    const m = _cheatNet, V = _cheaterModel.tokens.length;
+    const h = new Array(m.hidden);
+    for (let j = 0; j < m.hidden; j++) { let s = m.b1[j]; for (const i of active) s += m.W1[i][j]; h[j] = s > 0 ? s : 0; }
+    const o = new Array(V);
+    for (let c = 0; c < V; c++) { let s = m.b2[c]; for (let j = 0; j < m.hidden; j++) s += h[j] * m.W2[j][c]; o[c] = s; }
+    const mx = Math.max(...o); let sum = 0; const p = o.map(v => { const e = Math.exp(v - mx); sum += e; return e; }); for (let c = 0; c < V; c++) p[c] /= sum;
+    let arg = 0; for (let c = 1; c < V; c++) if (p[c] > p[arg]) arg = c;
+    const loss = -Math.log(p[target] + 1e-9);
+    const dO = p; dO[target] -= 1;
+    const dh = new Array(m.hidden).fill(0);
+    for (let j = 0; j < m.hidden; j++) for (let c = 0; c < V; c++) dh[j] += dO[c] * m.W2[j][c];
+    for (let j = 0; j < m.hidden; j++) for (let c = 0; c < V; c++) m.W2[j][c] -= lr * dO[c] * h[j];
+    for (let c = 0; c < V; c++) m.b2[c] -= lr * dO[c];
+    for (let j = 0; j < m.hidden; j++) { if (h[j] <= 0) continue; const g = dh[j]; for (const i of active) m.W1[i][j] -= lr * g; m.b1[j] -= lr * g; }
+    return { loss, correct: arg === target ? 1 : 0 };
+}
+async function pretrainOnTAS(opts = {}) {
+    if (_pretraining) { _pretraining = false; return; }       // toggle = cancel
+    if (!_cheaterModel) await loadCheaterModel();
+    if (!_cheatNet) _cheatInitNet();
+    if (!_cheatNet) { updateAIStatus('⚠ Cheater net not ready yet — try again in a second'); return; }
+    const seqData = await loadTasSeqs();
+    if (!seqData) { updateAIStatus('⚠ Could not load TAS sequences'); return; }
+    _pretraining = true;
+    const maxEpochs = opts.epochs || 12, lr = opts.lr || 0.08, chunk = 2500;
+    updateAIStatus('🏋️ Building TAS training set…');
+    const ex = _buildTasExamples(seqData);
+    const N = ex.length, t0 = performance.now();
+    let lastAcc = 0, stall = 0, totalEx = 0, doneEpochs = 0;
+    for (let e = 0; e < maxEpochs && _pretraining; e++) {
+        for (let a = N - 1; a > 0; a--) { const b = (Math.random() * (a + 1)) | 0;[ex[a], ex[b]] = [ex[b], ex[a]]; }
+        let loss = 0, correct = 0;
+        for (let i = 0; i < N && _pretraining; i += chunk) {
+            const end = Math.min(N, i + chunk);
+            for (let n = i; n < end; n++) { const r = _cheatSupervisedStep(ex[n].active, ex[n].target, lr); loss += r.loss; correct += r.correct; }
+            totalEx += end - i;
+            updateAIStatus(`🏋️ Pretraining on TAS — run-set ${e + 1}/${maxEpochs} · ${Math.round(end / N * 100)}% · confidence ~${Math.round(correct / end * 100)}%`);
+            await new Promise(res => setTimeout(res, 0));   // yield — keep the tab alive
+        }
+        doneEpochs = e + 1;
+        const acc = correct / N;
+        if (typeof pushChatlog === 'function') pushChatlog(`<span class="cl-cmd">🏋️ pass ${e + 1}: loss ${(loss / N).toFixed(3)} · confidence ${(acc * 100).toFixed(1)}%</span>`, 'cl-tool');
+        if (acc - lastAcc < 0.003) stall++; else stall = 0;
+        lastAcc = acc;
+        if (opts.target && acc >= opts.target) break;
+        if (stall >= 2) break;                              // plateaued → it's as confident as it gets
+    }
+    const ms = performance.now() - t0, exPerSec = Math.round(totalEx / (ms / 1000));
+    _lsSet('sm64_cheat_net', JSON.stringify(_cheatNet));    // persist the warmed-up net (gated)
+    _pretraining = false;
+    const webFit = ms < 25000;
+    const verdict = webFit ? `✅ WEB-FIT — ${exPerSec.toLocaleString()} examples/s, ${doneEpochs} passes in ${(ms / 1000).toFixed(1)}s`
+                           : `😬 heavy — ${(ms / 1000).toFixed(1)}s for ${doneEpochs} passes (it still worked; lower epochs to lighten)`;
+    updateAIStatus(`🏋️ Pretrain done — confidence ~${(lastAcc * 100).toFixed(0)}% · ${webFit ? 'web-fit ✅' : 'heavy 😬'}`);
+    if (typeof pushChatlog === 'function') pushChatlog(`<span class="cl-cmd">🏋️ Pretrain complete — confidence ${(lastAcc * 100).toFixed(1)}% · ${verdict}</span>`, 'cl-tool');
+    updateDebugHUD();
+}
+window.sm64Pretrain = pretrainOnTAS;
 
 function _brainState() {
     const region = /in-level/.test(_region) ? 'level' : (_region || 'unknown');

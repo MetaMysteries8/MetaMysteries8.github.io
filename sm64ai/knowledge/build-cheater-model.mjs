@@ -166,6 +166,15 @@ const model = {
     note: 'Cheater\'s Model: a from-scratch MLP (+ n-gram fallback) of SM64 play, trained from .m64 controller inputs. Imitation, not a replay.',
 };
 writeFileSync(OUT, JSON.stringify(model));
+
+// Also export the tokenized sequences (one char per move) so the BROWSER can
+// pretrain live on the real TAS play. Tiny — ~1 byte/move.
+const enc = s => s.map(t => String.fromCharCode(48 + tokens.indexOf(t))).join('');
+const SEQ_OUT = join(TAS_DIR, 'tas-sequences.json');
+const seqData = { v: 1, tokens, seqs: allSeqs.map(enc) };
+writeFileSync(SEQ_OUT, JSON.stringify(seqData));
+console.log(`Wrote ${SEQ_OUT} (${(JSON.stringify(seqData).length / 1024).toFixed(0)} KB) for in-browser pretraining.`);
+
 console.log(`Cheater's Model trained on ${used}/${files.length} runs, ${totalMoves} moves (~${(totalFrames / 60 / 60).toFixed(1)} min of TAS).`);
 console.log('Top moves:', Object.entries(unigram).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k, v]) => `${k}:${v}`).join('  '));
 console.log('Wrote', OUT, `(${(JSON.stringify(model).length / 1024).toFixed(1)} KB)`);
