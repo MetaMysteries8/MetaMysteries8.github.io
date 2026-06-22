@@ -992,6 +992,12 @@ function buildProviderPanel() {
     });
     panel.appendChild(ptBtn);
 
+    const ptLink = document.createElement('a');
+    ptLink.href = 'pretrainer.html'; ptLink.target = '_blank';
+    ptLink.className = 'provider-bridge-note'; ptLink.style.display = 'block'; ptLink.style.textDecoration = 'none';
+    ptLink.innerHTML = '🧪 <strong>Standalone Pretrainer ↗</strong> — tune the architecture, train harder, and <em>submit your best model</em> to become the main one.';
+    panel.appendChild(ptLink);
+
     // Persistent model (experimental) — save the trained RL across reloads.
     const persRow = document.createElement('label');
     persRow.className = 'provider-row'; persRow.style.cursor = 'pointer';
