@@ -962,6 +962,16 @@ function buildProviderPanel() {
     rtChk.addEventListener('change', () => setRlRealtime(rtChk.checked));
     rtRow.appendChild(rtChk); panel.appendChild(rtRow);
 
+    // Cheater's Model — TAS-trained neural net prior for RL Play.
+    const cheatRow = document.createElement('label');
+    cheatRow.className = 'provider-row'; cheatRow.style.cursor = 'pointer';
+    const cm = _cheaterModel;
+    cheatRow.innerHTML = `<span class="provider-label">🃏 Cheater's Model (TAS neural net)<br><small>${cm ? `A real net trained on ${cm.trainedOn?.files || 103} TAS runs` : 'Trained on 103 TAS runs'}. In RL Play it suggests TAS-like moves where the RL hasn't learned the spot yet; the RL still learns the WHEN/WHERE from play + your teaching</small></span>`;
+    const cheatChk = document.createElement('input');
+    cheatChk.type = 'checkbox'; cheatChk.checked = _cheaterEnabled;
+    cheatChk.addEventListener('change', () => setCheater(cheatChk.checked));
+    cheatRow.appendChild(cheatChk); panel.appendChild(cheatRow);
+
     // Persistent model (experimental) — save the trained RL across reloads.
     const persRow = document.createElement('label');
     persRow.className = 'provider-row'; persRow.style.cursor = 'pointer';
@@ -1600,6 +1610,50 @@ function _humanPref(stateKey, cat) {
     return tot ? (s[cat] || 0) / tot : 0;
 }
 
+// ── CHEATER'S MODEL — a real (from-scratch) neural net trained on 103 TAS runs ──
+// It predicts the next move the way TAS players do (behavioral cloning). In RL
+// Play it rides the LIVE gameplay stream (the RL loop's frames) as the policy
+// PRIOR, while the online Q-learner refines it from real outcomes — so it plays
+// like a TAS out of the box and LEARNS when it messes up. n-gram is a fallback.
+let _cheaterModel = null;
+let _cheaterEnabled = (() => { try { return localStorage.getItem('sm64_cheater') === '1'; } catch { return false; } })();
+let _recentMoves = [];   // recent action cats — the net's input context
+function setCheater(on) { _cheaterEnabled = !!on; try { localStorage.setItem('sm64_cheater', _cheaterEnabled ? '1' : '0'); } catch {} }
+async function loadCheaterModel() {
+    try {
+        const r = await fetch('tas/cheater-model.json', { cache: 'force-cache' });
+        if (r.ok) { _cheaterModel = await r.json(); console.log(`[SM64] Cheater's Model loaded — ${_cheaterModel.mlp ? 'neural net' : 'n-gram'}, trained on ${_cheaterModel.trainedOn?.files} TAS runs.`); }
+    } catch {}
+}
+// Real neural-net forward pass → softmax distribution over the next move.
+function _mlpDist() {
+    const m = _cheaterModel && _cheaterModel.mlp; if (!m) return null;
+    const toks = _cheaterModel.tokens, V = toks.length, idx = {}; toks.forEach((t, i) => idx[t] = i);
+    const x = new Array(m.in).fill(0);
+    for (let k = 0; k < m.K; k++) { const mv = _recentMoves[_recentMoves.length - m.K + k]; if (mv != null && idx[mv] != null) x[k * V + idx[mv]] = 1; }
+    const h = new Array(m.hidden);
+    for (let j = 0; j < m.hidden; j++) { let s = m.b1[j]; for (let i = 0; i < m.in; i++) if (x[i]) s += m.W1[i][j]; h[j] = s > 0 ? s : 0; }
+    const o = new Array(V);
+    for (let c = 0; c < V; c++) { let s = m.b2[c]; for (let j = 0; j < m.hidden; j++) s += h[j] * m.W2[j][c]; o[c] = s; }
+    const mx = Math.max(...o); let sum = 0; const p = o.map(v => { const e = Math.exp(v - mx); sum += e; return e; });
+    const dist = {}; toks.forEach((t, i) => dist[t] = p[i] / sum); return dist;
+}
+// The move distribution the cheater would pick next (neural net preferred).
+function _cheaterDist() {
+    if (!_cheaterEnabled || !_cheaterModel) return null;
+    const nn = _mlpDist(); if (nn) return nn;
+    const last = _recentMoves[_recentMoves.length - 1];
+    const bg = last && _cheaterModel.bigram[last];
+    const raw = bg && Object.keys(bg).length ? bg : _cheaterModel.unigram;
+    const tot = Object.values(raw).reduce((a, b) => a + b, 0); if (!tot) return null;
+    const dist = {}; for (const k in raw) dist[k] = raw[k] / tot; return dist;
+}
+function _cheaterSample(dist) {
+    if (!dist) return null;
+    let r = Math.random(); for (const k in dist) { r -= dist[k]; if (r <= 0) return k; } return null;
+}
+function _noteMove(cat) { _recentMoves.push(cat); while (_recentMoves.length > 8) _recentMoves.shift(); }
+
 function _brainState() {
     const region = /in-level/.test(_region) ? 'level' : (_region || 'unknown');
     const stuck = _stuckCount >= 2 ? 'stuck' : _stuckCount >= 1 ? 'slow' : 'moving';
@@ -1924,23 +1978,31 @@ function _rlPickAction(stateKey) {
     }
     s = s || {};
     const total = Object.values(s).reduce((a, b) => a + (b.n || 0), 0) || 1;
+    // The Cheater's net knows the MOVE FLOW but not the "where" — so its prior is
+    // STRONG where the RL hasn't learned this situation yet and FADES as the
+    // state-aware Q-learner gains experience here (that's the part you teach it).
+    const cdist = _cheaterDist();
+    const cheatW = cdist ? 0.8 * Math.exp(-total / 8) : 0;
     // Exploration shrinks as the child grows up (more trusted → exploit more).
     const eps = Math.max(0.06, 0.28 - _childTrust * 0.15);
     if (Math.random() < eps) {
-        // Bias random exploration toward what YOU demonstrated here, else something untried.
+        // In unlearned states, explore the way a TAS would (the net); else bias to
+        // what YOU demonstrated, else something untried.
+        if (cdist && Math.random() < cheatW + 0.2) { const c = _cheaterSample(cdist); if (c) return c; }
         const human = _humanPolicy[stateKey] ? Object.keys(_humanPolicy[stateKey]) : [];
         const untried = _RL_ACTIONS.filter(a => !(s[a] && s[a].n));
         const pool = (human.length && Math.random() < 0.5) ? human
                    : (untried.length ? untried : _RL_ACTIONS);
         return pool[Math.floor(Math.random() * pool.length)];
     }
-    // UCB value + behavioral-cloning prior, across ALL actions (primitives + combos).
+    // State-aware Q + UCB + your-imitation + fading TAS prior, across all actions.
     let best = 'forward', bestSc = -1e9;
     for (const a of _RL_ACTIONS) {
         const v = s[a]; const mean = v ? v.mean : 0; const n = v ? v.n : 0;
         const ucb  = 0.5 * Math.sqrt(Math.log(total + 1) / (n + 1));   // try under-sampled actions
         const imit = 0.6 * _humanPref(stateKey, a);                    // imitate how YOU play here
-        const sc = mean + ucb + imit + (n === 0 ? 0.05 : 0);
+        const cheat = cheatW * (cdist[a] || 0);                        // TAS move-flow prior (fades w/ learning)
+        const sc = mean + ucb + imit + cheat + (n === 0 ? 0.05 : 0);
         if (sc > bestSc) { bestSc = sc; best = a; }
     }
     return best;
@@ -1960,6 +2022,7 @@ async function rlThinkAndAct() {
         const stateKey = _brainState();
         const cat = _rlPickAction(stateKey);
         _pendingLearn = { stateKey, actionCat: cat, wasOverride: false };
+        _noteMove(cat);
         _pushShowoff(stateKey, cat);
         _prevScreenshot = ss;
         updateAIStatus(`🧒 RL plays on its own: ${cat}  ·  ${stateKey}`);
@@ -2036,6 +2099,7 @@ function startRealtimeRL() {
             const stateKey = _brainState();
             const cat = _rlPickAction(stateKey);
             _pendingLearn = { stateKey, actionCat: cat, wasOverride: false };
+            _noteMove(cat);
             _pushShowoff(stateKey, cat);
             _rtPrevFrame = ss;
             _rlSetHeld(_catToHeld(cat));            // HOLD this combo (continuous control)
@@ -2303,7 +2367,7 @@ function updateDebugHUD() {
         ? `<div>child: ${Object.keys(_qTable).length} states · lastR: ${_lastReward == null ? '—' : _lastReward.toFixed(2)} (${_brainBias})</div>` +
           `<div>trust: ${Math.round(_childTrust * 100)}% · steps ✓${_og}/✗${_ob} · best:${_rankName}</div>` +
           `<div>mode: ${_playMode} · taught:${_trainStats.taught || 0} · graded:${_trainStats.graded || 0} · rated:${_trainStats.rated || 0}</div>` +
-          `<div>trained: ${_trainStats.episodes}ep · ${_trainStats.turns}turns</div>`
+          `<div>trained: ${_trainStats.episodes}ep · ${_trainStats.turns}turns${_cheaterEnabled ? ` · 🃏${_cheaterModel ? (_cheaterModel.mlp ? 'net' : 'ngram') : '…'}` : ''}</div>`
         : '';
     el.innerHTML =
         `<b>🐞 SM64-AI debug</b>` +
@@ -3457,6 +3521,7 @@ async function toggleAIPlayer() {
         _lastReward     = null;
         _lastBrainActionCat = null;
         _eligTrace      = [];
+        _recentMoves    = [];
         if (_adaptiveBrain) { _trainStats.episodes++; _saveTrainStats(); }
         startElderWatch();          // child watches when YOU (the elder) take over
         _resetBrainmap();
@@ -4268,6 +4333,7 @@ window.sm64MemDebug = (limit = 12) => {
 restoreProviderState();
 if (_persistBrainmap) loadBrainmap();   // restore the AI's map across reloads
 loadQTable();                            // restore the adaptive brain's learning
+loadCheaterModel();                      // load the TAS-trained neural net (async, non-blocking)
 const _bmPersistEl = document.getElementById('brainmap-persist-toggle');
 if (_bmPersistEl) _bmPersistEl.checked = _persistBrainmap;
 if (_debugHUD) document.getElementById('debug-btn')?.classList.add('active');
