@@ -1601,6 +1601,8 @@ let _lastReward = null;          // RL score handed to the previous action (HUD 
 let _lastBrainActionCat = null;  // previous turn's action category (repeat-failure detection)
 let _eligTrace = [];             // recent (stateKey, cat) for multi-step credit (chains)
 let _lastOpenSide = null;        // 'L' | 'C' | 'R' — depth read of where the path is open
+let _lastVisGrid = null;         // coarse 6×4 normalized brightness grid — the model's "eyes"
+let _visMemory = [];             // recent view signatures, for curiosity / novelty reward
 // BEHAVIORAL CLONING — what YOU tend to do per state, so the RL can imitate your play.
 let _humanPolicy = (() => { try { return JSON.parse(localStorage.getItem('sm64_human_policy')) || {}; } catch { return {}; } })();
 function _saveHumanPolicy() { _lsSet('sm64_human_policy', JSON.stringify(_humanPolicy)); }
@@ -1688,23 +1690,28 @@ function _noteMove(cat) { _recentMoves.push(cat); while (_recentMoves.length > 8
 // TAS data never had. This is the genuinely-trainable-in-browser RL net.
 let _cheaterOnline = (() => { try { const v = localStorage.getItem('sm64_cheat_online'); return v == null ? true : v === '1'; } catch { return true; } })();
 function setCheaterOnline(on) { _cheaterOnline = !!on; try { localStorage.setItem('sm64_cheat_online', _cheaterOnline ? '1' : '0'); } catch {} if (_cheaterOnline) _cheatInitNet(); }
-const _CHEAT_OBS = 5;            // [openL, openC, openR, stuckNorm, regionNorm]
+const _CHEAT_VIS = 24;          // 6×4 brightness grid — the net's actual "eyes"
+const _CHEAT_OBS = 5 + _CHEAT_VIS;   // [openL,openC,openR,stuckNorm,regionNorm] + the view grid
 const _CHEAT_LR = 0.03;
 let _cheatNet = null, _cheatIdx = null, _cheatFwd = null, _cheatPending = null;
 let _cheatBaseline = 0, _cheatUpdates = 0;
 function _cheatInitNet() {
     const m = _cheaterModel && _cheaterModel.mlp; if (!m) return;
     _cheatIdx = {}; _cheaterModel.tokens.forEach((t, i) => _cheatIdx[t] = i);
-    // Restore a previously fine-tuned net if persistence is on; else extend the TAS net.
-    if (_rlPersist) { try { const saved = JSON.parse(localStorage.getItem('sm64_cheat_net')); if (saved && saved.inMoves === m.in) { _cheatNet = saved; return; } } catch {} }
+    // Restore a previously fine-tuned net if persistence is on AND it matches this
+    // input layout; else extend the TAS net with fresh zero-init observation rows.
+    if (_rlPersist) { try { const saved = JSON.parse(localStorage.getItem('sm64_cheat_net')); if (saved && saved.inMoves === m.in && saved.inObs === _CHEAT_OBS) { _cheatNet = saved; return; } } catch {} }
     const W1 = m.W1.map(row => row.slice());
     for (let f = 0; f < _CHEAT_OBS; f++) W1.push(new Array(m.hidden).fill(0));   // obs rows, zero-init
     _cheatNet = { K: m.K, hidden: m.hidden, inMoves: m.in, inObs: _CHEAT_OBS, IN: m.in + _CHEAT_OBS,
         W1, b1: m.b1.slice(), W2: m.W2.map(r => r.slice()), b2: m.b2.slice() };
 }
 function _cheatObs() {
-    return [_lastOpenSide === 'L' ? 1 : 0, _lastOpenSide === 'C' ? 1 : 0, _lastOpenSide === 'R' ? 1 : 0,
+    const o = [_lastOpenSide === 'L' ? 1 : 0, _lastOpenSide === 'C' ? 1 : 0, _lastOpenSide === 'R' ? 1 : 0,
         Math.min(1, _stuckCount / 3), _regionRank(_region) / 3];
+    if (_lastVisGrid) for (let i = 0; i < _CHEAT_VIS; i++) o.push(_lastVisGrid[i] || 0);
+    else for (let i = 0; i < _CHEAT_VIS; i++) o.push(0);
+    return o;
 }
 function _cheatForward(obs) {
     const m = _cheatNet, V = _cheaterModel.tokens.length;
@@ -1760,7 +1767,8 @@ function _brainState() {
     const region = /in-level/.test(_region) ? 'level' : (_region || 'unknown');
     const stuck = _stuckCount >= 2 ? 'stuck' : _stuckCount >= 1 ? 'slow' : 'moving';
     const vis = _lastVisualPct == null ? 'na' : _lastVisualPct < 8 ? 'none' : _lastVisualPct < 25 ? 'low' : 'high';
-    return `${region}|${stuck}|${vis}`;
+    const open = _lastOpenSide || 'na';   // which side looks passable — situational awareness
+    return `${region}|${stuck}|${vis}|${open}`;
 }
 // Classify a set of physical key CODES into one action category. Shared by the
 // AI's planned moves AND the human elder's live inputs (WASD mapped to arrows),
@@ -1821,7 +1829,19 @@ function _brainLearn() {
         if (p.actionCat === _lastBrainActionCat) r -= 0.3;          // repeating the SAME failing move = worse
     }
     if (_progressLog.length > _prevProgressLen) r += 0.9;           // a milestone = the jackpot
-    r = Math.max(-1.2, Math.min(1.5, r));
+    // CURIOSITY (intrinsic reward, automatic — no human rating needed): reward
+    // reaching a NEW-looking view (progress through the level) and gently penalize
+    // loitering on a view it has been stuck staring at. This teaches it to keep
+    // making progress on its own.
+    if (_lastVisGrid) {
+        let minD = Infinity;
+        for (const g of _visMemory) { let dd = 0; for (let i = 0; i < g.length; i++) dd += Math.abs(g[i] - _lastVisGrid[i]); if (dd < minD) minD = dd; }
+        const novelty = _visMemory.length ? minD : 2;
+        if (novelty > 1.6) r += 0.3;          // a genuinely new area → explore bonus
+        else if (novelty < 0.35) r -= 0.15;   // same spot, going nowhere → nudge to move on
+        _visMemory.push(_lastVisGrid.slice()); while (_visMemory.length > 40) _visMemory.shift();
+    }
+    r = Math.max(-1.4, Math.min(1.6, r));
     _qUpdate(p.stateKey, p.actionCat, r);
     // ELIGIBILITY TRACE — credit the few PRIOR actions with a decayed share of a
     // SIGNIFICANT outcome, so the RL learns multi-step CHAINS (the actions that set
@@ -2444,11 +2464,18 @@ async function _depthAnalyze(url) {
         const third = w / 3;
         const cols = [{ b: 0, e: 0, n: 0 }, { b: 0, e: 0, n: 0 }, { b: 0, e: 0, n: 0 }];
         const gray = (x, y) => { const i = (y * w + x) * 4; return (d[i] + d[i + 1] + d[i + 2]) / 3; };
+        // Also build a coarse 6×4 brightness grid — the model's "eyes" (and the
+        // signature used for curiosity/novelty). Cheap: same pixel pass.
+        const GW = 6, GH = 4, grid = new Array(GW * GH).fill(0), gcnt = new Array(GW * GH).fill(0);
+        const gx = w / GW, gy = h / GH;
         for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
             const c = Math.min(2, Math.floor(x / third)), g = gray(x, y);
             cols[c].b += g; cols[c].n++;
             if (x > 0) cols[c].e += Math.abs(g - gray(x - 1, y));
+            const gi = Math.min(GH - 1, Math.floor(y / gy)) * GW + Math.min(GW - 1, Math.floor(x / gx));
+            grid[gi] += g; gcnt[gi]++;
         }
+        _lastVisGrid = grid.map((v, i) => (v / (gcnt[i] || 1)) / 255);   // normalized 0..1
         const score = cols.map(c => ({ bright: c.b / c.n, edge: c.e / c.n }));
         const open = score.map(s => (s.edge * 1.2) - (s.bright / 255) * 40);
         const best = open.indexOf(Math.max(...open)), worst = open.indexOf(Math.min(...open));
@@ -3636,6 +3663,7 @@ async function toggleAIPlayer() {
         _lastBrainActionCat = null;
         _eligTrace      = [];
         _recentMoves    = [];
+        _visMemory      = [];
         _cheatFwd = null; _cheatPending = null;
         if (_adaptiveBrain) { _trainStats.episodes++; _saveTrainStats(); }
         startElderWatch();          // child watches when YOU (the elder) take over
