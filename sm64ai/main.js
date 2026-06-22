@@ -962,6 +962,15 @@ function buildProviderPanel() {
     rtChk.addEventListener('change', () => setRlRealtime(rtChk.checked));
     rtRow.appendChild(rtChk); panel.appendChild(rtRow);
 
+    // Hyper-speed — run the real game faster than real-time (fast training).
+    const hsRow = document.createElement('label');
+    hsRow.className = 'provider-row'; hsRow.style.cursor = 'pointer';
+    hsRow.innerHTML = `<span class="provider-label">⏩ Hyper-speed game (train fast)<br><small>Runs the actual game as fast as your machine can — many× real-time, so the model gets far more play per second. Burns CPU; audio may glitch</small></span>`;
+    const hsChk = document.createElement('input');
+    hsChk.type = 'checkbox'; hsChk.checked = _hyperSpeed;
+    hsChk.addEventListener('change', () => setHyperSpeed(hsChk.checked));
+    hsRow.appendChild(hsChk); panel.appendChild(hsRow);
+
     // Cheater's Model — TAS-trained neural net prior for RL Play.
     const cheatRow = document.createElement('label');
     cheatRow.className = 'provider-row'; cheatRow.style.cursor = 'pointer';
@@ -1599,6 +1608,33 @@ function setAiGrading(on) { _aiGrading = !!on; try { localStorage.setItem('sm64_
 // instead of one-shot timed presses. ON by default for RL Play.
 let _rlRealtime = (() => { try { const v = localStorage.getItem('sm64_rl_realtime'); return v == null ? true : v === '1'; } catch { return true; } })();
 function setRlRealtime(on) { _rlRealtime = !!on; try { localStorage.setItem('sm64_rl_realtime', _rlRealtime ? '1' : '0'); } catch {} }
+
+// ── HYPER-SPEED — run the actual game faster than real-time for fast training ──
+// The WASM game loops via Emscripten's Browser.mainLoop, which calls the GLOBAL
+// requestAnimationFrame each frame. We override rAF with a MessageChannel "zero
+// delay" scheduler (bypasses the setTimeout 4ms clamp), so the game advances as
+// fast as the CPU/GL can render — many× real-time = far more gameplay (and reward
+// signal) per wall-second. Experimental; pegs the CPU. Off by default.
+const _realRAF = (typeof window !== 'undefined' && window.requestAnimationFrame)
+    ? window.requestAnimationFrame.bind(window) : (cb) => setTimeout(() => cb(performance.now()), 16);
+let _hyperSpeed = false, _hyperChan = null, _hyperQueue = [];
+function _hyperInit() {
+    if (_hyperChan) return;
+    try { _hyperChan = new MessageChannel(); _hyperChan.port1.onmessage = () => { const f = _hyperQueue.shift(); if (f) f(performance.now()); }; } catch {}
+}
+if (typeof window !== 'undefined') window.requestAnimationFrame = function (cb) {
+    if (_hyperSpeed && _hyperChan) { _hyperQueue.push(cb); _hyperChan.port2.postMessage(0); return 0; }
+    return _realRAF(cb);
+};
+function setHyperSpeed(on) {
+    _hyperSpeed = !!on;
+    if (_hyperSpeed) _hyperInit();
+    try { localStorage.setItem('sm64_hyper', _hyperSpeed ? '1' : '0'); } catch {}
+    if (typeof updateAIStatus === 'function') updateAIStatus(_hyperSpeed
+        ? '⏩ Hyper-speed ON — game running as fast as your machine allows (burns CPU). Great for training.'
+        : '⏩ Hyper-speed off — back to normal 30fps.');
+}
+window.sm64Hyper = (on) => { setHyperSpeed(on == null ? !_hyperSpeed : on); return _hyperSpeed; };
 let _qTable = {};            // stateKey -> { actionCat: { n, mean } }
 // PERSISTENCE (experimental, OFF by default): a persisted Q-table is a real saved
 // "model" in your browser. When off, learning lives only for the session. When on,
@@ -4617,6 +4653,7 @@ if (_persistBrainmap) loadBrainmap();   // restore the AI's map across reloads
 loadQTable();                            // restore the adaptive brain's learning
 loadCheaterModel();                      // load the TAS-trained neural net (async, non-blocking)
 updateCheaterUI();                       // sync the 🃏 button to the saved state
+try { if (localStorage.getItem('sm64_hyper') === '1') setHyperSpeed(true); } catch {}
 const _bmPersistEl = document.getElementById('brainmap-persist-toggle');
 if (_bmPersistEl) _bmPersistEl.checked = _persistBrainmap;
 if (_debugHUD) document.getElementById('debug-btn')?.classList.add('active');
