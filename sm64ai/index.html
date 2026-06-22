@@ -242,7 +242,11 @@
                 <div class="energy-btn-row">
                     <button id="grind-btn" class="hud-btn green" disabled>▶ Start grinding</button>
                 </div>
-                <p class="provider-desc" style="font-size:11px">Tip: turn on <b>RL Play</b> + <b>⏩ Hyper-speed</b> to bank experience fast, then let the Deep Trainer grind. It trains the live net, so play keeps improving.</p>
+                <div class="energy-btn-row">
+                    <button id="ckpt-dl-btn" class="hud-btn">💾 Download checkpoint</button>
+                    <label class="hud-btn" style="cursor:pointer;text-align:center">📂 Load checkpoint<input id="ckpt-load-input" type="file" accept="application/json,.json" style="display:none"></label>
+                </div>
+                <p class="provider-desc" style="font-size:11px">Start grinding opens a <b>full-power training environment</b> with live PC monitors + a safety auto-stop. Turn on <b>RL Play</b> to feed it fresh experience. Save <b>checkpoints</b> any time to resume training later.</p>
             </div>
         </div>
         <div id="cheater-backdrop" class="modal-backdrop"></div>

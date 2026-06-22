@@ -2024,28 +2024,147 @@ function _cheatReplayStep(t, lr, weight) {
     }
     return -Math.log(p[a] + 1e-9);
 }
+// ── TRAINING ENVIRONMENT — full-power cockpit with live PC monitors + watchdog ──
+let _trainEnvEl = null, _trainMonTimer = null, _trainStart = 0;
+let _grindIntensity = 4;        // inner batches per yield — the throughput knob
+let _grindSafety = true;        // watchdog auto-stop
+let _hyperPrev = null;          // restore hyper-speed on stop
+let _lagTimer = null, _lagLast = 0, _lagSamples = [], _autoStopReason = null;
+function _heapInfo() { const m = (typeof performance !== 'undefined' && performance.memory) || null; return m ? { used: m.usedJSHeapSize, limit: m.jsHeapSizeLimit, pct: m.usedJSHeapSize / (m.jsHeapSizeLimit || 1) } : null; }
+function _lagAvg() { return _lagSamples.length ? _lagSamples.reduce((a, b) => a + b, 0) / _lagSamples.length : 0; }
+function _startLagMon() { _lagLast = performance.now(); if (_lagTimer) clearInterval(_lagTimer); _lagTimer = setInterval(() => { const now = performance.now(); _lagSamples.push(Math.max(0, now - _lagLast - 1000)); if (_lagSamples.length > 5) _lagSamples.shift(); _lagLast = now; }, 1000); }
+function _stopLagMon() { if (_lagTimer) { clearInterval(_lagTimer); _lagTimer = null; } _lagSamples = []; }
+function _netFinite() {
+    const m = _cheatNet; if (!m) return true;
+    for (let c = 0; c < m.b2.length; c++) if (!isFinite(m.b2[c])) return false;
+    for (let j = 0; j < m.b1.length; j++) if (!isFinite(m.b1[j])) return false;
+    for (let i = 0; i < m.W1.length; i += 7) { const r = m.W1[i]; if (!isFinite(r[0]) || !isFinite(r[r.length - 1])) return false; }
+    return true;
+}
+function _fmtDur(s) { s = Math.floor(s); const h = (s / 3600) | 0, m = ((s % 3600) / 60) | 0, ss = s % 60; return (h ? h + 'h ' : '') + (m || h ? m + 'm ' : '') + ss + 's'; }
+function _flashEnv(msg) { const el = _trainEnvEl && _trainEnvEl.querySelector('#te-alert'); if (el) { el.textContent = msg; el.style.display = 'block'; } }
+function _teStopOrClose() { if (_grinding) grindTrain(false); else _closeTrainEnv(); }
+function _openTrainEnv() {
+    if (_trainEnvEl) return;
+    const wrap = document.createElement('div'); wrap.id = 'train-env'; _trainEnvEl = wrap;
+    wrap.innerHTML =
+        '<div class="te-backdrop"></div><div class="te-card">' +
+        '<div class="te-head"><div><span class="te-dot"></span> 🧪 Deep Training Environment <span id="te-state" class="te-state">running</span></div>' +
+        '<div class="te-head-btns"><button id="te-min" class="te-btn ghost" title="Minimize">▭</button><button id="te-stop" class="te-btn danger">⏹ Stop</button></div></div>' +
+        '<div id="te-alert" class="te-alert" style="display:none"></div>' +
+        '<div class="te-grid">' +
+        '<div class="te-cell"><div class="te-k">Train throughput</div><div class="te-v"><span id="te-sps">0</span>/s</div></div>' +
+        '<div class="te-cell"><div class="te-k">Grind steps</div><div class="te-v" id="te-steps">0</div></div>' +
+        '<div class="te-cell"><div class="te-k">Replay buffer</div><div class="te-v" id="te-replay">0</div></div>' +
+        '<div class="te-cell"><div class="te-k">Vision frames</div><div class="te-v" id="te-vis">0</div></div>' +
+        '<div class="te-cell"><div class="te-k">Avg reward</div><div class="te-v" id="te-reward">0</div></div>' +
+        '<div class="te-cell"><div class="te-k">Uptime</div><div class="te-v" id="te-uptime">0s</div></div>' +
+        '<div class="te-cell wide"><div class="te-k">Memory — JS heap</div><div class="te-v" id="te-heap">…</div><div class="te-bar"><div id="te-heap-bar" class="te-bar-fill"></div></div></div>' +
+        '<div class="te-cell"><div class="te-k">Main-thread lag</div><div class="te-v" id="te-lag">0 ms</div></div>' +
+        '<div class="te-cell"><div class="te-k">Experience flow</div><div class="te-v" id="te-flow">idle</div></div>' +
+        '</div>' +
+        '<div class="te-controls"><label class="te-ctl">Intensity <input id="te-intensity" type="range" min="1" max="16" value="4"> <span id="te-intensity-val">4×</span></label>' +
+        '<label class="te-ctl"><input id="te-safety" type="checkbox" checked> Safety auto-stop</label></div>' +
+        '<div class="te-ckpt"><label class="te-ctl"><input id="te-ckpt-buf" type="checkbox" checked> include experience</label>' +
+        '<button id="te-ckpt-dl" class="te-btn green">💾 Download checkpoint</button>' +
+        '<label class="te-btn ghost" style="cursor:pointer">📂 Load checkpoint<input id="te-ckpt-file" type="file" accept="application/json,.json" style="display:none"></label></div>' +
+        '<div class="te-note">Browsers can\'t read true CPU/GPU load — these are the available proxies (JS heap + main-thread lag + throughput). Safety auto-stop halts on memory pressure, NaNs, or sustained overload. Game keeps running underneath to gather experience.</div>' +
+        '</div>';
+    document.body.appendChild(wrap);
+    wrap.querySelector('#te-stop').onclick = _teStopOrClose;
+    wrap.querySelector('#te-min').onclick = () => wrap.classList.toggle('te-min');
+    wrap.querySelector('#te-ckpt-dl').onclick = _downloadCheckpoint;
+    wrap.querySelector('#te-ckpt-file').onchange = _loadCheckpoint;
+    const inten = wrap.querySelector('#te-intensity'); inten.value = _grindIntensity; wrap.querySelector('#te-intensity-val').textContent = _grindIntensity + '×';
+    inten.oninput = e => { _grindIntensity = Math.max(1, Math.min(16, +e.target.value || 4)); wrap.querySelector('#te-intensity-val').textContent = _grindIntensity + '×'; };
+    const saf = wrap.querySelector('#te-safety'); saf.checked = _grindSafety; saf.onchange = e => { _grindSafety = e.target.checked; };
+}
+function _closeTrainEnv() { if (_trainEnvEl) { _trainEnvEl.remove(); _trainEnvEl = null; } }
+function _trainMon() {
+    if (!_trainEnvEl) return;
+    const q = id => _trainEnvEl.querySelector(id), mb = v => (v / 1048576).toFixed(0);
+    q('#te-steps').textContent = _grindSteps.toLocaleString();
+    q('#te-sps').textContent = _grindEps.toLocaleString();
+    q('#te-replay').textContent = _replay.length + '/' + _REPLAY_CAP;
+    q('#te-vis').textContent = _visEmbeds + ' (' + _visionStatus + ')';
+    q('#te-reward').textContent = _grindBaseline.toFixed(3);
+    q('#te-uptime').textContent = _fmtDur((performance.now() - _trainStart) / 1000);
+    q('#te-flow').textContent = (typeof aiPlayerActive !== 'undefined' && aiPlayerActive) ? 'gathering (self-play on)' : 'idle — start RL Play';
+    const heap = _heapInfo();
+    if (heap) { q('#te-heap').textContent = mb(heap.used) + ' / ' + mb(heap.limit) + ' MB (' + (heap.pct * 100).toFixed(0) + '%)'; const bar = q('#te-heap-bar'); bar.style.width = (heap.pct * 100).toFixed(0) + '%'; bar.style.background = heap.pct > 0.85 ? '#e3556e' : heap.pct > 0.65 ? '#ffb454' : '#19c37d'; }
+    else q('#te-heap').textContent = 'n/a (Chrome only)';
+    const lag = _lagAvg(); const lagEl = q('#te-lag'); lagEl.textContent = lag.toFixed(0) + ' ms'; lagEl.style.color = lag > 800 ? '#e3556e' : lag > 300 ? '#ffb454' : '#19c37d';
+    // WATCHDOG — bail (or throttle) before the tab dies.
+    if (_grindSafety && _grinding) {
+        if (heap && heap.pct > 0.92) return _autoStop('memory pressure (' + (heap.pct * 100).toFixed(0) + '% heap)');
+        if (!_netFinite()) return _autoStop('numerical instability (NaN in weights)');
+        if (lag > 2500) { if (_grindIntensity > 1) { _grindIntensity--; q('#te-intensity').value = _grindIntensity; q('#te-intensity-val').textContent = _grindIntensity + '×'; _flashEnv('⚠ main thread overloaded — lowered intensity to ' + _grindIntensity + '×'); } else return _autoStop('main thread overloaded'); }
+    }
+}
+function _autoStop(reason) { _autoStopReason = reason; _flashEnv('⛔ auto-stopped: ' + reason); updateAIStatus('⛔ Deep Trainer auto-stopped — ' + reason); grindTrain(false); }
+function _downloadCheckpoint() {
+    if (!_cheatNet) { updateAIStatus('⚠ Nothing to checkpoint yet'); return; }
+    const includeBuf = !(_trainEnvEl && _trainEnvEl.querySelector('#te-ckpt-buf') && !_trainEnvEl.querySelector('#te-ckpt-buf').checked);
+    const ck = {
+        v: 1, kind: 'sm64-deep-checkpoint', when: new Date().toISOString(),
+        tokens: _cheaterModel ? _cheaterModel.tokens : null,
+        net: _cheatNet, grindSteps: _grindSteps, grindBaseline: _grindBaseline, visEmbeds: _visEmbeds,
+        replay: includeBuf ? _replay.slice(-2500).map(t => ({ a: t.active, p: t.pf, o: Array.from(t.obs, v => Math.round(v * 1000) / 1000), y: t.a, r: Math.round(t.r * 1000) / 1000 })) : [],
+    };
+    const blob = new Blob([JSON.stringify(ck)], { type: 'application/json' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'sm64-deep-checkpoint-' + _grindSteps + '.json'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+    updateAIStatus('💾 Checkpoint downloaded (' + _grindSteps + ' steps, ' + (includeBuf ? _replay.length + ' experiences' : 'net only') + ')');
+}
+async function _loadCheckpoint(e) {
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    try {
+        const ck = JSON.parse(await f.text());
+        if (ck.kind !== 'sm64-deep-checkpoint' || !ck.net) { updateAIStatus('⚠ Not a valid deep checkpoint'); e.target.value = ''; return; }
+        if (_cheaterModel && ck.tokens && ck.tokens.length !== _cheaterModel.tokens.length) { updateAIStatus('⚠ Checkpoint vocab mismatch — load the matching base model first'); e.target.value = ''; return; }
+        if (ck.net.inObs && ck.net.inObs !== _CHEAT_OBS) { updateAIStatus('⚠ Checkpoint observation layout differs from this build — can\'t resume it'); e.target.value = ''; return; }
+        if (_cheaterModel && _cheaterModel.mlp && ck.net.inMoves && ck.net.inMoves !== _cheaterModel.mlp.in) { updateAIStatus('⚠ Checkpoint move-model layout differs — load the matching base model first'); e.target.value = ''; return; }
+        _cheatNet = ck.net; _grindSteps = ck.grindSteps || 0; _grindBaseline = ck.grindBaseline || 0; _visEmbeds = ck.visEmbeds || 0;
+        if (Array.isArray(ck.replay) && ck.replay.length) _replay = ck.replay.map(t => ({ active: t.a || [], pf: t.p || [], obs: Float32Array.from(t.o || []), a: t.y, r: t.r })).filter(t => t.obs.length === _CHEAT_OBS && t.a != null);
+        _lsSet('sm64_cheat_net', JSON.stringify(_cheatNet)); _renderDeepInfo(); _trainMon();
+        updateAIStatus('📂 Checkpoint loaded — ' + _grindSteps + ' steps, ' + _replay.length + ' experiences. Hit Start grinding to resume.');
+    } catch { updateAIStatus('⚠ Could not read checkpoint'); }
+    e.target.value = '';
+}
+window.sm64Checkpoint = _downloadCheckpoint;
 async function grindTrain(on) {
     if (on === false || (on == null && _grinding)) { _grinding = false; return; }
     if (_grinding) return;
     if (!_cheatNet) _cheatInitNet();
     if (!_cheatNet) { updateAIStatus('⚠ Deep Trainer: cheater net not ready yet'); return; }
-    _grinding = true; _renderDeepInfo();
-    updateAIStatus('🧪 Deep Trainer grinding — replaying experience to learn what-to-do-where');
-    const lr = 0.02, temp = 0.5, batch = 64, t0 = performance.now();
-    while (_grinding) {
-        if (_replay.length < 32) { await new Promise(r => setTimeout(r, 500)); continue; }  // wait for experience to bank
-        for (let b = 0; b < batch; b++) {
-            const t = _replay[(Math.random() * _replay.length) | 0];
-            const w = Math.min(4, Math.exp((t.r - _grindBaseline) / temp));   // AWR weight (clipped)
-            _cheatReplayStep(t, lr, w); _grindSteps++;
-        }
-        _grindEps = Math.round(_grindSteps / ((performance.now() - t0) / 1000));
-        if (_grindSteps % (batch * 8) === 0) { _lsSet('sm64_cheat_net', JSON.stringify(_cheatNet)); _renderDeepInfo(); }
-        await new Promise(r => setTimeout(r, 0));   // yield each batch — never freeze the tab
-    }
-    _lsSet('sm64_cheat_net', JSON.stringify(_cheatNet));
-    if (_rlPersist) _replaySave();
+    _grinding = true; _autoStopReason = null; _trainStart = performance.now();
+    _hyperPrev = (typeof _hyperSpeed !== 'undefined') ? _hyperSpeed : false;
+    try { setHyperSpeed(true); } catch {}                  // all power: max game throughput
+    _openTrainEnv(); _startLagMon();
+    if (_trainMonTimer) clearInterval(_trainMonTimer); _trainMonTimer = setInterval(_trainMon, 500);
     _renderDeepInfo();
+    updateAIStatus('🧪 Deep Training environment — grinding at full power');
+    const lr = 0.02, temp = 0.5, batch = 64, t0 = performance.now();
+    try {
+        while (_grinding) {
+            if (_replay.length < 32) { await new Promise(r => setTimeout(r, 400)); continue; }  // wait for experience to bank
+            const inner = batch * Math.max(1, _grindIntensity);
+            for (let b = 0; b < inner; b++) {
+                const t = _replay[(Math.random() * _replay.length) | 0];
+                const w = Math.min(4, Math.exp((t.r - _grindBaseline) / temp));   // AWR weight (clipped)
+                _cheatReplayStep(t, lr, w); _grindSteps++;
+            }
+            _grindEps = Math.round(_grindSteps / ((performance.now() - t0) / 1000));
+            if (_grindSteps % (batch * 8) === 0) { _lsSet('sm64_cheat_net', JSON.stringify(_cheatNet)); _renderDeepInfo(); }
+            await new Promise(r => setTimeout(r, 0));   // yield each cycle — never freeze the tab
+        }
+    } finally {
+        _stopLagMon(); if (_trainMonTimer) { clearInterval(_trainMonTimer); _trainMonTimer = null; }
+        if (_hyperPrev === false) { try { setHyperSpeed(false); } catch {} } _hyperPrev = null;
+        _lsSet('sm64_cheat_net', JSON.stringify(_cheatNet));
+        if (_rlPersist) _replaySave();
+        _renderDeepInfo(); _trainMon();
+        if (_trainEnvEl) { const s = _trainEnvEl.querySelector('#te-state'); if (s) s.textContent = _autoStopReason ? 'stopped: ' + _autoStopReason : 'stopped'; const b = _trainEnvEl.querySelector('#te-stop'); if (b) { b.textContent = '✕ Close'; b.classList.remove('danger'); } }
+    }
 }
 window.sm64Grind = grindTrain;
 // Best-effort replay persistence (only when the user opted into model persistence).
@@ -3081,6 +3200,8 @@ document.getElementById('grind-btn')?.addEventListener('click', () => {
     if (!_grinding && !_deepReady()) { updateAIStatus('⚠ Deep Training needs Chromium + WebGPU + package access'); return; }
     grindTrain(_grinding ? false : true);
 });
+document.getElementById('ckpt-dl-btn')?.addEventListener('click', _downloadCheckpoint);
+document.getElementById('ckpt-load-input')?.addEventListener('change', _loadCheckpoint);
 
 // ── BRAINMAP VISUALIZER (in-UI panel + experimental pop-out window) ──
 function _bmNode(id, label, icon) {
