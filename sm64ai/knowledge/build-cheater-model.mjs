@@ -111,6 +111,25 @@ for (const f of files) {
 
 const tokens = Object.keys(unigram).sort();
 
+// ── "WHAT IS EQUAL TO WHAT" — move similarity by USAGE (distributional) ──────
+// Two moves are similar if they're followed by similar moves across the TAS. This
+// is cosine similarity of each move's next-move distribution. Lets the agent
+// generalize: reward for one move spills a little onto its interchangeable cousins.
+function moveSimilarity(toks, bg) {
+    const vec = {};
+    for (const t of toks) { const row = bg[t] || {}; const v = toks.map(x => row[x] || 0); const norm = Math.hypot(...v) || 1; vec[t] = v.map(x => x / norm); }
+    const sim = {};
+    for (const a of toks) {
+        const arr = [];
+        for (const b of toks) { if (a === b) continue; let d = 0; for (let i = 0; i < toks.length; i++) d += vec[a][i] * vec[b][i]; if (d > 0.2) arr.push([b, +d.toFixed(3)]); }
+        arr.sort((x, y) => y[1] - x[1]); sim[a] = arr.slice(0, 3);
+    }
+    return sim;
+}
+const similar = moveSimilarity(tokens, bigram);
+console.log('What is equal to what (top cousin per move):');
+for (const t of tokens) if (similar[t][0]) console.log(`  ${t} ≈ ${similar[t].map(([m, s]) => `${m}(${s})`).join(', ')}`);
+
 // ── REAL NEURAL NET (from-scratch MLP, behavioral cloning) ──────────────────
 // Predicts the NEXT move from a window of the last K moves (one-hot). This is a
 // genuine neural network trained by SGD + backprop — not a lookup table. Tiny
@@ -162,6 +181,7 @@ const model = {
     trainedOn: { files: used, frames: totalFrames, moves: totalMoves },
     tokens,
     unigram, bigram,           // Markov fallback
+    similar,                   // "what is equal to what" — move similarity for generalization
     mlp,                       // the real neural net (preferred)
     note: 'Cheater\'s Model: a from-scratch MLP (+ n-gram fallback) of SM64 play, trained from .m64 controller inputs. Imitation, not a replay.',
 };

@@ -1620,6 +1620,20 @@ let _eligTrace = [];             // recent (stateKey, cat) for multi-step credit
 let _lastOpenSide = null;        // 'L' | 'C' | 'R' — depth read of where the path is open
 let _lastVisGrid = null;         // coarse 6×4 normalized brightness grid — the model's "eyes"
 let _visMemory = [];             // recent view signatures, for curiosity / novelty reward
+// Training filmstrip — periodic thumbnails so you can SEE whether training is going
+// right (each is tagged with the move + reward; border = green good / red bad).
+let _filmstrip = [], _lastFilmTime = 0, _filmCanvas = null, _filmCtx = null;
+async function _filmAdd(url, cat) {
+    try {
+        const img = await _loadImage(url);
+        if (!_filmCanvas) { _filmCanvas = document.createElement('canvas'); _filmCtx = _filmCanvas.getContext('2d'); }
+        _filmCanvas.width = 96; _filmCanvas.height = 72;
+        _filmCtx.drawImage(img, 0, 0, 96, 72);
+        _filmstrip.push({ thumb: _filmCanvas.toDataURL('image/jpeg', 0.5), cat, r: _lastReward });
+        while (_filmstrip.length > 16) _filmstrip.shift();
+    } catch {}
+}
+function _filmMaybe(url, cat) { if (Date.now() - _lastFilmTime > 6000) { _lastFilmTime = Date.now(); _filmAdd(url, cat); } }
 // BEHAVIORAL CLONING — what YOU tend to do per state, so the RL can imitate your play.
 let _humanPolicy = (() => { try { return JSON.parse(localStorage.getItem('sm64_human_policy')) || {}; } catch { return {}; } })();
 function _saveHumanPolicy() { _lsSet('sm64_human_policy', JSON.stringify(_humanPolicy)); }
@@ -1945,6 +1959,12 @@ function _brainLearn() {
     }
     r = Math.max(-1.4, Math.min(1.6, r));
     _qUpdate(p.stateKey, p.actionCat, r);
+    // GENERALIZE — "what is equal to what": spill a fraction of a clear outcome onto
+    // interchangeable moves (forward→forward-left, jump-forward→dive…) so learning
+    // transfers across similar moves instead of relearning each from scratch.
+    if (Math.abs(r) >= 0.3 && _cheaterModel && _cheaterModel.similar) {
+        for (const [sim, score] of (_cheaterModel.similar[p.actionCat] || [])) _qUpdate(p.stateKey, sim, r * score * 0.3);
+    }
     // ELIGIBILITY TRACE — credit the few PRIOR actions with a decayed share of a
     // SIGNIFICANT outcome, so the RL learns multi-step CHAINS (the actions that set
     // up a good result, e.g. jump→crouch, gain value too). Only for big outcomes so
@@ -2011,7 +2031,7 @@ function setBrainBias(b) {
 function loadQTable() {
     if (!_rlPersist) {   // session-only: start fresh, ignore any stale storage
         _qTable = {}; _humanPolicy = {}; _childTrust = 0.15;
-        _trainStats = { episodes: 0, turns: 0, overrides: 0, overrideGood: 0, overrideBad: 0, taught: 0, graded: 0, rated: 0, bestRegionRank: 0 };
+        _trainStats = { episodes: 0, turns: 0, overrides: 0, overrideGood: 0, overrideBad: 0, taught: 0, graded: 0, rated: 0, whereTaught: 0, bestRegionRank: 0 };
         return;
     }
     try { _qTable = JSON.parse(localStorage.getItem('sm64_qtable')) || {}; } catch { _qTable = {}; }
@@ -2020,7 +2040,7 @@ function loadQTable() {
 function clearQTable() {
     _qTable = {}; _humanPolicy = {}; _eligTrace = [];
     ['sm64_qtable', 'sm64_human_policy'].forEach(k => { try { localStorage.removeItem(k); } catch {} });
-    _trainStats = { episodes: 0, turns: 0, overrides: 0, overrideGood: 0, overrideBad: 0, taught: 0, graded: 0, rated: 0, bestRegionRank: 0 }; _saveTrainStats();
+    _trainStats = { episodes: 0, turns: 0, overrides: 0, overrideGood: 0, overrideBad: 0, taught: 0, graded: 0, rated: 0, whereTaught: 0, bestRegionRank: 0 }; _saveTrainStats();
     if (typeof _setChildTrust === 'function') _setChildTrust(0.15);   // back to a fresh, untrusted child
     try { localStorage.removeItem('sm64_cheat_net'); } catch {}
     _cheatBaseline = 0; _cheatUpdates = 0; _cheatPending = null; _cheatFwd = null;
@@ -2118,6 +2138,7 @@ function startElderWatch() {
         }
         const ss = await captureScreen(aiStream).catch(() => null);
         if (!ss) return;
+        await _depthAnalyze(ss);               // compute the view grid + open-side for THIS frame
         const cat = playerMovementDetected ? _categorizeCodes([...playerInputs]) : null;
 
         if (cat) {
@@ -2130,6 +2151,13 @@ function startElderWatch() {
                     _setChildTrust(_childTrust + 0.004);
                     _lastTaughtCat = cat;
                 }
+            }
+            // WHAT-TO-DO-WHERE: supervised step on the NET — map THIS screen (vision
+            // grid + features) → the move YOU just made. This is the real source of
+            // 'where' (the TAS files have inputs but no screen); your play provides it.
+            if (_cheaterOnline && _cheatNet && _lastVisGrid) {
+                const aIdx = _cheatIdx[cat];
+                if (aIdx != null) { _cheatTrain(_cheatForward(_cheatObs()), aIdx, 1.0); _trainStats.whereTaught = (_trainStats.whereTaught || 0) + 1; }
             }
             _humanPolicyAdd(_brainState(), cat);   // behavioral cloning: learn what YOU do here
             // Accumulate this move into the current grading window.
@@ -2258,6 +2286,7 @@ async function rlThinkAndAct() {
         _pushShowoff(stateKey, cat);
         _prevScreenshot = ss;
         updateAIStatus(`🧒 RL plays on its own: ${cat}  ·  ${stateKey}`);
+        _filmMaybe(ss, cat);                   // periodic snapshot — is training going right?
         await aiExecute({ actions: _catToAction(cat, true) || [{ keys: ['ArrowUp'], hold_ms: 520 }] });
         updateDebugHUD();
     } finally { _busyCycle = false; }
@@ -2338,6 +2367,7 @@ function startRealtimeRL() {
             _pushShowoff(stateKey, cat);
             _rtPrevFrame = ss;
             _rlSetHeld(_catToHeld(cat));            // HOLD this combo (continuous control)
+            _filmMaybe(ss, cat);                   // periodic snapshot — is training going right?
             updateAIStatus(`🧒 RL (real-time): holding ${cat}  ·  ${stateKey}`);
             updateDebugHUD();
         } finally { busy = false; }
@@ -2609,7 +2639,7 @@ function updateDebugHUD() {
         ? `<div>child: ${Object.keys(_qTable).length} states · lastR: ${_lastReward == null ? '—' : _lastReward.toFixed(2)} (${_brainBias})</div>` +
           `<div>trust: ${Math.round(_childTrust * 100)}% · steps ✓${_og}/✗${_ob} · best:${_rankName}</div>` +
           `<div>mode: ${_playMode} · taught:${_trainStats.taught || 0} · graded:${_trainStats.graded || 0} · rated:${_trainStats.rated || 0}</div>` +
-          `<div>trained: ${_trainStats.episodes}ep · ${_trainStats.turns}turns${_cheaterEnabled ? ` · 🃏${_cheaterModel ? (_cheaterOnline && _cheatNet ? `net⚡${_cheatUpdates}` : (_cheaterModel.mlp ? 'net' : 'ngram')) : '…'}` : ''}</div>`
+          `<div>trained: ${_trainStats.episodes}ep · ${_trainStats.turns}turns${_cheaterEnabled ? ` · 🃏${_cheaterModel ? (_cheaterOnline && _cheatNet ? `net⚡${_cheatUpdates}` : (_cheaterModel.mlp ? 'net' : 'ngram')) : '…'}` : ''}${_trainStats.whereTaught ? ` · where:${_trainStats.whereTaught}` : ''}</div>`
         : '';
     el.innerHTML =
         `<b>🐞 SM64-AI debug</b>` +
@@ -2619,7 +2649,13 @@ function updateDebugHUD() {
         `<div>fmt: ${_cmdFormat}</div>` +
         `<div>mode: ${flags}</div>` +
         brainLine +
-        `<div>done: ${_esc(_progressLog.slice(-3).join(' → ') || '—')}</div>`;
+        `<div>done: ${_esc(_progressLog.slice(-3).join(' → ') || '—')}</div>` +
+        (_filmstrip.length
+            ? `<div style="margin-top:5px;font-size:9px;color:#7a86a0">📸 training filmstrip (border = reward)</div>` +
+              `<div style="display:flex;gap:2px;flex-wrap:wrap;max-width:340px;margin-top:2px">` +
+              _filmstrip.slice(-12).map(f => `<div style="text-align:center"><img src="${f.thumb}" style="width:52px;height:39px;border-radius:3px;border:1px solid ${f.r >= 0.25 ? '#19c37d' : f.r <= -0.25 ? '#e3556e' : '#39435c'}"><div style="font-size:8px;color:#8a96b0;line-height:1.1">${_esc(f.cat || '')}</div></div>`).join('') +
+              `</div>`
+            : '');
 }
 function toggleDebugHUD(on) {
     _debugHUD = (on == null) ? !_debugHUD : !!on;
@@ -3766,6 +3802,7 @@ async function toggleAIPlayer() {
         _eligTrace      = [];
         _recentMoves    = [];
         _visMemory      = [];
+        _filmstrip      = []; _lastFilmTime = 0;
         _cheatFwd = null; _cheatPending = null;
         if (_adaptiveBrain) { _trainStats.episodes++; _saveTrainStats(); }
         startElderWatch();          // child watches when YOU (the elder) take over

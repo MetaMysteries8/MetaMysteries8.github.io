@@ -50,6 +50,19 @@ function buildNGram() {
     return { unigram, bigram };
 }
 
+// "What is equal to what" — move similarity by usage (cosine of next-move dists).
+function moveSimilarity(toks, bg) {
+    const vec = {};
+    for (const t of toks) { const row = bg[t] || {}; const v = toks.map(x => row[x] || 0); const norm = Math.hypot(...v) || 1; vec[t] = v.map(x => x / norm); }
+    const sim = {};
+    for (const a of toks) {
+        const arr = [];
+        for (const b of toks) { if (a === b) continue; let d = 0; for (let i = 0; i < toks.length; i++) d += vec[a][i] * vec[b][i]; if (d > 0.2) arr.push([b, +d.toFixed(3)]); }
+        arr.sort((x, y) => y[1] - x[1]); sim[a] = arr.slice(0, 3);
+    }
+    return sim;
+}
+
 const randM = (n, m, s) => Array.from({ length: n }, () => Array.from({ length: m }, () => (Math.random() * 2 - 1) * s));
 
 async function train() {
@@ -107,10 +120,11 @@ async function train() {
     const ms = performance.now() - t0, eps = Math.round(totalEx / (ms / 1000));
     const round = a => a.map(r => Array.isArray(r) ? r.map(x => +x.toFixed(4)) : +r.toFixed(4));
     const ng = buildNGram();
+    const sim = moveSimilarity(SEQ.tokens, ng.bigram);
     const moves = SEQ.seqs.reduce((a, s) => a + s.length, 0);
     lastModel = {
         v: 2, trainedOn: { files: SEQ.seqs.length, moves },
-        tokens: SEQ.tokens, unigram: ng.unigram, bigram: ng.bigram,
+        tokens: SEQ.tokens, unigram: ng.unigram, bigram: ng.bigram, similar: sim,
         mlp: { K, hidden, in: IN, W1: round(W1), b1: round(b1), W2: round(W2), b2: round(b2) },
         note: "Community-pretrained Cheater's Model (standalone pretrainer).",
         meta: { confidence: +(lastAcc * 100).toFixed(2), passes: done, examplesPerSec: eps, seconds: +(ms / 1000).toFixed(1), K, hidden },
@@ -123,7 +137,9 @@ async function train() {
     $('result').innerHTML =
         `<div class="big">${(lastAcc * 100).toFixed(1)}% confidence</div>` +
         `<div>${done} passes · ${eps.toLocaleString()} examples/sec · ${(ms / 1000).toFixed(1)}s · K=${K}, hidden=${hidden}</div>` +
-        `<div style="margin-top:8px">Web-fit: <b class="${webFit ? 'verdict-ok' : 'verdict-no'}">${webFit ? '✅ YES — runs great in a browser' : '😬 heavy — lower epochs/hidden and retry'}</b></div>`;
+        `<div style="margin-top:8px">Web-fit: <b class="${webFit ? 'verdict-ok' : 'verdict-no'}">${webFit ? '✅ YES — runs great in a browser' : '😬 heavy — lower epochs/hidden and retry'}</b></div>` +
+        `<div style="margin-top:12px;font-size:13px;color:#8a96b0">🔗 What's equal to what (learned from the TAS):</div>` +
+        `<div style="font-family:ui-monospace,monospace;font-size:12px;margin-top:4px">${SEQ.tokens.map(t => (sim[t] && sim[t][0]) ? `${t} ≈ ${sim[t].map(([m]) => m).join(', ')}` : '').filter(Boolean).join('<br>')}</div>`;
     $('resultCard').style.display = 'block';
 }
 
