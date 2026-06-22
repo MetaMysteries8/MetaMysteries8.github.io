@@ -24,14 +24,21 @@ async function loadSeqs() {
     }
 }
 
-// Build (sparse move-context → next-move) examples for a given K.
+const PHASE_BUCKETS = 8;   // soft "how far through the run" signal (sharpens confidence)
+// Soft (triangular) phase encoding → [[featIndex, value]…] over PB buckets.
+function phaseFeat(p, base, PB) {
+    const pos = Math.max(0, Math.min(1, p)) * (PB - 1), lo = Math.floor(pos), frac = pos - lo;
+    const out = [[base + lo, 1 - frac]]; if (lo + 1 < PB) out.push([base + lo + 1, frac]); return out;
+}
+// Build (move-context + run-phase → next-move) examples for a given K.
 function buildExamples(K, V) {
-    const ex = [];
+    const ex = [], base = K * V, PB = PHASE_BUCKETS;
     for (const enc of SEQ.seqs) {
         const ids = []; for (let i = 0; i < enc.length; i++) ids.push(enc.charCodeAt(i) - 48);
-        for (let i = 0; i < ids.length; i++) {
+        const L = ids.length;
+        for (let i = 0; i < L; i++) {
             const active = []; for (let k = 0; k < K; k++) { const j = i - K + k; if (j >= 0) active.push(k * V + ids[j]); }
-            ex.push({ a: active, y: ids[i] });
+            ex.push({ a: active, pf: phaseFeat(L > 1 ? i / (L - 1) : 0, base, PB), y: ids[i] });
         }
     }
     return ex;
@@ -71,7 +78,7 @@ async function train() {
     const hidden = Math.max(4, Math.min(128, +$('hidden').value | 0));
     const epochs = Math.max(1, Math.min(80, +$('epochs').value | 0));
     const lr = Math.max(0.001, Math.min(1, +$('lr').value || 0.08));
-    const V = SEQ.tokens.length, IN = K * V;
+    const V = SEQ.tokens.length, PB = PHASE_BUCKETS, IN = K * V + PB;
 
     training = true; $('train').disabled = true; $('stop').disabled = false; $('resultCard').style.display = 'none';
     $('status').textContent = 'Building training set…'; await frame();
@@ -88,9 +95,9 @@ async function train() {
         for (let i = 0; i < N && training; i += chunk) {
             const end = Math.min(N, i + chunk);
             for (let n = i; n < end; n++) {
-                const act = ex[n].a, y = ex[n].y;
+                const act = ex[n].a, pf = ex[n].pf, y = ex[n].y;
                 const h = new Array(hidden);
-                for (let j = 0; j < hidden; j++) { let s = b1[j]; for (const ii of act) s += W1[ii][j]; h[j] = s > 0 ? s : 0; }
+                for (let j = 0; j < hidden; j++) { let s = b1[j]; for (const ii of act) s += W1[ii][j]; for (const [ii, val] of pf) s += W1[ii][j] * val; h[j] = s > 0 ? s : 0; }
                 const o = new Array(V);
                 for (let c = 0; c < V; c++) { let s = b2[c]; for (let j = 0; j < hidden; j++) s += h[j] * W2[j][c]; o[c] = s; }
                 const mx = Math.max(...o); let sum = 0; const p = o.map(v => { const ee = Math.exp(v - mx); sum += ee; return ee; }); for (let c = 0; c < V; c++) p[c] /= sum;
@@ -101,7 +108,7 @@ async function train() {
                 for (let j = 0; j < hidden; j++) for (let c = 0; c < V; c++) dh[j] += dO[c] * W2[j][c];
                 for (let j = 0; j < hidden; j++) for (let c = 0; c < V; c++) W2[j][c] -= lr * dO[c] * h[j];
                 for (let c = 0; c < V; c++) b2[c] -= lr * dO[c];
-                for (let j = 0; j < hidden; j++) { if (h[j] <= 0) continue; const g = dh[j]; for (const ii of act) W1[ii][j] -= lr * g; b1[j] -= lr * g; }
+                for (let j = 0; j < hidden; j++) { if (h[j] <= 0) continue; const g = dh[j]; for (const ii of act) W1[ii][j] -= lr * g; for (const [ii, val] of pf) W1[ii][j] -= lr * g * val; b1[j] -= lr * g; }
             }
             totalEx += end - i;
             const pct = ((e + end / N) / epochs * 100);
@@ -125,7 +132,7 @@ async function train() {
     lastModel = {
         v: 2, trainedOn: { files: SEQ.seqs.length, moves },
         tokens: SEQ.tokens, unigram: ng.unigram, bigram: ng.bigram, similar: sim,
-        mlp: { K, hidden, in: IN, W1: round(W1), b1: round(b1), W2: round(W2), b2: round(b2) },
+        mlp: { K, hidden, phase: PB, in: IN, W1: round(W1), b1: round(b1), W2: round(W2), b2: round(b2) },
         note: "Community-pretrained Cheater's Model (standalone pretrainer).",
         meta: { confidence: +(lastAcc * 100).toFixed(2), passes: done, examplesPerSec: eps, seconds: +(ms / 1000).toFixed(1), K, hidden },
     };

@@ -38,13 +38,13 @@
 <body>
 <div class="wrap">
   <h1>🏋️ Cheater's Model Pretrainer</h1>
-  <p class="sub">Train a move-prediction neural net on <b>all 103 SM64 TAS runs</b>, right here in your browser — no install, no GPU. Tune the architecture, push for the best <b>confidence</b> you can, then <b>submit your model</b>. The best community model can become the app's main Cheater's Model. 🃏</p>
+  <p class="sub">Train a move-prediction neural net on <b>all 103 SM64 TAS runs</b>, right here in your browser — no install, no GPU. The net is <b>phase-conditioned</b> (it knows how far through the run it is, so it can tell which move belongs <i>where</i>). Tune the architecture, push for the best <b>confidence</b> you can, then <b>submit your model</b>. The best community model can become the app's main Cheater's Model. 🃏</p>
 
   <div class="card">
     <h2>1 · Configure &amp; train</h2>
     <div class="grid">
-      <label>Context — last K moves <input id="K" type="number" value="3" min="1" max="6"></label>
-      <label>Hidden units <input id="hidden" type="number" value="24" min="4" max="128"></label>
+      <label>Context — last K moves <input id="K" type="number" value="4" min="1" max="6"></label>
+      <label>Hidden units <input id="hidden" type="number" value="32" min="4" max="128"></label>
       <label>Passes over the TAS (epochs) <input id="epochs" type="number" value="14" min="1" max="80"></label>
       <label>Learning rate <input id="lr" type="number" value="0.08" step="0.01" min="0.001" max="1"></label>
     </div>

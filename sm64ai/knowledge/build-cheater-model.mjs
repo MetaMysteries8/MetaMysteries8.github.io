@@ -131,49 +131,60 @@ console.log('What is equal to what (top cousin per move):');
 for (const t of tokens) if (similar[t][0]) console.log(`  ${t} ≈ ${similar[t].map(([m, s]) => `${m}(${s})`).join(', ')}`);
 
 // ── REAL NEURAL NET (from-scratch MLP, behavioral cloning) ──────────────────
-// Predicts the NEXT move from a window of the last K moves (one-hot). This is a
-// genuine neural network trained by SGD + backprop — not a lookup table. Tiny
-// enough to ship as JSON and run forward in the browser.
-function trainMLP(sequences, vocab, { K = 3, hidden = 24, epochs = 6, lr = 0.1 } = {}) {
-    const V = vocab.length, IN = K * V;
+// Predicts the NEXT move from a window of the last K moves (one-hot) PLUS a PHASE
+// signal — how far through the run we are (0=start … 1=end), soft-encoded over PB
+// buckets. Phase is the key upgrade: the same short move-context recurs all over a
+// run but is followed by different moves depending on WHERE you are; telling the
+// net the position disambiguates them, sharply raising confidence — and gives the
+// agent a sense of "where in the run I should be", the seed of a self-correcting
+// TAS. Genuine SGD + backprop, tiny enough to ship as JSON and run in the browser.
+const PHASE_BUCKETS = 8;
+// Soft (triangular) phase encoding: returns [[featIndex, value]…] over PB buckets.
+function phaseFeat(p, base, PB) {
+    const pos = Math.max(0, Math.min(1, p)) * (PB - 1), lo = Math.floor(pos), frac = pos - lo;
+    const out = [[base + lo, 1 - frac]]; if (lo + 1 < PB) out.push([base + lo + 1, frac]); return out;
+}
+function trainMLP(sequences, vocab, { K = 4, hidden = 32, epochs = 10, lr = 0.1 } = {}) {
+    const V = vocab.length, PB = PHASE_BUCKETS, PHASE_BASE = K * V, IN = K * V + PB;
     const idx = Object.fromEntries(vocab.map((t, i) => [t, i]));
     const randM = (n, m, s) => Array.from({ length: n }, () => Array.from({ length: m }, () => (Math.random() * 2 - 1) * s));
     let W1 = randM(IN, hidden, Math.sqrt(2 / IN)), b1 = new Array(hidden).fill(0);
     let W2 = randM(hidden, V, Math.sqrt(2 / hidden)), b2 = new Array(V).fill(0);
 
-    // Build (sparse one-hot feature, target) examples.
+    // Build examples: act = move one-hots (value 1), pf = fractional phase features.
     const X = [], Y = [];
-    for (const seq of sequences) for (let i = 0; i < seq.length; i++) {
-        const active = [];
-        for (let k = 0; k < K; k++) { const j = i - K + k; if (j >= 0) active.push(k * V + idx[seq[j]]); }
-        X.push(active); Y.push(idx[seq[i]]);
-    }
+    for (const seq of sequences) { const L = seq.length; for (let i = 0; i < L; i++) {
+        const act = [];
+        for (let k = 0; k < K; k++) { const j = i - K + k; if (j >= 0) act.push(k * V + idx[seq[j]]); }
+        X.push({ act, pf: phaseFeat(L > 1 ? i / (L - 1) : 0, PHASE_BASE, PB) }); Y.push(idx[seq[i]]);
+    } }
     const order = X.map((_, i) => i);
     for (let e = 0; e < epochs; e++) {
         for (let a = order.length - 1; a > 0; a--) { const b = (Math.random() * (a + 1)) | 0;[order[a], order[b]] = [order[b], order[a]]; }
-        let loss = 0;
+        let loss = 0, correct = 0;
         for (const n of order) {
-            const act = X[n], y = Y[n];
+            const { act, pf } = X[n], y = Y[n];
             const h = new Array(hidden);
-            for (let j = 0; j < hidden; j++) { let s = b1[j]; for (const i of act) s += W1[i][j]; h[j] = s > 0 ? s : 0; }
+            for (let j = 0; j < hidden; j++) { let s = b1[j]; for (const i of act) s += W1[i][j]; for (const [i, val] of pf) s += W1[i][j] * val; h[j] = s > 0 ? s : 0; }
             const o = new Array(V);
             for (let c = 0; c < V; c++) { let s = b2[c]; for (let j = 0; j < hidden; j++) s += h[j] * W2[j][c]; o[c] = s; }
             const mx = Math.max(...o); let sum = 0; const p = o.map(v => { const ex = Math.exp(v - mx); sum += ex; return ex; });
             for (let c = 0; c < V; c++) p[c] /= sum;
             loss += -Math.log(p[y] + 1e-9);
+            let arg = 0; for (let c = 1; c < V; c++) if (p[c] > p[arg]) arg = c; if (arg === y) correct++;
             const dO = p; dO[y] -= 1;
             const dh = new Array(hidden).fill(0);
             for (let j = 0; j < hidden; j++) for (let c = 0; c < V; c++) { dh[j] += dO[c] * W2[j][c]; W2[j][c] -= lr * dO[c] * h[j]; }
             for (let c = 0; c < V; c++) b2[c] -= lr * dO[c];
-            for (let j = 0; j < hidden; j++) { if (h[j] <= 0) continue; const g = dh[j]; for (const i of act) W1[i][j] -= lr * g; b1[j] -= lr * g; }
+            for (let j = 0; j < hidden; j++) { if (h[j] <= 0) continue; const g = dh[j]; for (const i of act) W1[i][j] -= lr * g; for (const [i, val] of pf) W1[i][j] -= lr * g * val; b1[j] -= lr * g; }
         }
-        console.log(`  MLP epoch ${e + 1}/${epochs} — loss ${(loss / X.length).toFixed(3)}`);
+        console.log(`  MLP epoch ${e + 1}/${epochs} — loss ${(loss / X.length).toFixed(3)} · top-1 ${(correct / X.length * 100).toFixed(1)}%`);
     }
     const round = a => a.map(r => Array.isArray(r) ? r.map(x => +x.toFixed(4)) : +r.toFixed(4));
-    return { K, hidden, in: IN, W1: round(W1), b1: round(b1), W2: round(W2), b2: round(b2), examples: X.length };
+    return { K, hidden, phase: PB, in: IN, W1: round(W1), b1: round(b1), W2: round(W2), b2: round(b2), examples: X.length };
 }
 
-console.log('Training neural net (behavioral cloning on TAS moves)…');
+console.log('Training neural net (behavioral cloning on TAS moves, phase-conditioned)…');
 const mlp = trainMLP(allSeqs, tokens);
 
 const model = {

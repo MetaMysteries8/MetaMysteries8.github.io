@@ -1653,6 +1653,7 @@ let _prevProgressLen = 0;    // to detect a milestone earned by the last action
 let _lastReward = null;          // RL score handed to the previous action (HUD + LLM feedback)
 let _lastBrainActionCat = null;  // previous turn's action category (repeat-failure detection)
 let _eligTrace = [];             // recent (stateKey, cat) for multi-step credit (chains)
+let _recovering = false;         // in a deliberate "break out of being stuck" recovery
 let _lastOpenSide = null;        // 'L' | 'C' | 'R' — depth read of where the path is open
 let _lastVisGrid = null;         // coarse 6×4 normalized brightness grid — the model's "eyes"
 let _visMemory = [];             // recent view signatures, for curiosity / novelty reward
@@ -1716,14 +1717,33 @@ async function loadCheaterModel() {
         if (r.ok) { _cheaterModel = await r.json(); _cheatInitNet(); console.log(`[SM64] Cheater's Model loaded — ${_cheaterModel.mlp ? 'neural net' : 'n-gram'}, trained on ${_cheaterModel.trainedOn?.files} TAS runs.`); }
     } catch {}
 }
+// PHASE conditioning — how far through the current attempt we are (0=start … 1=end),
+// soft-encoded over the model's phase buckets. Returns [[featIndex,value]…] within
+// the move-input block. Lets the net disambiguate identical move-contexts by WHERE
+// they happen, and gives the agent a sense of "where in the run I should be" — the
+// basis for recognising it has gone off-track. Empty for old (no-phase) models.
+function _phaseFeat(p) {
+    const m = _cheaterModel && _cheaterModel.mlp; const PB = (m && m.phase) || 0; if (!PB) return [];
+    const V = _cheaterModel.tokens.length, base = m.K * V;
+    const pos = Math.max(0, Math.min(1, p)) * (PB - 1), lo = pos | 0, frac = pos - lo;
+    const out = [[base + lo, 1 - frac]]; if (lo + 1 < PB) out.push([base + lo + 1, frac]); return out;
+}
+// Best live estimate of run-progress for the phase input: region depth + milestones
+// reached (the truest "how far in are we" we can read without level labels).
+function _livePhase() {
+    const reg = (typeof _regionRank === 'function' ? _regionRank(_region) : 0) / 3;
+    const mil = Math.min(1, _progressLog.length / 8);
+    return Math.max(0, Math.min(1, 0.45 * reg + 0.55 * mil));
+}
 // Real neural-net forward pass → softmax distribution over the next move.
 function _mlpDist() {
     const m = _cheaterModel && _cheaterModel.mlp; if (!m) return null;
     const toks = _cheaterModel.tokens, V = toks.length, idx = {}; toks.forEach((t, i) => idx[t] = i);
     const x = new Array(m.in).fill(0);
     for (let k = 0; k < m.K; k++) { const mv = _recentMoves[_recentMoves.length - m.K + k]; if (mv != null && idx[mv] != null) x[k * V + idx[mv]] = 1; }
+    for (const [i, val] of _phaseFeat(_livePhase())) x[i] = val;
     const h = new Array(m.hidden);
-    for (let j = 0; j < m.hidden; j++) { let s = m.b1[j]; for (let i = 0; i < m.in; i++) if (x[i]) s += m.W1[i][j]; h[j] = s > 0 ? s : 0; }
+    for (let j = 0; j < m.hidden; j++) { let s = m.b1[j]; for (let i = 0; i < m.in; i++) if (x[i]) s += m.W1[i][j] * x[i]; h[j] = s > 0 ? s : 0; }
     const o = new Array(V);
     for (let c = 0; c < V; c++) { let s = m.b2[c]; for (let j = 0; j < m.hidden; j++) s += h[j] * m.W2[j][c]; o[c] = s; }
     const mx = Math.max(...o); let sum = 0; const p = o.map(v => { const e = Math.exp(v - mx); sum += e; return e; });
@@ -1784,23 +1804,25 @@ function _cheatForward(obs) {
     const m = _cheatNet, V = _cheaterModel.tokens.length;
     const active = [];
     for (let k = 0; k < m.K; k++) { const mv = _recentMoves[_recentMoves.length - m.K + k]; if (mv != null && _cheatIdx[mv] != null) active.push(k * V + _cheatIdx[mv]); }
+    const pf = _phaseFeat(_livePhase());        // phase buckets live inside the move-input block
     const h = new Array(m.hidden);
     for (let j = 0; j < m.hidden; j++) {
         let s = m.b1[j];
         for (const i of active) s += m.W1[i][j];
+        for (const [i, val] of pf) s += m.W1[i][j] * val;
         for (let f = 0; f < m.inObs; f++) { const ov = obs[f]; if (ov) s += m.W1[m.inMoves + f][j] * ov; }
         h[j] = s > 0 ? s : 0;
     }
     const o = new Array(V);
     for (let c = 0; c < V; c++) { let s = m.b2[c]; for (let j = 0; j < m.hidden; j++) s += h[j] * m.W2[j][c]; o[c] = s; }
     const mx = Math.max(...o); let sum = 0; const p = o.map(v => { const e = Math.exp(v - mx); sum += e; return e; }); for (let c = 0; c < V; c++) p[c] /= sum;
-    return { p, h, active, obs };
+    return { p, h, active, pf, obs };
 }
 // One REINFORCE gradient step toward the action TAKEN, scaled by advantage.
 function _cheatTrain(cache, aIdx, adv) {
     const m = _cheatNet, V = _cheaterModel.tokens.length, lr = _CHEAT_LR;
     adv = Math.max(-1, Math.min(1, adv));
-    const { p, h, active, obs } = cache;
+    const { p, h, active, obs } = cache, pf = cache.pf || [];
     const go = new Array(V); for (let c = 0; c < V; c++) go[c] = adv * ((c === aIdx ? 1 : 0) - p[c]);  // ascent on log π
     const dh = new Array(m.hidden).fill(0);
     for (let j = 0; j < m.hidden; j++) for (let c = 0; c < V; c++) dh[j] += go[c] * m.W2[j][c];
@@ -1809,6 +1831,7 @@ function _cheatTrain(cache, aIdx, adv) {
     for (let j = 0; j < m.hidden; j++) {
         if (h[j] <= 0) continue; const g = dh[j];
         for (const i of active) m.W1[i][j] += lr * g;
+        for (const [i, val] of pf) m.W1[i][j] += lr * g * val;
         for (let f = 0; f < m.inObs; f++) { const ov = obs[f]; if (ov) m.W1[m.inMoves + f][j] += lr * g * ov; }
         m.b1[j] += lr * g;
     }
@@ -1846,19 +1869,20 @@ function _buildTasExamples(seqData) {
     // seqData.tokens order == net token order (both from the same build) → char-48 = index.
     for (const enc of seqData.seqs) {
         const ids = []; for (let i = 0; i < enc.length; i++) ids.push(enc.charCodeAt(i) - 48);
-        for (let i = 0; i < ids.length; i++) {
+        const L = ids.length;
+        for (let i = 0; i < L; i++) {
             const active = []; for (let k = 0; k < K; k++) { const j = i - K + k; if (j >= 0) active.push(k * V + ids[j]); }
-            ex.push({ active, target: ids[i] });
+            ex.push({ active, target: ids[i], pf: _phaseFeat(L > 1 ? i / (L - 1) : 0) });
         }
     }
     return ex;
 }
 // One supervised cross-entropy step (gradient DESCENT) — trains the move-flow
 // weights only (TAS has no observations, so obs inputs are 0 and untouched).
-function _cheatSupervisedStep(active, target, lr) {
-    const m = _cheatNet, V = _cheaterModel.tokens.length;
+function _cheatSupervisedStep(active, target, lr, pf) {
+    const m = _cheatNet, V = _cheaterModel.tokens.length; pf = pf || [];
     const h = new Array(m.hidden);
-    for (let j = 0; j < m.hidden; j++) { let s = m.b1[j]; for (const i of active) s += m.W1[i][j]; h[j] = s > 0 ? s : 0; }
+    for (let j = 0; j < m.hidden; j++) { let s = m.b1[j]; for (const i of active) s += m.W1[i][j]; for (const [i, val] of pf) s += m.W1[i][j] * val; h[j] = s > 0 ? s : 0; }
     const o = new Array(V);
     for (let c = 0; c < V; c++) { let s = m.b2[c]; for (let j = 0; j < m.hidden; j++) s += h[j] * m.W2[j][c]; o[c] = s; }
     const mx = Math.max(...o); let sum = 0; const p = o.map(v => { const e = Math.exp(v - mx); sum += e; return e; }); for (let c = 0; c < V; c++) p[c] /= sum;
@@ -1869,7 +1893,7 @@ function _cheatSupervisedStep(active, target, lr) {
     for (let j = 0; j < m.hidden; j++) for (let c = 0; c < V; c++) dh[j] += dO[c] * m.W2[j][c];
     for (let j = 0; j < m.hidden; j++) for (let c = 0; c < V; c++) m.W2[j][c] -= lr * dO[c] * h[j];
     for (let c = 0; c < V; c++) m.b2[c] -= lr * dO[c];
-    for (let j = 0; j < m.hidden; j++) { if (h[j] <= 0) continue; const g = dh[j]; for (const i of active) m.W1[i][j] -= lr * g; m.b1[j] -= lr * g; }
+    for (let j = 0; j < m.hidden; j++) { if (h[j] <= 0) continue; const g = dh[j]; for (const i of active) m.W1[i][j] -= lr * g; for (const [i, val] of pf) m.W1[i][j] -= lr * g * val; m.b1[j] -= lr * g; }
     return { loss, correct: arg === target ? 1 : 0 };
 }
 async function pretrainOnTAS(opts = {}) {
@@ -1890,7 +1914,7 @@ async function pretrainOnTAS(opts = {}) {
         let loss = 0, correct = 0;
         for (let i = 0; i < N && _pretraining; i += chunk) {
             const end = Math.min(N, i + chunk);
-            for (let n = i; n < end; n++) { const r = _cheatSupervisedStep(ex[n].active, ex[n].target, lr); loss += r.loss; correct += r.correct; }
+            for (let n = i; n < end; n++) { const r = _cheatSupervisedStep(ex[n].active, ex[n].target, lr, ex[n].pf); loss += r.loss; correct += r.correct; }
             totalEx += end - i;
             updateAIStatus(`🏋️ Pretraining on TAS — run-set ${e + 1}/${maxEpochs} · ${Math.round(end / N * 100)}% · confidence ~${Math.round(correct / end * 100)}%`);
             await new Promise(res => setTimeout(res, 0));   // yield — keep the tab alive
@@ -2275,9 +2299,21 @@ function _rlPickAction(stateKey) {
     const cdist = _cheaterDist();
     // Frozen TAS prior FADES as the Q-learner learns the spot; but the ONLINE net
     // is itself state-aware and learning, so keep its influence strong.
-    const cheatW = !cdist ? 0 : (_cheaterOnline && _cheatNet ? 0.9 : 0.8 * Math.exp(-total / 8));
+    let cheatW = !cdist ? 0 : (_cheaterOnline && _cheatNet ? 0.9 : 0.8 * Math.exp(-total / 8));
     // Exploration shrinks as the child grows up (more trusted → exploit more).
-    const eps = Math.max(0.06, 0.28 - _childTrust * 0.15);
+    let eps = Math.max(0.06, 0.28 - _childTrust * 0.15);
+    // ── SELF-CORRECTING TAS: recognise a mistake and RECOVER ─────────────────
+    // When we're wedged/looping (stuck for a while), the TAS move-flow is leading
+    // us wrong HERE — replaying it harder just repeats the mistake. So suppress the
+    // prior and crank exploration to break out, then resume once we're moving again.
+    const recovering = _stuckCount >= 3;
+    if (recovering) {
+        cheatW *= 0.2;
+        eps = Math.min(0.85, eps + 0.4);
+        if (!_recovering) { _recovering = true; _trainStats.recoveries = (_trainStats.recoveries || 0) + 1; _saveTrainStats(); }
+    } else if (_recovering && _stuckCount === 0) {
+        _recovering = false;   // unwedged → back on track
+    }
     if (Math.random() < eps) {
         // In unlearned states, explore the way a TAS would (the net); else bias to
         // what YOU demonstrated, else something untried.
@@ -2681,7 +2717,7 @@ function updateDebugHUD() {
         `<b>🐞 SM64-AI debug</b>` +
         `<div>region: <b>${_esc(_region)}</b> (${_regionAge}t)</div>` +
         `<div>last: ${_esc(_lastActionSummary || '—')}</div>` +
-        `<div>visualΔ: ${_lastVisualPct == null ? '—' : _lastVisualPct + '%'} · stuck:${_stuckCount} · cut:${_sceneCutCount}</div>` +
+        `<div>visualΔ: ${_lastVisualPct == null ? '—' : _lastVisualPct + '%'} · stuck:${_stuckCount} · cut:${_sceneCutCount}${_recovering ? ' · <b style="color:#ffb454">↻recovering</b>' : ''}${_trainStats.recoveries ? ` · recov:${_trainStats.recoveries}` : ''}</div>` +
         `<div>fmt: ${_cmdFormat}</div>` +
         `<div>mode: ${flags}</div>` +
         brainLine +
