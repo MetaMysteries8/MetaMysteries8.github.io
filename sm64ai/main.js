@@ -1758,6 +1758,8 @@ function openCheaterConfig() {
     if (on) on.checked = _cheaterOnline;
     _renderCheaterInfo();
     _renderDeepInfo();
+    _renderDeepGate();
+    _checkDeepSupport();    // run the 3 support checks each time the menu opens
     document.getElementById('cheater-modal')?.classList.add('open');
     document.getElementById('cheater-backdrop')?.classList.add('open');
 }
@@ -2072,6 +2074,111 @@ function _renderDeepInfo() {
     el.innerHTML = `vision: <b>${vs}</b>${_visEmbeds ? ` · ${_visEmbeds} frames seen` : ''}<br>` +
         `replay: ${_replay.length}/${_REPLAY_CAP} · grind: ${_grindSteps} steps${_grinding ? ` · ${_grindEps}/s` : ''} · avgR ${_grindBaseline.toFixed(2)}`;
 }
+
+// ── DEEP TRAINING SUPPORT GATE ───────────────────────────────────────────────
+// Deep Training only switches on when the browser can actually do it: (1) Chromium-
+// based, (2) real WebGPU adapter, (3) the ML packages are reachable. All three must
+// pass before the vision encoder / grinder can be enabled.
+let _deepSupport = { chromium: null, webgpu: null, packages: null };
+let _deepChecking = false;
+const _CHK_LABELS = { chromium: 'Chromium-based browser', webgpu: 'WebGPU available', packages: 'Can load ML packages' };
+function _isChromium() {
+    try { const b = navigator.userAgentData && navigator.userAgentData.brands; if (b && b.some(x => /Chromium|Google Chrome|Microsoft Edge|Opera/i.test(x.brand))) return true; } catch {}
+    const ua = navigator.userAgent || '';
+    return /Chrome\//.test(ua) && !/\bFirefox\//.test(ua);
+}
+function _deepReady() { return !!(_deepSupport.chromium && _deepSupport.webgpu && _deepSupport.packages); }
+function _setChk(k, state) {
+    const elr = document.querySelector(`.deep-chk[data-k="${k}"]`); if (!elr) return;
+    const icon = state === 'wait' ? '⏳' : state === true ? '✅' : state === false ? '❌' : '⬜';
+    elr.textContent = `${icon} ${_CHK_LABELS[k]}`;
+    elr.style.color = state === false ? '#e3556e' : state === true ? '#19c37d' : '';
+}
+function _renderDeepGate() {
+    const ready = _deepReady();
+    const vc = document.getElementById('vision-chk'), gb = document.getElementById('grind-btn'), msg = document.getElementById('deep-gate-msg');
+    if (vc) vc.disabled = !ready;
+    if (gb) gb.disabled = !ready && !_grinding;
+    if (msg) {
+        if (ready) { msg.textContent = '✅ All checks passed — Deep Training is available.'; msg.style.color = '#19c37d'; }
+        else if (_deepSupport.chromium === null || _deepChecking) { msg.textContent = 'Checking your browser…'; msg.style.color = ''; }
+        else { msg.textContent = '⚠ Deep Training needs all three. Use desktop Chrome/Edge with WebGPU enabled.'; msg.style.color = '#ffb454'; }
+    }
+}
+async function _checkDeepSupport() {
+    if (_deepChecking) return;
+    _deepChecking = true; _renderDeepGate();
+    _deepSupport.chromium = _isChromium(); _setChk('chromium', _deepSupport.chromium); _renderDeepGate();
+    _setChk('webgpu', 'wait');
+    let gpu = false; try { if (navigator.gpu) { const a = await navigator.gpu.requestAdapter(); gpu = !!a; } } catch {}
+    _deepSupport.webgpu = gpu; _setChk('webgpu', gpu); _renderDeepGate();
+    if (_deepSupport.packages !== true) {
+        _setChk('packages', 'wait');
+        let ok = false; try { const r = await fetch('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3/package.json', { cache: 'force-cache' }); ok = r.ok; } catch {}
+        _deepSupport.packages = ok; _setChk('packages', ok);
+    } else _setChk('packages', true);
+    _deepChecking = false; _renderDeepGate();
+}
+
+// ── WEBGPU SHOW-OFF — a real WebGPU shader plays when Deep Training turns on, to
+// flex that the GPU/Chromium/packages path is live and "this is gonna work better".
+let _showoffEl = null;
+const _SHOWOFF_WGSL = `
+struct U { t: f32, w: f32, h: f32, pad: f32 };
+@group(0) @binding(0) var<uniform> u: U;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f,3>(vec2f(-1.0,-1.0), vec2f(3.0,-1.0), vec2f(-1.0,3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@fragment fn fs(@builtin(position) fc: vec4f) -> @location(0) vec4f {
+  let uv = fc.xy / vec2f(u.w, u.h);
+  let p = (uv - vec2f(0.5)) * vec2f(u.w / u.h, 1.0) * 6.0;
+  let t = u.t;
+  var v = sin(p.x + t) + sin(p.y * 0.7 - t * 1.3) + sin((p.x + p.y) * 0.5 + t);
+  let r = length(p);
+  v = v + sin(r * 1.5 - t * 2.0) * 1.2;
+  let c = 0.5 + 0.5 * cos(vec3f(v) * 1.4 + vec3f(0.0, 2.0, 4.0) + t);
+  let col = mix(c, vec3f(0.10, 0.80, 0.85), 0.28);
+  return vec4f(col, 1.0);
+}`;
+async function _webgpuShowoff() {
+    if (_showoffEl || !navigator.gpu) return;
+    try {
+        const wrap = document.createElement('div'); _showoffEl = wrap;
+        wrap.style.cssText = 'position:fixed;inset:0;z-index:3000;display:flex;align-items:center;justify-content:center;background:rgba(5,8,14,.55);backdrop-filter:blur(2px);opacity:0;transition:opacity .35s';
+        const card = document.createElement('div'); card.style.cssText = 'position:relative;width:min(560px,86vw);aspect-ratio:16/9;border-radius:16px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6);border:1px solid #2a3550';
+        const canvas = document.createElement('canvas'); canvas.style.cssText = 'width:100%;height:100%;display:block';
+        const label = document.createElement('div'); label.style.cssText = 'position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:system-ui,sans-serif;color:#fff;text-shadow:0 2px 14px rgba(0,0,0,.85);pointer-events:none;text-align:center;padding:0 16px';
+        label.innerHTML = '<div style="font-size:13px;letter-spacing:3px;opacity:.9">CHROMIUM ✓&nbsp;&nbsp;WEBGPU ✓&nbsp;&nbsp;PACKAGES ✓</div><div style="font-size:30px;font-weight:800;margin-top:8px">⚡ Deep Training online</div><div style="font-size:13px;opacity:.9;margin-top:6px">your GPU is now teaching Mario — this will work way better</div>';
+        card.appendChild(canvas); card.appendChild(label); wrap.appendChild(card); document.body.appendChild(wrap);
+        _realRAF(() => { if (_showoffEl) wrap.style.opacity = '1'; });
+        const dpr = Math.min(2, window.devicePixelRatio || 1);
+        const W = Math.max(2, (card.clientWidth || 480) * dpr), H = Math.max(2, (card.clientHeight || 270) * dpr);
+        canvas.width = W; canvas.height = H;
+        const adapter = await navigator.gpu.requestAdapter(); const device = await adapter.requestDevice();
+        const ctx = canvas.getContext('webgpu'); const format = navigator.gpu.getPreferredCanvasFormat();
+        ctx.configure({ device, format, alphaMode: 'opaque' });
+        const module = device.createShaderModule({ code: _SHOWOFF_WGSL });
+        const pipeline = device.createRenderPipeline({ layout: 'auto', vertex: { module, entryPoint: 'vs' }, fragment: { module, entryPoint: 'fs', targets: [{ format }] }, primitive: { topology: 'triangle-list' } });
+        const ubuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const bind = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubuf } }] });
+        const t0 = performance.now(), dur = 2900;
+        const draw = () => {
+            if (!_showoffEl) return;
+            const t = (performance.now() - t0) / 1000;
+            device.queue.writeBuffer(ubuf, 0, new Float32Array([t, W, H, 0]));
+            const enc = device.createCommandEncoder();
+            const pass = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store' }] });
+            pass.setPipeline(pipeline); pass.setBindGroup(0, bind); pass.draw(3); pass.end();
+            device.queue.submit([enc.finish()]);
+            if (performance.now() - t0 < dur) _realRAF(draw); else _endShowoff();
+        };
+        _realRAF(draw);
+        wrap.addEventListener('click', _endShowoff);
+        setTimeout(_endShowoff, dur + 500);
+    } catch (e) { console.warn('[SM64] WebGPU show-off failed:', e); _endShowoff(); }
+}
+function _endShowoff() { if (!_showoffEl) return; const el = _showoffEl; _showoffEl = null; el.style.opacity = '0'; setTimeout(() => el.remove(), 350); }
 
 // ── TAS PRETRAINER — rip through every TAS run in-browser to warm up the net ──
 // Supervised imitation (cross-entropy SGD) on the real TAS move sequences, looping
@@ -2965,8 +3072,15 @@ document.getElementById('cheater-enabled-chk')?.addEventListener('change', e => 
 document.getElementById('cheater-online-chk')?.addEventListener('change', e => setCheaterOnline(e.target.checked));
 document.getElementById('cheater-file')?.addEventListener('change', _onCheaterFile);
 document.getElementById('cheater-reset-btn')?.addEventListener('click', _resetCheaterModel);
-document.getElementById('vision-chk')?.addEventListener('change', e => setVision(e.target.checked));
-document.getElementById('grind-btn')?.addEventListener('click', () => grindTrain(_grinding ? false : true));
+document.getElementById('vision-chk')?.addEventListener('change', e => {
+    if (e.target.checked && !_deepReady()) { e.target.checked = false; updateAIStatus('⚠ Deep Training needs Chromium + WebGPU + package access'); return; }
+    setVision(e.target.checked);
+    if (e.target.checked) _webgpuShowoff();   // flex the GPU/Chromium/packages path
+});
+document.getElementById('grind-btn')?.addEventListener('click', () => {
+    if (!_grinding && !_deepReady()) { updateAIStatus('⚠ Deep Training needs Chromium + WebGPU + package access'); return; }
+    grindTrain(_grinding ? false : true);
+});
 
 // ── BRAINMAP VISUALIZER (in-UI panel + experimental pop-out window) ──
 function _bmNode(id, label, icon) {
