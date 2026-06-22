@@ -972,6 +972,15 @@ function buildProviderPanel() {
     cheatChk.addEventListener('change', () => setCheater(cheatChk.checked));
     cheatRow.appendChild(cheatChk); panel.appendChild(cheatRow);
 
+    // Live-learning: the net fine-tunes on play (REINFORCE) + uses observation inputs.
+    const conlRow = document.createElement('label');
+    conlRow.className = 'provider-row'; conlRow.style.cursor = 'pointer';
+    conlRow.innerHTML = `<span class="provider-label">↳ 🧠 Live-learn the net (deep-RL)<br><small>Off: frozen TAS net. On: the net keeps training from the gameplay reward + sees the screen (depth/stuck/region), so it learns the WHERE</small></span>`;
+    const conlChk = document.createElement('input');
+    conlChk.type = 'checkbox'; conlChk.checked = _cheaterOnline;
+    conlChk.addEventListener('change', () => setCheaterOnline(conlChk.checked));
+    conlRow.appendChild(conlChk); panel.appendChild(conlRow);
+
     // Persistent model (experimental) — save the trained RL across reloads.
     const persRow = document.createElement('label');
     persRow.className = 'provider-row'; persRow.style.cursor = 'pointer';
@@ -1635,7 +1644,7 @@ window.sm64Cheater = (on) => { setCheater(on == null ? !_cheaterEnabled : on); r
 async function loadCheaterModel() {
     try {
         const r = await fetch('tas/cheater-model.json', { cache: 'force-cache' });
-        if (r.ok) { _cheaterModel = await r.json(); console.log(`[SM64] Cheater's Model loaded — ${_cheaterModel.mlp ? 'neural net' : 'n-gram'}, trained on ${_cheaterModel.trainedOn?.files} TAS runs.`); }
+        if (r.ok) { _cheaterModel = await r.json(); _cheatInitNet(); console.log(`[SM64] Cheater's Model loaded — ${_cheaterModel.mlp ? 'neural net' : 'n-gram'}, trained on ${_cheaterModel.trainedOn?.files} TAS runs.`); }
     } catch {}
 }
 // Real neural-net forward pass → softmax distribution over the next move.
@@ -1651,9 +1660,13 @@ function _mlpDist() {
     const mx = Math.max(...o); let sum = 0; const p = o.map(v => { const e = Math.exp(v - mx); sum += e; return e; });
     const dist = {}; toks.forEach((t, i) => dist[t] = p[i] / sum); return dist;
 }
-// The move distribution the cheater would pick next (neural net preferred).
+// The move distribution the cheater would pick next. When live-learning is on we
+// use the ONLINE net (state-conditioned, freshly fine-tuned); else the frozen MLP.
 function _cheaterDist() {
     if (!_cheaterEnabled || !_cheaterModel) return null;
+    if (_cheaterOnline && _cheatNet && _cheatFwd) {
+        const d = {}; _cheaterModel.tokens.forEach((t, i) => d[t] = _cheatFwd.p[i]); return d;
+    }
     const nn = _mlpDist(); if (nn) return nn;
     const last = _recentMoves[_recentMoves.length - 1];
     const bg = last && _cheaterModel.bigram[last];
@@ -1666,6 +1679,82 @@ function _cheaterSample(dist) {
     let r = Math.random(); for (const k in dist) { r -= dist[k]; if (r <= 0) return k; } return null;
 }
 function _noteMove(cat) { _recentMoves.push(cat); while (_recentMoves.length > 8) _recentMoves.shift(); }
+
+// ── ONLINE-LEARNING NET (deep-RL inspired) ──────────────────────────────────
+// We take the TAS-trained MLP as a smart INITIALIZATION, EXTEND its input with
+// live OBSERVATION features (depth open-side, stuck, region) — zero-weighted so it
+// starts identical to the TAS net — then fine-tune it during play with REINFORCE
+// (policy gradient) on the real reward. So the net learns the "WHERE" the frozen
+// TAS data never had. This is the genuinely-trainable-in-browser RL net.
+let _cheaterOnline = (() => { try { const v = localStorage.getItem('sm64_cheat_online'); return v == null ? true : v === '1'; } catch { return true; } })();
+function setCheaterOnline(on) { _cheaterOnline = !!on; try { localStorage.setItem('sm64_cheat_online', _cheaterOnline ? '1' : '0'); } catch {} if (_cheaterOnline) _cheatInitNet(); }
+const _CHEAT_OBS = 5;            // [openL, openC, openR, stuckNorm, regionNorm]
+const _CHEAT_LR = 0.03;
+let _cheatNet = null, _cheatIdx = null, _cheatFwd = null, _cheatPending = null;
+let _cheatBaseline = 0, _cheatUpdates = 0;
+function _cheatInitNet() {
+    const m = _cheaterModel && _cheaterModel.mlp; if (!m) return;
+    _cheatIdx = {}; _cheaterModel.tokens.forEach((t, i) => _cheatIdx[t] = i);
+    // Restore a previously fine-tuned net if persistence is on; else extend the TAS net.
+    if (_rlPersist) { try { const saved = JSON.parse(localStorage.getItem('sm64_cheat_net')); if (saved && saved.inMoves === m.in) { _cheatNet = saved; return; } } catch {} }
+    const W1 = m.W1.map(row => row.slice());
+    for (let f = 0; f < _CHEAT_OBS; f++) W1.push(new Array(m.hidden).fill(0));   // obs rows, zero-init
+    _cheatNet = { K: m.K, hidden: m.hidden, inMoves: m.in, inObs: _CHEAT_OBS, IN: m.in + _CHEAT_OBS,
+        W1, b1: m.b1.slice(), W2: m.W2.map(r => r.slice()), b2: m.b2.slice() };
+}
+function _cheatObs() {
+    return [_lastOpenSide === 'L' ? 1 : 0, _lastOpenSide === 'C' ? 1 : 0, _lastOpenSide === 'R' ? 1 : 0,
+        Math.min(1, _stuckCount / 3), _regionRank(_region) / 3];
+}
+function _cheatForward(obs) {
+    const m = _cheatNet, V = _cheaterModel.tokens.length;
+    const active = [];
+    for (let k = 0; k < m.K; k++) { const mv = _recentMoves[_recentMoves.length - m.K + k]; if (mv != null && _cheatIdx[mv] != null) active.push(k * V + _cheatIdx[mv]); }
+    const h = new Array(m.hidden);
+    for (let j = 0; j < m.hidden; j++) {
+        let s = m.b1[j];
+        for (const i of active) s += m.W1[i][j];
+        for (let f = 0; f < m.inObs; f++) { const ov = obs[f]; if (ov) s += m.W1[m.inMoves + f][j] * ov; }
+        h[j] = s > 0 ? s : 0;
+    }
+    const o = new Array(V);
+    for (let c = 0; c < V; c++) { let s = m.b2[c]; for (let j = 0; j < m.hidden; j++) s += h[j] * m.W2[j][c]; o[c] = s; }
+    const mx = Math.max(...o); let sum = 0; const p = o.map(v => { const e = Math.exp(v - mx); sum += e; return e; }); for (let c = 0; c < V; c++) p[c] /= sum;
+    return { p, h, active, obs };
+}
+// One REINFORCE gradient step toward the action TAKEN, scaled by advantage.
+function _cheatTrain(cache, aIdx, adv) {
+    const m = _cheatNet, V = _cheaterModel.tokens.length, lr = _CHEAT_LR;
+    adv = Math.max(-1, Math.min(1, adv));
+    const { p, h, active, obs } = cache;
+    const go = new Array(V); for (let c = 0; c < V; c++) go[c] = adv * ((c === aIdx ? 1 : 0) - p[c]);  // ascent on log π
+    const dh = new Array(m.hidden).fill(0);
+    for (let j = 0; j < m.hidden; j++) for (let c = 0; c < V; c++) dh[j] += go[c] * m.W2[j][c];
+    for (let j = 0; j < m.hidden; j++) for (let c = 0; c < V; c++) m.W2[j][c] += lr * go[c] * h[j];
+    for (let c = 0; c < V; c++) m.b2[c] += lr * go[c];
+    for (let j = 0; j < m.hidden; j++) {
+        if (h[j] <= 0) continue; const g = dh[j];
+        for (const i of active) m.W1[i][j] += lr * g;
+        for (let f = 0; f < m.inObs; f++) { const ov = obs[f]; if (ov) m.W1[m.inMoves + f][j] += lr * g * ov; }
+        m.b1[j] += lr * g;
+    }
+    _cheatUpdates++;
+    if (_cheatUpdates % 12 === 0) _lsSet('sm64_cheat_net', JSON.stringify(m));   // persist (debounced, gated)
+}
+// Called each tick AFTER the reward is known: fine-tune toward last tick's choice.
+function _cheatLearnFromReward() {
+    if (!_cheaterOnline || !_cheatNet || !_cheatPending) return;
+    const r = _lastReward == null ? 0 : _lastReward;
+    _cheatBaseline += 0.05 * (r - _cheatBaseline);           // running baseline → advantage
+    _cheatTrain(_cheatPending.cache, _cheatPending.aIdx, r - _cheatBaseline);
+    _cheatPending = null;
+}
+// Forward the net for THIS tick's state and remember the choice for next-tick training.
+function _cheatStep(cat) {
+    if (!_cheaterOnline || !_cheatNet) return;
+    const aIdx = _cheatIdx[cat];
+    if (aIdx != null && _cheatFwd) _cheatPending = { cache: _cheatFwd, aIdx };
+}
 
 function _brainState() {
     const region = /in-level/.test(_region) ? 'level' : (_region || 'unknown');
@@ -1811,6 +1900,9 @@ function clearQTable() {
     ['sm64_qtable', 'sm64_human_policy'].forEach(k => { try { localStorage.removeItem(k); } catch {} });
     _trainStats = { episodes: 0, turns: 0, overrides: 0, overrideGood: 0, overrideBad: 0, taught: 0, graded: 0, rated: 0, bestRegionRank: 0 }; _saveTrainStats();
     if (typeof _setChildTrust === 'function') _setChildTrust(0.15);   // back to a fresh, untrusted child
+    try { localStorage.removeItem('sm64_cheat_net'); } catch {}
+    _cheatBaseline = 0; _cheatUpdates = 0; _cheatPending = null; _cheatFwd = null;
+    if (typeof _cheatInitNet === 'function') _cheatInitNet();          // re-init net to the TAS weights
 }
 function setRlPersist(on) {
     _rlPersist = !!on;
@@ -1995,7 +2087,9 @@ function _rlPickAction(stateKey) {
     // STRONG where the RL hasn't learned this situation yet and FADES as the
     // state-aware Q-learner gains experience here (that's the part you teach it).
     const cdist = _cheaterDist();
-    const cheatW = cdist ? 0.8 * Math.exp(-total / 8) : 0;
+    // Frozen TAS prior FADES as the Q-learner learns the spot; but the ONLINE net
+    // is itself state-aware and learning, so keep its influence strong.
+    const cheatW = !cdist ? 0 : (_cheaterOnline && _cheatNet ? 0.9 : 0.8 * Math.exp(-total / 8));
     // Exploration shrinks as the child grows up (more trusted → exploit more).
     const eps = Math.max(0.06, 0.28 - _childTrust * 0.15);
     if (Math.random() < eps) {
@@ -2032,9 +2126,12 @@ async function rlThinkAndAct() {
         }
         await _depthAnalyze(ss);               // refresh _lastOpenSide so it steers toward openings
         _brainLearn();                         // reward the previous RL move
+        _cheatLearnFromReward();               // fine-tune the net on that reward (REINFORCE)
+        _cheatFwd = (_cheaterEnabled && _cheaterOnline && _cheatNet) ? _cheatForward(_cheatObs()) : null;
         const stateKey = _brainState();
         const cat = _rlPickAction(stateKey);
         _pendingLearn = { stateKey, actionCat: cat, wasOverride: false };
+        _cheatStep(cat);                       // remember this choice for next-tick training
         _noteMove(cat);
         _pushShowoff(stateKey, cat);
         _prevScreenshot = ss;
@@ -2109,9 +2206,12 @@ function startRealtimeRL() {
             }
             await _depthAnalyze(ss);
             _brainLearn();                          // reward the action held last tick
+            _cheatLearnFromReward();                // fine-tune the net on that reward
+            _cheatFwd = (_cheaterEnabled && _cheaterOnline && _cheatNet) ? _cheatForward(_cheatObs()) : null;
             const stateKey = _brainState();
             const cat = _rlPickAction(stateKey);
             _pendingLearn = { stateKey, actionCat: cat, wasOverride: false };
+            _cheatStep(cat);
             _noteMove(cat);
             _pushShowoff(stateKey, cat);
             _rtPrevFrame = ss;
@@ -2380,7 +2480,7 @@ function updateDebugHUD() {
         ? `<div>child: ${Object.keys(_qTable).length} states · lastR: ${_lastReward == null ? '—' : _lastReward.toFixed(2)} (${_brainBias})</div>` +
           `<div>trust: ${Math.round(_childTrust * 100)}% · steps ✓${_og}/✗${_ob} · best:${_rankName}</div>` +
           `<div>mode: ${_playMode} · taught:${_trainStats.taught || 0} · graded:${_trainStats.graded || 0} · rated:${_trainStats.rated || 0}</div>` +
-          `<div>trained: ${_trainStats.episodes}ep · ${_trainStats.turns}turns${_cheaterEnabled ? ` · 🃏${_cheaterModel ? (_cheaterModel.mlp ? 'net' : 'ngram') : '…'}` : ''}</div>`
+          `<div>trained: ${_trainStats.episodes}ep · ${_trainStats.turns}turns${_cheaterEnabled ? ` · 🃏${_cheaterModel ? (_cheaterOnline && _cheatNet ? `net⚡${_cheatUpdates}` : (_cheaterModel.mlp ? 'net' : 'ngram')) : '…'}` : ''}</div>`
         : '';
     el.innerHTML =
         `<b>🐞 SM64-AI debug</b>` +
@@ -3536,6 +3636,7 @@ async function toggleAIPlayer() {
         _lastBrainActionCat = null;
         _eligTrace      = [];
         _recentMoves    = [];
+        _cheatFwd = null; _cheatPending = null;
         if (_adaptiveBrain) { _trainStats.episodes++; _saveTrainStats(); }
         startElderWatch();          // child watches when YOU (the elder) take over
         _resetBrainmap();
