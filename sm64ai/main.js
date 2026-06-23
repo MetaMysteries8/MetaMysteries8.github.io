@@ -1849,6 +1849,10 @@ let _cheatBaseline = 0, _cheatUpdates = 0;
 function _cheatInitNet() {
     const m = _cheaterModel && _cheaterModel.mlp; if (!m) return;
     _cheatIdx = {}; _cheaterModel.tokens.forEach((t, i) => _cheatIdx[t] = i);
+    // Preserve an existing net of the right layout (a loaded checkpoint or in-progress
+    // training) — callers that WANT a rebuild null _cheatNet first. This stops e.g.
+    // toggling live-learning on from wiping a checkpoint back to raw TAS weights.
+    if (_cheatNet && _cheatNet.inObs === _CHEAT_OBS && _cheatNet.inMoves === m.in) return;
     // Restore a previously fine-tuned net if persistence is on AND it matches this
     // input layout; else extend the TAS net with fresh zero-init observation rows.
     if (_rlPersist) { try { const saved = JSON.parse(localStorage.getItem('sm64_cheat_net')); if (saved && saved.inMoves === m.in && saved.inObs === _CHEAT_OBS) { _cheatNet = saved; return; } } catch {} }
@@ -1988,10 +1992,11 @@ async function _visionUpdate(url) {
     try {
         const out = await ex(url, { pooling: 'mean', normalize: true });
         const data = out && (out.data || (out.ort_tensor && out.ort_tensor.data));
-        if (data && data.length) { _lastVisEmb = _poolEmbed(data); _visEmbeds++; }
-    } catch { _visionStatus = 'error'; }
+        if (data && data.length) { _lastVisEmb = _poolEmbed(data); _visEmbeds++; _visErrs = 0; if (_visionStatus !== 'ready') { _visionStatus = 'ready'; _renderDeepInfo(); } }
+    } catch (e) { if (++_visErrs >= 3) { _visionStatus = 'error'; _renderDeepInfo(); console.warn('[SM64] vision embed failing:', e); } }
     finally { _visBusy = false; }
 }
+let _visErrs = 0;
 function setVision(on) {
     _visionOn = !!on; try { localStorage.setItem('sm64_vision', _visionOn ? '1' : '0'); } catch {}
     if (_visionOn) _visionLoad(); else { _visionStatus = 'off'; _lastVisEmb = null; _renderDeepInfo(); }
@@ -2048,6 +2053,7 @@ let _grindIntensity = 4;        // inner batches per yield — the throughput kn
 let _grindSafety = true;        // watchdog auto-stop
 let _hyperPrev = null;          // restore hyper-speed on stop
 let _lagTimer = null, _lagLast = 0, _lagSamples = [], _autoStopReason = null;
+let _teLastReplay = 0, _teLastGrow = 0;
 function _heapInfo() { const m = (typeof performance !== 'undefined' && performance.memory) || null; return m ? { used: m.usedJSHeapSize, limit: m.jsHeapSizeLimit, pct: m.usedJSHeapSize / (m.jsHeapSizeLimit || 1) } : null; }
 function _lagAvg() { return _lagSamples.length ? _lagSamples.reduce((a, b) => a + b, 0) / _lagSamples.length : 0; }
 function _startLagMon() { _lagLast = performance.now(); if (_lagTimer) clearInterval(_lagTimer); _lagTimer = setInterval(() => { const now = performance.now(); _lagSamples.push(Math.max(0, now - _lagLast - 1000)); if (_lagSamples.length > 5) _lagSamples.shift(); _lagLast = now; }, 1000); }
@@ -2124,8 +2130,11 @@ function _trainMon() {
     q('#te-reward').textContent = _grindBaseline.toFixed(3);
     q('#te-uptime').textContent = _fmtDur((performance.now() - _trainStart) / 1000);
     const playing = (typeof aiPlayerActive !== 'undefined' && aiPlayerActive);
-    const flowEl = q('#te-flow'); flowEl.textContent = playing ? (_replay.length < 8 ? `warming up (${_replay.length}/8)` : 'gathering (self-play on)') : 'idle — press ▶ Start self-play';
-    flowEl.style.color = playing ? (_replay.length < 8 ? '#ffb454' : '#19c37d') : '#e3556e';
+    if (_replay.length > _teLastReplay) { _teLastReplay = _replay.length; _teLastGrow = performance.now(); }
+    const flowing = (performance.now() - _teLastGrow) < 3000;   // buffer actually grew recently
+    const flowEl = q('#te-flow');
+    flowEl.textContent = flowing ? `gathering ✓ (${_replay.length})` : (playing ? 'playing but not banking — needs RL Play' : 'idle — press ▶ Start self-play');
+    flowEl.style.color = flowing ? '#19c37d' : (playing ? '#ffb454' : '#e3556e');
     const heap = _heapInfo();
     if (heap) { q('#te-heap').textContent = mb(heap.used) + ' / ' + mb(heap.limit) + ' MB (' + (heap.pct * 100).toFixed(0) + '%)'; const bar = q('#te-heap-bar'); bar.style.width = (heap.pct * 100).toFixed(0) + '%'; bar.style.background = heap.pct > 0.85 ? '#e3556e' : heap.pct > 0.65 ? '#ffb454' : '#19c37d'; }
     else q('#te-heap').textContent = 'n/a (Chrome only)';
@@ -2170,9 +2179,14 @@ window.sm64Checkpoint = _downloadCheckpoint;
 async function grindTrain(on) {
     if (on === false || (on == null && _grinding)) { _grinding = false; return; }
     if (_grinding) return;
+    // The replay buffer only fills when the cheater net is ENABLED + ONLINE (that's
+    // the path that banks experience). Force them on, else grinding sits idle forever.
+    if (!_cheaterEnabled && typeof setCheater === 'function') setCheater(true);
+    if (!_cheaterOnline && typeof setCheaterOnline === 'function') setCheaterOnline(true);
     if (!_cheatNet) _cheatInitNet();
     if (!_cheatNet) { updateAIStatus('⚠ Deep Trainer: cheater net not ready yet'); return; }
     _grinding = true; _autoStopReason = null; _trainStart = performance.now();
+    _teLastReplay = _replay.length; _teLastGrow = 0;   // flow shows green only on a real new push
     _hyperPrev = (typeof _hyperSpeed !== 'undefined') ? _hyperSpeed : false;
     try { setHyperSpeed(true); } catch {}                  // all power: max game throughput
     _openTrainEnv(); _startLagMon();
@@ -2180,7 +2194,7 @@ async function grindTrain(on) {
     if (typeof aiPlayerActive === 'undefined' || !aiPlayerActive) { _ensureSelfPlay(); _flashEnv('▶ Starting RL self-play to gather experience…'); }
     _renderDeepInfo();
     updateAIStatus('🧪 Deep Training environment — grinding at full power');
-    const lr = 0.02, temp = 0.5, batch = 64, t0 = performance.now();
+    const lr = 0.02, temp = 0.5, batch = 64, t0 = performance.now(), stepsAtStart = _grindSteps;
     try {
         while (_grinding) {
             if (_replay.length < 8) { const s = _trainEnvEl && _trainEnvEl.querySelector('#te-state'); if (s) s.textContent = 'waiting for experience…'; await new Promise(r => setTimeout(r, 400)); continue; }  // buffer must warm up first
@@ -2191,7 +2205,7 @@ async function grindTrain(on) {
                 const w = Math.min(4, Math.exp((t.r - _grindBaseline) / temp));   // AWR weight (clipped)
                 _cheatReplayStep(t, lr, w); _grindSteps++;
             }
-            _grindEps = Math.round(_grindSteps / ((performance.now() - t0) / 1000));
+            _grindEps = Math.round((_grindSteps - stepsAtStart) / Math.max(0.001, (performance.now() - t0) / 1000));
             if (_grindSteps % (batch * 8) === 0) { _lsSet('sm64_cheat_net', JSON.stringify(_cheatNet)); _renderDeepInfo(); }
             await new Promise(r => setTimeout(r, 0));   // yield each cycle — never freeze the tab
         }
