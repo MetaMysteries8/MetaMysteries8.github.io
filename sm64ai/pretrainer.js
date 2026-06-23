@@ -131,7 +131,7 @@ async function train() {
     const sim = moveSimilarity(SEQ.tokens, ng.bigram);
     const moves = SEQ.seqs.reduce((a, s) => a + s.length, 0);
     lastModel = {
-        v: 2, trainedOn: { files: SEQ.seqs.length, moves },
+        v: 2, format: 'lrl-v1', legacy: true, trainedOn: { files: SEQ.seqs.length, moves },
         tokens: SEQ.tokens, unigram: ng.unigram, bigram: ng.bigram, similar: sim,
         mlp: { K, hidden, phase: PB, in: IN, W1: round(W1), b1: round(b1), W2: round(W2), b2: round(b2) },
         note: "Community-pretrained Cheater's Model (standalone pretrainer).",
@@ -156,7 +156,7 @@ function frame() { return new Promise(r => setTimeout(r, 0)); }
 function download(model) {
     const blob = new Blob([JSON.stringify(model)], { type: 'application/json' });
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = 'sm64-cheater-model.json';
+    a.href = URL.createObjectURL(blob); a.download = 'sm64-lrl-model.json';
     a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1500);
 }
 

@@ -1,0 +1,6 @@
+# Local trainer deps. For GPU, install the CUDA build of torch from pytorch.org
+# instead of the line below (e.g. the cu121 wheel).
+torch>=2.1
+numpy>=1.24
+Pillow>=10.0
+onnx>=1.15
