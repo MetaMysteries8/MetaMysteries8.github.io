@@ -1983,9 +1983,13 @@ function _poolEmbed(data) {
     norm = Math.sqrt(norm) || 1; for (let i = 0; i < _VIS_EMB; i++) out[i] /= norm;
     return out;
 }
-// Fire-and-forget per-frame embed (one inference in flight at a time).
+// Fire-and-forget per-frame embed (one inference in flight at a time, and at most
+// ~2/sec) — leaves CPU/GPU headroom for the game instead of embedding every tick.
+let _visLastT = 0;
 async function _visionUpdate(url) {
     if (!_visionOn || _visBusy) return;
+    if (performance.now() - _visLastT < 450) return;
+    _visLastT = performance.now();
     const ex = _visExtractor || await _visionLoad();
     if (!ex) return;
     _visBusy = true;
@@ -2101,8 +2105,9 @@ function _openTrainEnv() {
         '<div class="te-cell"><div class="te-k">Experience flow</div><div class="te-v" id="te-flow">idle</div></div>' +
         '</div>' +
         '<div class="te-controls"><button id="te-selfplay" class="te-btn">▶ Start self-play</button>' +
-        '<label class="te-ctl">Intensity <input id="te-intensity" type="range" min="1" max="16" value="4"> <span id="te-intensity-val">4×</span></label>' +
-        '<label class="te-ctl"><input id="te-safety" type="checkbox" checked> Safety auto-stop</label></div>' +
+        '<label class="te-ctl" title="Max ms of idle CPU the trainer borrows per slice — lower = smoother game">CPU/slice <input id="te-intensity" type="range" min="1" max="16" value="4"> <span id="te-intensity-val">4ms</span></label>' +
+        '<label class="te-ctl"><input id="te-safety" type="checkbox" checked> Safety auto-stop</label>' +
+        '<label class="te-ctl" title="Uncaps the game loop — faster experience but can crash the game"><input id="te-hyper" type="checkbox"> ⏩ Hyper (risky)</label></div>' +
         '<div class="te-ckpt"><label class="te-ctl"><input id="te-ckpt-buf" type="checkbox" checked> include experience</label>' +
         '<button id="te-ckpt-dl" class="te-btn green">💾 Download checkpoint</button>' +
         '<label class="te-btn ghost" style="cursor:pointer">📂 Load checkpoint<input id="te-ckpt-file" type="file" accept="application/json,.json" style="display:none"></label></div>' +
@@ -2114,9 +2119,10 @@ function _openTrainEnv() {
     wrap.querySelector('#te-ckpt-dl').onclick = _downloadCheckpoint;
     wrap.querySelector('#te-ckpt-file').onchange = _loadCheckpoint;
     wrap.querySelector('#te-selfplay').onclick = () => { if (!_ensureSelfPlay()) updateAIStatus('Self-play already running'); };
-    const inten = wrap.querySelector('#te-intensity'); inten.value = _grindIntensity; wrap.querySelector('#te-intensity-val').textContent = _grindIntensity + '×';
-    inten.oninput = e => { _grindIntensity = Math.max(1, Math.min(16, +e.target.value || 4)); wrap.querySelector('#te-intensity-val').textContent = _grindIntensity + '×'; };
+    const inten = wrap.querySelector('#te-intensity'); inten.value = _grindIntensity; wrap.querySelector('#te-intensity-val').textContent = _grindIntensity + 'ms';
+    inten.oninput = e => { _grindIntensity = Math.max(1, Math.min(16, +e.target.value || 4)); wrap.querySelector('#te-intensity-val').textContent = _grindIntensity + 'ms'; };
     const saf = wrap.querySelector('#te-safety'); saf.checked = _grindSafety; saf.onchange = e => { _grindSafety = e.target.checked; };
+    const hyp = wrap.querySelector('#te-hyper'); if (hyp) { hyp.checked = (typeof _hyperSpeed !== 'undefined' && _hyperSpeed); hyp.onchange = e => { try { setHyperSpeed(e.target.checked); } catch {} }; }
 }
 function _closeTrainEnv() { if (_trainEnvEl) { _trainEnvEl.remove(); _trainEnvEl = null; } }
 function _trainMon() {
@@ -2139,11 +2145,12 @@ function _trainMon() {
     if (heap) { q('#te-heap').textContent = mb(heap.used) + ' / ' + mb(heap.limit) + ' MB (' + (heap.pct * 100).toFixed(0) + '%)'; const bar = q('#te-heap-bar'); bar.style.width = (heap.pct * 100).toFixed(0) + '%'; bar.style.background = heap.pct > 0.85 ? '#e3556e' : heap.pct > 0.65 ? '#ffb454' : '#19c37d'; }
     else q('#te-heap').textContent = 'n/a (Chrome only)';
     const lag = _lagAvg(); const lagEl = q('#te-lag'); lagEl.textContent = lag.toFixed(0) + ' ms'; lagEl.style.color = lag > 800 ? '#e3556e' : lag > 300 ? '#ffb454' : '#19c37d';
-    // WATCHDOG — bail (or throttle) before the tab dies.
+    // WATCHDOG — keep the GAME smooth: throttle early on main-thread lag, bail on the
+    // dangerous stuff. Cooperative scheduling should keep lag low; this is the backstop.
     if (_grindSafety && _grinding) {
         if (heap && heap.pct > 0.92) return _autoStop('memory pressure (' + (heap.pct * 100).toFixed(0) + '% heap)');
         if (!_netFinite()) return _autoStop('numerical instability (NaN in weights)');
-        if (lag > 2500) { if (_grindIntensity > 1) { _grindIntensity--; q('#te-intensity').value = _grindIntensity; q('#te-intensity-val').textContent = _grindIntensity + '×'; _flashEnv('⚠ main thread overloaded — lowered intensity to ' + _grindIntensity + '×'); } else return _autoStop('main thread overloaded'); }
+        if (lag > 250) { if (_grindIntensity > 1) { _grindIntensity = Math.max(1, _grindIntensity - 1); q('#te-intensity').value = _grindIntensity; q('#te-intensity-val').textContent = _grindIntensity + 'ms'; _flashEnv('⚙ keeping the game smooth — lowered CPU/slice to ' + _grindIntensity + 'ms'); } else if (lag > 1500) return _autoStop('main thread overloaded'); }
     }
 }
 function _autoStop(reason) { _autoStopReason = reason; _flashEnv('⛔ auto-stopped: ' + reason); updateAIStatus('⛔ Deep Trainer auto-stopped — ' + reason); grindTrain(false); }
@@ -2176,7 +2183,7 @@ async function _loadCheckpoint(e) {
     e.target.value = '';
 }
 window.sm64Checkpoint = _downloadCheckpoint;
-async function grindTrain(on) {
+function grindTrain(on) {
     if (on === false || (on == null && _grinding)) { _grinding = false; return; }
     if (_grinding) return;
     // The replay buffer only fills when the cheater net is ENABLED + ONLINE (that's
@@ -2187,36 +2194,49 @@ async function grindTrain(on) {
     if (!_cheatNet) { updateAIStatus('⚠ Deep Trainer: cheater net not ready yet'); return; }
     _grinding = true; _autoStopReason = null; _trainStart = performance.now();
     _teLastReplay = _replay.length; _teLastGrow = 0;   // flow shows green only on a real new push
-    _hyperPrev = (typeof _hyperSpeed !== 'undefined') ? _hyperSpeed : false;
-    try { setHyperSpeed(true); } catch {}                  // all power: max game throughput
     _openTrainEnv(); _startLagMon();
     if (_trainMonTimer) clearInterval(_trainMonTimer); _trainMonTimer = setInterval(_trainMon, 500);
     if (typeof aiPlayerActive === 'undefined' || !aiPlayerActive) { _ensureSelfPlay(); _flashEnv('▶ Starting RL self-play to gather experience…'); }
     _renderDeepInfo();
-    updateAIStatus('🧪 Deep Training environment — grinding at full power');
-    const lr = 0.02, temp = 0.5, batch = 64, t0 = performance.now(), stepsAtStart = _grindSteps;
-    try {
-        while (_grinding) {
-            if (_replay.length < 8) { const s = _trainEnvEl && _trainEnvEl.querySelector('#te-state'); if (s) s.textContent = 'waiting for experience…'; await new Promise(r => setTimeout(r, 400)); continue; }  // buffer must warm up first
-            { const s = _trainEnvEl && _trainEnvEl.querySelector('#te-state'); if (s && s.textContent !== 'running') s.textContent = 'running'; }
-            const inner = batch * Math.max(1, _grindIntensity);
-            for (let b = 0; b < inner; b++) {
+    updateAIStatus('🧪 Deep Training — cooperative (trains only in the game\'s spare CPU)');
+    // ── COOPERATIVE SCHEDULER ────────────────────────────────────────────────
+    // The game's main loop owns the main thread. We train ONLY in idle time via
+    // requestIdleCallback, in tiny time-boxed slices, so the game stays smooth and
+    // never gets starved (this is the fix for the crash/stutter). "CPU/slice" =
+    // the max ms we'll borrow per idle gap.
+    const lr = 0.02, temp = 0.5, t0 = performance.now(), stepsAtStart = _grindSteps;
+    let lastPersist = _grindSteps;
+    const ric = (typeof window !== 'undefined' && window.requestIdleCallback)
+        ? window.requestIdleCallback.bind(window)
+        : (cb) => setTimeout(() => cb({ timeRemaining: () => 6, didTimeout: true }), 16);
+    const setState = txt => { const s = _trainEnvEl && _trainEnvEl.querySelector('#te-state'); if (s && s.textContent !== txt) s.textContent = txt; };
+    const pump = (deadline) => {
+        if (!_grinding) return _finishGrind();
+        if (_replay.length < 8) { setState('waiting for experience…'); ric(pump, { timeout: 400 }); return; }
+        setState('running');
+        const cap = Math.max(1, Math.min(16, _grindIntensity));     // ms we're allowed to borrow
+        const have = (deadline && deadline.timeRemaining) ? deadline.timeRemaining() : 6;
+        const slice = Math.max(1, Math.min(cap, have));             // never exceed the idle budget
+        const tStart = performance.now();
+        while ((performance.now() - tStart) < slice && _grinding) {
+            for (let b = 0; b < 8; b++) {        // tiny chunk, then re-check the clock
                 const t = _replay[(Math.random() * _replay.length) | 0];
-                const w = Math.min(4, Math.exp((t.r - _grindBaseline) / temp));   // AWR weight (clipped)
+                const w = Math.min(4, Math.exp((t.r - _grindBaseline) / temp));
                 _cheatReplayStep(t, lr, w); _grindSteps++;
             }
-            _grindEps = Math.round((_grindSteps - stepsAtStart) / Math.max(0.001, (performance.now() - t0) / 1000));
-            if (_grindSteps % (batch * 8) === 0) { _lsSet('sm64_cheat_net', JSON.stringify(_cheatNet)); _renderDeepInfo(); }
-            await new Promise(r => setTimeout(r, 0));   // yield each cycle — never freeze the tab
         }
-    } finally {
-        _stopLagMon(); if (_trainMonTimer) { clearInterval(_trainMonTimer); _trainMonTimer = null; }
-        if (_hyperPrev === false) { try { setHyperSpeed(false); } catch {} } _hyperPrev = null;
-        _lsSet('sm64_cheat_net', JSON.stringify(_cheatNet));
-        if (_rlPersist) _replaySave();
-        _renderDeepInfo(); _trainMon();
-        if (_trainEnvEl) { const s = _trainEnvEl.querySelector('#te-state'); if (s) s.textContent = _autoStopReason ? 'stopped: ' + _autoStopReason : 'stopped'; const b = _trainEnvEl.querySelector('#te-stop'); if (b) { b.textContent = '✕ Close'; b.classList.remove('danger'); } }
-    }
+        _grindEps = Math.round((_grindSteps - stepsAtStart) / Math.max(0.001, (performance.now() - t0) / 1000));
+        if (_grindSteps - lastPersist >= 2048) { lastPersist = _grindSteps; _lsSet('sm64_cheat_net', JSON.stringify(_cheatNet)); _renderDeepInfo(); }
+        ric(pump, { timeout: 400 });
+    };
+    ric(pump, { timeout: 400 });
+}
+function _finishGrind() {
+    _stopLagMon(); if (_trainMonTimer) { clearInterval(_trainMonTimer); _trainMonTimer = null; }
+    _lsSet('sm64_cheat_net', JSON.stringify(_cheatNet));
+    if (_rlPersist) _replaySave();
+    _renderDeepInfo(); _trainMon();
+    if (_trainEnvEl) { const s = _trainEnvEl.querySelector('#te-state'); if (s) s.textContent = _autoStopReason ? 'stopped: ' + _autoStopReason : 'stopped'; const b = _trainEnvEl.querySelector('#te-stop'); if (b) { b.textContent = '✕ Close'; b.classList.remove('danger'); } }
 }
 window.sm64Grind = grindTrain;
 // Best-effort replay persistence (only when the user opted into model persistence).
