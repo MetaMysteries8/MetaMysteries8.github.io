@@ -2777,7 +2777,7 @@ let _lastGradeTime = 0;
 //                  (clean demonstration signal).
 let _playMode = (() => { try { return localStorage.getItem('sm64_play_mode') || 'ai'; } catch { return 'ai'; } })();
 function _playModeLabel(m) {
-    return { ai: '🤖 AI Play', rl: '🧒 RL Play', 'player-teach': '🧓 Player Teach', 'ai-teach': '👨‍🏫 AI Teach', rtplay: '🎓 RT Coach' }[m] || '🤖 AI Play';
+    return { ai: '🤖 AI Play', rl: '🧒 RL Play', 'player-teach': '🧓 Player Teach', 'ai-teach': '👨‍🏫 AI Teach', rtplay: '🎮 RT Realtime' }[m] || '🤖 AI Play';
 }
 function setPlayMode(m) {
     if (!['ai', 'rl', 'player-teach', 'ai-teach', 'rtplay'].includes(m)) m = 'ai';
@@ -4448,10 +4448,10 @@ function _startSelectedMode() {
         return;
     }
     if (_playMode === 'rtplay') {
-        updateAIStatus('🎓 RT Coach — gpt-realtime-2 watches and guides YOU (you play). Hold ` (or the talk button) to ask it; press T to type.');
-        tts.speak('Real time coach. The realtime model will watch and guide you. Hold the talk button to ask it anything.');
+        updateAIStatus('🎮 RT Realtime — pick a direction in the panel: AI coaches YOU (you play), or AI plays and YOU coach it. Hold ` (or the talk button) to speak; press T to type.');
+        tts.speak('Real time mode. Pick a direction in the panel: the model coaches you, or it plays while you coach it. Hold the talk button to speak.');
         if (window.sm64RtPlay) window.sm64RtPlay.start();
-        else updateAIStatus('⚠ RT Coach not loaded — reload the page.');
+        else updateAIStatus('⚠ RT Realtime not loaded — reload the page.');
         updateDebugHUD();
         return;
     }
