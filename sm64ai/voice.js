@@ -1,66 +1,34 @@
 // ─────────────────────────────────────────────────────────────────────────
-// voice.js — Realtime VOICE AGENT for the SM64-AI app.
-// Talks to Pollinations' OpenAI-compatible Realtime API (gpt-realtime-2) over a
-// WebSocket: streams your mic up, plays the model's spoken reply back, and lets it
-// DRIVE THE APP by calling tools (start/stop, set mode, cheater, deep-train, …).
-//
-// Speech-to-speech: the model's own voice is the audio out — no separate TTS needed.
-// A free, non-Pollinations fallback (browser SpeechSynthesis) speaks text if audio
-// output is off. Push-to-talk, hands-free (server VAD), and a wake-word trigger.
-// Chrome/Chromium + mic permission. Experimental — logs verbosely for debugging.
+// voice.js — Realtime VOICE ASSISTANT for the SM64-AI app (separate from RT Play).
+// Talk to gpt-realtime-2; it answers in its own voice and CONTROLS THE APP by
+// calling tools (start/stop, set mode, cheater, deep-train, hyper, status).
+// Speech-to-speech; browser SpeechSynthesis is the free text-mode fallback.
+// Push-to-talk, hands-free (server VAD), wake word. Chrome + mic. (RT Play — the
+// model actually playing Mario — lives in rtplay.js, a separate system.)
 // ─────────────────────────────────────────────────────────────────────────
 (function () {
     'use strict';
     const RT_URL = 'wss://gen.pollinations.ai/v1/realtime?model=gpt-realtime-2';
-    const SR = 24000;                 // realtime PCM16 sample rate (mono, little-endian)
+    const SR = 24000;
     const $ = id => document.getElementById(id);
     const B = () => window.sm64Voice || {};
 
     let ws = null, connected = false;
     let micStream = null, micCtx = null, micNode = null, micSrc = null, micZero = null, micReady = false;
     let playCtx = null, playHead = 0;
-    let talking = false, mode = 'ptt';        // 'ptt' | 'vad' | 'wake'
-    let sentSamples = 0;                       // audio captured this turn (empty-commit guard)
-    let speakBack = true;                     // use the model's native voice
-    let curText = '';
+    let talking = false, mode = 'ptt', speakBack = true, curText = '', sentSamples = 0;
     const handledCalls = new Set();
     let recog = null, wakePhrase = 'hey mario';
-    // Rebindable hotkeys (for keyboards without a ` key).
-    let pttKey = 'Backquote', textKey = 'KeyT', capturing = null;
-    try { pttKey = localStorage.getItem('sm64_voice_ptt') || 'Backquote'; textKey = localStorage.getItem('sm64_voice_textkey') || 'KeyT'; } catch {}
-    function keyLabel(code) {
-        if (!code) return '—';
-        if (code === 'Backquote') return '`';
-        if (code === 'Space') return 'Space';
-        const m = /^Key([A-Z])$/.exec(code) || /^Digit(\d)$/.exec(code); if (m) return m[1];
-        return code.replace('Arrow', '');
-    }
-    function setBinding(which, code) {
-        if (which === 'ptt') { if (code === textKey) return; pttKey = code; try { localStorage.setItem('sm64_voice_ptt', code); } catch {} }
-        else { if (code === pttKey) return; textKey = code; try { localStorage.setItem('sm64_voice_textkey', code); } catch {} }
-        updateRebindLabels();
-    }
-    function updateRebindLabels() {
-        const p = $('voice-rebind-ptt'), t = $('voice-rebind-text');
-        if (p) p.textContent = '🎤 Talk: ' + keyLabel(pttKey);
-        if (t) t.textContent = '⌨ Type: ' + keyLabel(textKey);
-    }
-    // RT Play — the realtime model SEES the screen and DRIVES Mario.
-    let rtPlaying = false, rtTimer = null, rtBusy = false, rtAuto = true;
-    let rtTask = 'Beat the game — make progress, collect stars, explore, and avoid dying.';
-    const MOVE_ENUM = ['forward', 'backward', 'turn', 'forward-left', 'forward-right', 'jump', 'jump-forward', 'long_jump', 'dive', 'ground_pound', 'crouch', 'wait'];
-    const MOVE_TOOL = { type: 'function', name: 'move', description: 'Control Mario RIGHT NOW. The movement is HELD until your next move() call, so call it every turn to keep playing.', parameters: { type: 'object', properties: { action: { type: 'string', enum: MOVE_ENUM }, say: { type: 'string', description: 'optional brief commentary' } }, required: ['action'] } };
 
     const SYS_PROMPT =
         "You are the friendly voice assistant inside an SM64 AI-player web app. The user " +
-        "speaks to you and you can CONTROL the app by calling tools: start_playing / stop_playing, " +
-        "set_mode (ai, rl, player-teach, ai-teach), set_cheater, deep_train, set_hyper_speed, and " +
-        "get_status. When the user asks you to do something, call the right tool, then confirm in one " +
-        "short spoken sentence. If they just chat, answer briefly. Never read out raw JSON.";
+        "speaks to you and you CONTROL the app by calling tools: start_playing / stop_playing, " +
+        "set_mode (ai, rl, player-teach, ai-teach, rtplay), set_cheater, deep_train, set_hyper_speed, " +
+        "and get_status. Call the right tool, then confirm in one short spoken sentence. Never read raw JSON.";
 
     const TOOLS = [
-        { type: 'function', name: 'set_mode', description: 'Set the play mode.', parameters: { type: 'object', properties: { mode: { type: 'string', enum: ['ai', 'rl', 'player-teach', 'ai-teach'] } }, required: ['mode'] } },
-        { type: 'function', name: 'start_playing', description: 'Start the AI playing; optionally pass a mode.', parameters: { type: 'object', properties: { mode: { type: 'string', enum: ['ai', 'rl', 'player-teach', 'ai-teach'] } } } },
+        { type: 'function', name: 'set_mode', description: 'Set the play mode.', parameters: { type: 'object', properties: { mode: { type: 'string', enum: ['ai', 'rl', 'player-teach', 'ai-teach', 'rtplay'] } }, required: ['mode'] } },
+        { type: 'function', name: 'start_playing', description: 'Start the AI playing; optionally pass a mode.', parameters: { type: 'object', properties: { mode: { type: 'string', enum: ['ai', 'rl', 'player-teach', 'ai-teach', 'rtplay'] } } } },
         { type: 'function', name: 'stop_playing', description: 'Stop the AI player.', parameters: { type: 'object', properties: {} } },
         { type: 'function', name: 'set_cheater', description: "Turn the Cheater (LRL) model on/off.", parameters: { type: 'object', properties: { on: { type: 'boolean' } }, required: ['on'] } },
         { type: 'function', name: 'deep_train', description: 'Start or stop the Deep Trainer grinding.', parameters: { type: 'object', properties: { on: { type: 'boolean' } }, required: ['on'] } },
@@ -79,13 +47,11 @@
                 case 'deep_train': b.deepTrain && b.deepTrain(!!a.on); return { ok: true, on: !!a.on };
                 case 'set_hyper_speed': b.hyper && b.hyper(!!a.on); return { ok: true, on: !!a.on };
                 case 'get_status': return (b.status && b.status()) || {};
-                case 'move': b.rt && b.rt.act && b.rt.act(a.action); if (a.say) log('ai', a.say); return { ok: true, action: a.action };
                 default: return { error: 'unknown tool ' + name };
             }
         } catch (e) { return { error: String(e) }; }
     }
 
-    // ── UI helpers ──
     function setStatus(s) { const el = $('voice-status'); if (el) el.textContent = s; }
     function log(role, msg) {
         const el = $('voice-log'); if (!el) return;
@@ -104,43 +70,30 @@
     }
     function finalizeAssistant() { const el = $('voice-log'); const last = el && el.lastChild; if (last && last._partial) last._partial = false; }
 
-    // ── WebSocket ──
     async function connect() {
         if (connected) return;
         const key = (B().key && B().key()) || '';
-        if (!key) { setStatus('no API key — connect your account first'); }
+        if (!key) setStatus('no API key — connect your account first');
         try { ws = new WebSocket(RT_URL + (key ? '&key=' + encodeURIComponent(key) : '')); }
         catch (e) { setStatus('connect failed'); console.warn('[voice]', e); return; }
         ws.onopen = () => { connected = true; setStatus('connected'); sendSession(); log('sys', 'connected to gpt-realtime-2'); updateButtons(); };
         ws.onclose = () => { connected = false; setStatus('disconnected'); updateButtons(); };
-        ws.onerror = () => { setStatus('socket error'); };
+        ws.onerror = () => setStatus('socket error');
         ws.onmessage = onMessage;
     }
     function disconnect() { try { ws && ws.close(); } catch {} connected = false; stopMic(); updateButtons(); }
     function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
     function sendSession() {
-        // GA Realtime schema: session.type is REQUIRED. Keep it minimal so the proxy
-        // uses sensible defaults (pcm16 @ 24k, default voice). turn_detection lives
-        // under audio.input in GA; only set it for hands-free.
-        const s = {
-            type: 'realtime',
-            instructions: SYS_PROMPT,
-            output_modalities: speakBack ? ['audio'] : ['text'],
-            tools: TOOLS,
-            tool_choice: 'auto',
-        };
+        const s = { type: 'realtime', instructions: SYS_PROMPT, output_modalities: speakBack ? ['audio'] : ['text'], tools: TOOLS, tool_choice: 'auto' };
         const audio = {};
-        if (speakBack) audio.output = { voice: 'alloy' };   // GA wants a voice for audio output
+        if (speakBack) audio.output = { voice: 'alloy' };
         if (mode === 'vad') audio.input = { turn_detection: { type: 'server_vad', threshold: 0.5, silence_duration_ms: 700 } };
         if (Object.keys(audio).length) s.audio = audio;
         send({ type: 'session.update', session: s });
     }
-    // Text path — bypasses the mic entirely. The definitive "does the model respond?"
-    // test, and a handy way to type commands.
     function sendText(t) {
         if (!t) return;
         if (!connected) { connect().then(() => setTimeout(() => sendText(t), 400)); return; }
-        if (rtPlaying) { rtGuide(t); return; }   // text becomes live guidance during RT Play
         send({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: t }] } });
         send({ type: 'response.create' });
         log('you', t); setStatus('thinking…');
@@ -148,24 +101,17 @@
 
     function onMessage(ev) {
         let m; try { m = JSON.parse(ev.data); } catch { return; }
-        console.log('[voice] ◀', m.type, m.error ? JSON.stringify(m.error) : (m.response && m.response.status_details ? JSON.stringify(m.response.status_details) : ''));
+        console.log('[voice] ◀', m.type, m.error ? JSON.stringify(m.error) : '');
         if (m.type && /\.error$|^error$/.test(m.type)) { const msg = (m.error && (m.error.message || m.error.code)) || JSON.stringify(m.error || m); log('sys', 'ERROR: ' + msg); setStatus('err: ' + msg); return; }
         switch (m.type) {
             case 'session.created': log('sys', 'session ready'); break;
-            case 'session.updated': break;
             case 'response.created': setStatus('responding…'); break;
-            // GA emits response.output_audio.* / response.output_text.*; older builds
-            // emit response.audio.* / response.text.*. Handle both.
             case 'response.audio.delta':
             case 'response.output_audio.delta': if (speakBack) playPCM(m.delta); break;
             case 'response.audio_transcript.delta':
             case 'response.output_audio_transcript.delta':
             case 'response.text.delta':
             case 'response.output_text.delta': curText += (m.delta || ''); setAssistant(curText); break;
-            case 'response.audio_transcript.done':
-            case 'response.output_audio_transcript.done':
-            case 'response.text.done':
-            case 'response.output_text.done': break;
             case 'response.function_call_arguments.done':
                 execToolItem({ name: m.name, call_id: m.call_id, arguments: m.arguments }); break;
             case 'response.done': {
@@ -173,29 +119,23 @@
                 for (const it of out) if (it.type === 'function_call') execToolItem(it);
                 if (curText) { if (!speakBack) speakText(curText); finalizeAssistant(); }
                 curText = '';
-                if (rtPlaying) { rtBusy = false; if (rtAuto) { clearTimeout(rtTimer); rtTimer = setTimeout(rtTick, 500); } setStatus('RT Play'); }
-                else if (mode !== 'vad' && talking === false) setStatus('ready');
+                if (mode !== 'vad' && !talking) setStatus('ready');
                 break;
             }
             case 'input_audio_buffer.speech_started': setStatus('listening…'); break;
             case 'input_audio_buffer.speech_stopped': setStatus('thinking…'); break;
-            case 'error': console.warn('[voice] error', m.error); setStatus('err: ' + ((m.error && m.error.message) || '')); break;
         }
     }
-
     function execToolItem(it) {
         if (!it || !it.name || (it.call_id && handledCalls.has(it.call_id))) return;
         if (it.call_id) handledCalls.add(it.call_id);
         let args = {}; try { args = JSON.parse(it.arguments || '{}'); } catch {}
         const result = runTool(it.name, args);
-        if (it.name !== 'move') log('tool', it.name + '(' + JSON.stringify(args) + ') → ' + JSON.stringify(result));
+        log('tool', it.name + '(' + JSON.stringify(args) + ') → ' + JSON.stringify(result));
         if (it.call_id) send({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: it.call_id, output: JSON.stringify(result) } });
-        // 'move' ends the turn silently (the rtTick loop drives the next frame); other
-        // tools get a spoken confirmation.
-        if (it.name !== 'move') send({ type: 'response.create' });
+        send({ type: 'response.create' });
     }
 
-    // ── audio playback (PCM16 24k → scheduled) ──
     function playPCM(b64) {
         if (!b64) return;
         if (!playCtx) playCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -209,7 +149,6 @@
     }
     function speakText(t) { try { const u = new SpeechSynthesisUtterance(t); speechSynthesis.speak(u); } catch {} }
 
-    // ── mic capture (always-on once connected; only SENT while talking) ──
     async function startMic() {
         if (micReady) return true;
         try {
@@ -217,7 +156,7 @@
             micCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SR });
             micSrc = micCtx.createMediaStreamSource(micStream);
             micNode = micCtx.createScriptProcessor(2048, 1, 1);
-            micZero = micCtx.createGain(); micZero.gain.value = 0;   // keep the node alive without echoing
+            micZero = micCtx.createGain(); micZero.gain.value = 0;
             micNode.onaudioprocess = (e) => {
                 if (!talking || !connected) return;
                 const f = e.inputBuffer.getChannelData(0), i16 = new Int16Array(f.length);
@@ -238,7 +177,6 @@
     }
     function i16ToB64(i16) { const b = new Uint8Array(i16.buffer); let s = ''; for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000)); return btoa(s); }
 
-    // ── turn control ──
     async function beginTalk() {
         if (!connected) await connect();
         if (!(await startMic())) return;
@@ -248,22 +186,8 @@
         if (!talking) return;
         talking = false;
         if (mode === 'vad') return;
-        if (sentSamples < 2400) {   // <100ms @24k — nothing usable captured
-            setStatus('no audio captured — check mic'); log('sys', 'no audio captured (mic gave ' + sentSamples + ' samples). Try the text box to test the model.');
-            return;
-        }
-        log('you', '(' + Math.round(sentSamples / SR * 100) / 100 + 's audio)');
-        if (rtPlaying) {
-            try { send({ type: 'response.cancel' }); } catch {}
-            send({ type: 'input_audio_buffer.commit' });
-            rtBusy = true; setStatus('RT Play — guiding');
-            const b = B(); (b.rt && b.rt.frame ? b.rt.frame() : Promise.resolve(null)).then(f => {
-                if (f) send({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_image', image_url: f }] } });
-                send({ type: 'response.create' });
-            });
-            return;
-        }
-        setStatus('thinking…');
+        if (sentSamples < 2400) { setStatus('no audio captured — check mic'); log('sys', 'no audio captured (' + sentSamples + ' samples). Try the text box.'); return; }
+        setStatus('thinking…'); log('you', '(' + Math.round(sentSamples / SR * 100) / 100 + 's audio)');
         send({ type: 'input_audio_buffer.commit' }); send({ type: 'response.create' });
     }
     async function setHandsFree(on) {
@@ -271,82 +195,23 @@
         else { mode = 'ptt'; talking = false; sendSession(); setStatus('push-to-talk'); }
     }
 
-    // ── wake word (free, browser SpeechRecognition) ──
     function startWake() {
         const SRc = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (!SRc) { setStatus('wake word needs Chrome speech recognition'); return; }
         mode = 'wake'; stopWakeRecog();
         recog = new SRc(); recog.continuous = true; recog.interimResults = false; recog.lang = 'en-US';
-        recog.onresult = (e) => {
-            const txt = e.results[e.results.length - 1][0].transcript.toLowerCase();
-            if (txt.includes(wakePhrase)) { log('sys', 'wake: "' + wakePhrase + '"'); wakeTurn(); }
-        };
+        recog.onresult = (e) => { const txt = e.results[e.results.length - 1][0].transcript.toLowerCase(); if (txt.includes(wakePhrase)) { log('sys', 'wake: "' + wakePhrase + '"'); wakeTurn(); } };
         recog.onend = () => { if (mode === 'wake') { try { recog.start(); } catch {} } };
         try { recog.start(); setStatus('wake word: say "' + wakePhrase + '"'); } catch (e) { console.warn('[voice] recog', e); }
     }
     function stopWakeRecog() { try { recog && (recog.onend = null, recog.stop()); } catch {} recog = null; }
-
-    // ── RT PLAY ──────────────────────────────────────────────────────────────
-    function rtPrompt() {
-        return "You ARE playing Super Mario 64 in REAL TIME. Every turn you get the current screen as an image. " +
-            "Decide Mario's next movement and CALL the `move` tool — the move is HELD until your next call, so call it every turn. " +
-            "YOUR TASK: " + rtTask + ". Keep Mario progressing; if you look stuck, try jumping, turning, or a long jump. " +
-            "Speak short, occasional commentary. The user can interrupt by voice or text to change the task or guide you — always obey them.";
-    }
-    function rtSession() {
-        const s = { type: 'realtime', instructions: rtPrompt(), output_modalities: speakBack ? ['audio'] : ['text'], tools: TOOLS.concat([MOVE_TOOL]), tool_choice: 'auto' };
-        const audio = {}; if (speakBack) audio.output = { voice: 'alloy' }; if (Object.keys(audio).length) s.audio = audio;
-        send({ type: 'session.update', session: s });
-    }
-    async function startRtPlay() {
-        if (rtPlaying) return;
-        if (!connected) await connect();
-        rtPlaying = true; rtBusy = false; mode = 'ptt';
-        rtSession(); openPanel();
-        const ms = $('voice-mode'); if (ms) ms.value = 'ptt';
-        log('sys', '🎮 RT Play — task: ' + rtTask); setStatus('RT Play'); updateButtons();
-        setTimeout(rtTick, 600);
-    }
-    function stopRtPlay() {
-        rtPlaying = false; if (rtTimer) { clearTimeout(rtTimer); rtTimer = null; }
-        const b = B(); b.rt && b.rt.release && b.rt.release();
-        setStatus(connected ? 'connected' : 'idle'); updateButtons();
-    }
-    async function rtTick() {
-        if (!rtPlaying || !connected) return;
-        if (rtBusy || talking) { rtTimer = setTimeout(rtTick, 300); return; }   // don't step on a guidance turn
-        if (!rtAuto) return;                 // on-request mode: only act on your guidance
-        await rtTurn(null);
-    }
-    // Live guidance interrupts the play loop with your message + the current frame.
-    function rtGuide(text) {
-        if (!rtPlaying) return false;
-        if (text) log('you', text);
-        try { send({ type: 'response.cancel' }); } catch {}
-        rtBusy = false; rtTurn(text || null); return true;
-    }
-    async function rtTurn(extra) {
-        if (!rtPlaying || !connected || rtBusy) return;
-        const b = B();
-        let frame = null; try { frame = (b.rt && b.rt.frame) ? await b.rt.frame() : null; } catch {}
-        const content = [{ type: 'input_text', text: (extra ? ('User says: ' + extra + '\n') : '') + 'Here is the screen now. Call move() for the next action. Task: ' + rtTask }];
-        if (frame) content.push({ type: 'input_image', image_url: frame });
-        send({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content } });
-        send({ type: 'response.create' });
-        rtBusy = true; setStatus('RT Play — thinking');
-    }
-    function rtSetTask(t) { if (t && t.trim()) { rtTask = t.trim(); if (rtPlaying) { rtSession(); log('sys', 'task → ' + rtTask); } } }
-    function rtSetAuto(on) { rtAuto = !!on; if (rtPlaying && rtAuto && !rtBusy) rtTick(); }
     async function wakeTurn() {
         if (!connected) await connect();
-        const prev = mode; mode = 'vad'; sendSession();
+        mode = 'vad'; sendSession();
         if (await startMic()) { talking = true; setStatus('listening (wake)…'); }
-        // hand back to wake listening shortly after the model answers
         setTimeout(() => { if (mode === 'vad') { talking = false; mode = 'wake'; } }, 9000);
-        void prev;
     }
 
-    // ── buttons / panel ──
     function updateButtons() {
         const c = $('voice-connect'); if (c) { c.textContent = connected ? '🔌 Disconnect' : '🔗 Connect'; c.classList.toggle('green', !connected); }
         const b = $('voice-btn'); if (b) b.classList.toggle('active', connected);
@@ -363,14 +228,11 @@
         const ph = $('voice-wakephrase'); if (ph) { ph.value = wakePhrase; ph.addEventListener('change', e => { wakePhrase = (e.target.value || 'hey mario').toLowerCase(); }); }
         const modeSel = $('voice-mode');
         if (modeSel) modeSel.addEventListener('change', e => {
-            stopWakeRecog();
-            const v = e.target.value;
+            stopWakeRecog(); const v = e.target.value;
             if (v === 'vad') setHandsFree(true);
             else if (v === 'wake') { setHandsFree(false); startWake(); }
-            else { setHandsFree(false); }
-            document.body.classList.toggle('voice-ptt', v === 'ptt');
+            else setHandsFree(false);
         });
-        // push-to-talk button (hold)
         const ptt = $('voice-ptt-btn');
         if (ptt) {
             const down = (ev) => { ev.preventDefault(); if (mode === 'ptt') beginTalk(); };
@@ -382,26 +244,9 @@
         const doSend = () => { if (txt && txt.value.trim()) { sendText(txt.value.trim()); txt.value = ''; } };
         if (sendBtn) sendBtn.addEventListener('click', doSend);
         if (txt) txt.addEventListener('keydown', e => { if (e.key === 'Enter') doSend(); });
-        // RT Play controls
-        const taskEl = $('voice-rt-task'); if (taskEl) { taskEl.value = rtTask; taskEl.addEventListener('change', e => rtSetTask(e.target.value)); }
-        const autoEl = $('voice-rt-auto'); if (autoEl) { autoEl.checked = rtAuto; autoEl.addEventListener('change', e => rtSetAuto(e.target.checked)); }
-        // Rebind buttons: click, then press the key you want.
-        const rb1 = $('voice-rebind-ptt'), rb2 = $('voice-rebind-text');
-        if (rb1) rb1.addEventListener('click', () => { capturing = 'ptt'; rb1.textContent = 'press a key…'; });
-        if (rb2) rb2.addEventListener('click', () => { capturing = 'text'; rb2.textContent = 'press a key…'; });
-        updateRebindLabels();
-        // Global hotkeys (active in RT Play / when connected): hold the Talk key, press the Type key.
-        document.addEventListener('keydown', e => {
-            if (capturing) { e.preventDefault(); if (e.code !== 'Escape') setBinding(capturing, e.code); capturing = null; updateRebindLabels(); return; }
-            const tag = e.target && e.target.tagName; if (tag && /INPUT|TEXTAREA|SELECT/.test(tag)) return;
-            if (!rtPlaying && !connected) return;
-            if (e.code === pttKey) { e.preventDefault(); if (!talking) beginTalk(); }
-            else if (e.code === textKey) { e.preventDefault(); openPanel(); const tb = $('voice-text'); if (tb) setTimeout(() => tb.focus(), 30); }
-        });
-        document.addEventListener('keyup', e => { if (e.code === pttKey && talking) { e.preventDefault(); endTalk(); } });
         updateButtons();
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wire); else wire();
-    window.sm64VoiceAgent = { connect, disconnect, open: openPanel, startRtPlay, stopRtPlay, guide: rtGuide };
+    window.sm64VoiceAgent = { connect, disconnect, open: openPanel };
 })();

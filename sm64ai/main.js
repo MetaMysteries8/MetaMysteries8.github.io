@@ -4450,8 +4450,8 @@ function _startSelectedMode() {
     if (_playMode === 'rtplay') {
         updateAIStatus('🎙️ RT Play — gpt-realtime-2 is playing. Hold ` (or the talk button) to guide it; press T to type.');
         tts.speak('Real time play. The realtime model is playing. Hold the talk button to guide it.');
-        if (window.sm64VoiceAgent && window.sm64VoiceAgent.startRtPlay) window.sm64VoiceAgent.startRtPlay();
-        else updateAIStatus('⚠ Voice agent not loaded — reload the page.');
+        if (window.sm64RtPlay) window.sm64RtPlay.start();
+        else updateAIStatus('⚠ RT Play not loaded — reload the page.');
         updateDebugHUD();
         return;
     }
@@ -4533,7 +4533,7 @@ function stopAIPlayer() {
     stopLiveLoop();
     stopElderWatch();
     stopRealtimeRL();
-    if (window.sm64VoiceAgent && window.sm64VoiceAgent.stopRtPlay) window.sm64VoiceAgent.stopRtPlay();
+    if (window.sm64RtPlay) window.sm64RtPlay.stop();
     _showoffRunning = false; _showoffBuffer = [];
     _showElderBanner(false); _showRatingWidget(false);
     if (_captureVideo) { _captureVideo.srcObject = null; }

@@ -973,6 +973,21 @@ body {
 #voice-log .vl-sys { color: #8a96b0; font-size: 11px; }
 #voice-ptt-btn:active { filter: brightness(1.3); }
 
+/* ── RT Play overlay (separate from the voice assistant) ── */
+#rtp-panel { display: none; position: fixed; left: 14px; bottom: 14px; z-index: 2400; width: 300px; max-width: 88vw; background: #0d1018; border: 1px solid #2a3550; border-radius: 12px; box-shadow: 0 14px 40px rgba(0,0,0,.55); padding: 12px 14px; color: #e6e9ef; font-family: system-ui, "Segoe UI", sans-serif; font-size: 13px; }
+#rtp-panel.rtp-hidden { height: 34px; overflow: hidden; }
+#rtp-panel .rtp-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+#rtp-panel .rtp-head #rtp-status { color: #19c37d; font-size: 12px; margin-left: auto; }
+#rtp-panel .rtp-head #rtp-min { background: #26304a; color: #e6e9ef; border: 0; border-radius: 6px; cursor: pointer; padding: 2px 8px; }
+#rtp-panel .rtp-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; color: #8a96b0; font-size: 12px; }
+#rtp-panel input[type="text"] { background: #0e1220; border: 1px solid #2a3550; color: #e6e9ef; border-radius: 7px; padding: 7px 9px; font-size: 13px; }
+#rtp-panel .rtp-keys { display: flex; gap: 6px; margin-bottom: 8px; }
+#rtp-panel .rtp-keys button, #rtp-panel #rtp-send { cursor: pointer; border: 0; border-radius: 7px; padding: 7px 10px; font-weight: 700; font-size: 12px; background: #26304a; color: #e6e9ef; }
+#rtp-panel #rtp-ptt { background: #4fd1e0; color: #06121a; flex: 1; touch-action: none; user-select: none; }
+#rtp-panel #rtp-ptt:active { filter: brightness(1.3); }
+#rtp-panel #rtp-log { max-height: 120px; overflow-y: auto; font-size: 11px; line-height: 1.45; background: #0e1220; border: 1px solid #2a3550; border-radius: 7px; padding: 6px; margin-top: 4px; }
+#rtp-panel .rtp-move { color: #19c37d; } #rtp-panel .rtp-you { color: #4fd1e0; } #rtp-panel .rtp-ai { color: #e6e9ef; } #rtp-panel .rtp-sys { color: #8a96b0; }
+
 /* ── Deep Training Environment (cockpit) ── */
 #train-env { position: fixed; inset: 0; z-index: 2500; display: flex; align-items: center; justify-content: center; }
 #train-env .te-backdrop { position: absolute; inset: 0; background: rgba(4, 7, 12, .72); backdrop-filter: blur(3px); }
