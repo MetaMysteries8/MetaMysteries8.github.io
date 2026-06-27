@@ -5247,3 +5247,27 @@ if (_streamerMode) setStreamerMode(true);
 // Pollen balance chip — refresh now and every 60s
 refreshPollenBalance();
 setInterval(refreshPollenBalance, 60000);
+
+// ── VOICE-AGENT BRIDGE ───────────────────────────────────────────────────────
+// Surface a small, safe control + status surface for voice.js (the realtime voice
+// agent) so it can drive the app from spoken commands without reaching into internals.
+window.sm64Voice = {
+    key: () => { try { return getActiveKey() || ''; } catch { return ''; } },
+    mode: (m) => { if (['ai', 'rl', 'player-teach', 'ai-teach'].includes(m)) setPlayMode(m); },
+    start: (m) => { if (m && ['ai', 'rl', 'player-teach', 'ai-teach'].includes(m)) setPlayMode(m); if (!aiPlayerActive) toggleAIPlayer(); },
+    stop: () => { if (aiPlayerActive) stopAIPlayer(); },
+    cheater: (on) => { try { setCheater(!!on); } catch {} },
+    deepTrain: (on) => { try { grindTrain(!!on); } catch {} },
+    hyper: (on) => { try { setHyperSpeed(!!on); } catch {} },
+    status: () => ({
+        playing: !!aiPlayerActive,
+        mode: _playMode,
+        region: _region,
+        stars: (_gameState && _gameState.stars) ?? null,
+        cheater: !!_cheaterEnabled,
+        deepTraining: !!_grinding,
+        grindSteps: _grindSteps,
+        replay: _replay.length,
+        vision: _visionStatus,
+    }),
+};

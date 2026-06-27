@@ -50,6 +50,7 @@
                 <button id="agent-only-btn"      class="hud-icon-btn" title="Agent-Only mode: disable manual control + enable the instruction box">🤖</button>
                 <button id="brainmap-btn"        class="hud-icon-btn" title="Brainmap visualizer (watch the AI's sense of place build)">🗺️</button>
                 <button id="cheater-btn"         class="hud-icon-btn" title="Cheater's Model: TAS-trained neural net prior for RL Play">🃏</button>
+                <button id="voice-btn"           class="hud-icon-btn" title="Voice agent — talk to gpt-realtime-2, it can control the app">🎙️</button>
                 <button id="debug-btn"           class="hud-icon-btn" title="Debug HUD (live AI state)">🐞</button>
                 <button id="disconnect-btn"      class="hud-icon-btn danger" title="Disconnect account" style="display:none">🔌</button>
             </div>
@@ -251,6 +252,37 @@
         </div>
         <div id="cheater-backdrop" class="modal-backdrop"></div>
 
+        <!-- Realtime voice agent -->
+        <div id="voice-modal" role="dialog" aria-modal="true" aria-label="Voice Agent">
+            <div id="voice-panel">
+                <button id="voice-close" class="modal-close-btn" aria-label="Close">✕</button>
+                <h3>🎙️ Voice Agent <span style="font-size:11px;color:#8a96b0;font-weight:600">gpt-realtime-2</span></h3>
+                <p class="provider-desc">Talk to a realtime model — it can <b>control the app</b> ("start RL play", "turn on the cheater", "start deep training", "what's the status?"). Speech-to-speech, so it answers in its own voice. Chrome + mic.</p>
+                <div class="energy-btn-row">
+                    <button id="voice-connect" class="hud-btn green">🔗 Connect</button>
+                    <span id="voice-status" style="align-self:center;font-size:12px;color:#8a96b0">idle</span>
+                </div>
+                <label class="energy-field">
+                    <span>Listening mode</span>
+                    <select id="voice-mode">
+                        <option value="ptt">Push-to-talk (hold the button)</option>
+                        <option value="vad">Hands-free (auto turn-taking)</option>
+                        <option value="wake">Wake word</option>
+                    </select>
+                </label>
+                <label class="energy-field" style="flex-direction:row;align-items:center;gap:8px">
+                    <input type="checkbox" id="voice-speak" style="width:auto"> <span>Speak replies (native voice; off = browser TTS on text)</span>
+                </label>
+                <label class="energy-field">
+                    <span>Wake phrase</span>
+                    <input type="text" id="voice-wakephrase" value="hey mario">
+                </label>
+                <button id="voice-ptt-btn" class="hud-btn" style="width:100%;padding:14px;font-size:15px;touch-action:none;user-select:none">🎤 Hold to talk</button>
+                <div id="voice-log" style="margin-top:12px;max-height:180px;overflow-y:auto;font-size:12px;line-height:1.5;background:#0e1220;border:1px solid var(--panel-border);border-radius:8px;padding:8px"></div>
+            </div>
+        </div>
+        <div id="voice-backdrop" class="modal-backdrop"></div>
+
         <!-- Turbo / consistent rapid-fire settings -->
         <div id="turbo-modal" role="dialog" aria-modal="true" aria-label="Turbo Settings">
             <div id="turbo-panel">
@@ -423,5 +455,6 @@
     </script>
     <script src="./sm64.js"></script>
     <script type="module" src="./main.js"></script>
+    <script src="./voice.js" defer></script>
 </body>
 </html>
