@@ -20,6 +20,7 @@
     let micStream = null, micCtx = null, micNode = null, micSrc = null, micZero = null, micReady = false;
     let playCtx = null, playHead = 0;
     let talking = false, mode = 'ptt';        // 'ptt' | 'vad' | 'wake'
+    let sentSamples = 0;                       // audio captured this turn (empty-commit guard)
     let speakBack = true;                     // use the model's native voice
     let curText = '';
     const handledCalls = new Set();
@@ -102,13 +103,30 @@
             tools: TOOLS,
             tool_choice: 'auto',
         };
-        if (mode === 'vad') s.audio = { input: { turn_detection: { type: 'server_vad', threshold: 0.5, silence_duration_ms: 700 } } };
+        const audio = {};
+        if (speakBack) audio.output = { voice: 'alloy' };   // GA wants a voice for audio output
+        if (mode === 'vad') audio.input = { turn_detection: { type: 'server_vad', threshold: 0.5, silence_duration_ms: 700 } };
+        if (Object.keys(audio).length) s.audio = audio;
         send({ type: 'session.update', session: s });
+    }
+    // Text path — bypasses the mic entirely. The definitive "does the model respond?"
+    // test, and a handy way to type commands.
+    function sendText(t) {
+        if (!t) return;
+        if (!connected) { connect().then(() => setTimeout(() => sendText(t), 400)); return; }
+        send({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: t }] } });
+        send({ type: 'response.create' });
+        log('you', t); setStatus('thinking…');
     }
 
     function onMessage(ev) {
         let m; try { m = JSON.parse(ev.data); } catch { return; }
+        console.log('[voice] ◀', m.type, m.error ? JSON.stringify(m.error) : (m.response && m.response.status_details ? JSON.stringify(m.response.status_details) : ''));
+        if (m.type && /\.error$|^error$/.test(m.type)) { const msg = (m.error && (m.error.message || m.error.code)) || JSON.stringify(m.error || m); log('sys', 'ERROR: ' + msg); setStatus('err: ' + msg); return; }
         switch (m.type) {
+            case 'session.created': log('sys', 'session ready'); break;
+            case 'session.updated': break;
+            case 'response.created': setStatus('responding…'); break;
             // GA emits response.output_audio.* / response.output_text.*; older builds
             // emit response.audio.* / response.text.*. Handle both.
             case 'response.audio.delta':
@@ -175,6 +193,7 @@
                 const f = e.inputBuffer.getChannelData(0), i16 = new Int16Array(f.length);
                 for (let i = 0; i < f.length; i++) { let s = f[i] < -1 ? -1 : f[i] > 1 ? 1 : f[i]; i16[i] = s < 0 ? s * 32768 : s * 32767; }
                 send({ type: 'input_audio_buffer.append', audio: i16ToB64(i16) });
+                sentSamples += i16.length;
             };
             micSrc.connect(micNode); micNode.connect(micZero); micZero.connect(micCtx.destination);
             micReady = true; return true;
@@ -193,12 +212,18 @@
     async function beginTalk() {
         if (!connected) await connect();
         if (!(await startMic())) return;
-        talking = true; setStatus('listening…'); log('you', '(speaking)');
+        sentSamples = 0; talking = true; setStatus('listening…');
     }
     function endTalk() {
         if (!talking) return;
-        talking = false; setStatus('thinking…');
-        if (mode !== 'vad') { send({ type: 'input_audio_buffer.commit' }); send({ type: 'response.create' }); }
+        talking = false;
+        if (mode === 'vad') return;
+        if (sentSamples < 2400) {   // <100ms @24k — nothing usable captured
+            setStatus('no audio captured — check mic'); log('sys', 'no audio captured (mic gave ' + sentSamples + ' samples). Try the text box to test the model.');
+            return;
+        }
+        setStatus('thinking…'); log('you', '(' + Math.round(sentSamples / SR * 100) / 100 + 's audio)');
+        send({ type: 'input_audio_buffer.commit' }); send({ type: 'response.create' });
     }
     async function setHandsFree(on) {
         if (on) { mode = 'vad'; if (!connected) await connect(); sendSession(); if (await startMic()) { talking = true; setStatus('hands-free — listening'); } }
@@ -260,6 +285,10 @@
             ptt.addEventListener('pointerdown', down); ptt.addEventListener('pointerup', up);
             ptt.addEventListener('pointerleave', up); ptt.addEventListener('pointercancel', up);
         }
+        const txt = $('voice-text'), sendBtn = $('voice-send');
+        const doSend = () => { if (txt && txt.value.trim()) { sendText(txt.value.trim()); txt.value = ''; } };
+        if (sendBtn) sendBtn.addEventListener('click', doSend);
+        if (txt) txt.addEventListener('keydown', e => { if (e.key === 'Enter') doSend(); });
         updateButtons();
     }
 
