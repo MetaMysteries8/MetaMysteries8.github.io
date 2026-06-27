@@ -92,28 +92,35 @@
     function disconnect() { try { ws && ws.close(); } catch {} connected = false; stopMic(); updateButtons(); }
     function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
     function sendSession() {
-        send({
-            type: 'session.update', session: {
-                modalities: speakBack ? ['audio', 'text'] : ['text'],
-                voice: 'alloy',
-                instructions: SYS_PROMPT,
-                input_audio_format: 'pcm16',
-                output_audio_format: 'pcm16',
-                turn_detection: (mode === 'vad') ? { type: 'server_vad', threshold: 0.5, silence_duration_ms: 700 } : null,
-                tools: TOOLS,
-                tool_choice: 'auto',
-            },
-        });
+        // GA Realtime schema: session.type is REQUIRED. Keep it minimal so the proxy
+        // uses sensible defaults (pcm16 @ 24k, default voice). turn_detection lives
+        // under audio.input in GA; only set it for hands-free.
+        const s = {
+            type: 'realtime',
+            instructions: SYS_PROMPT,
+            output_modalities: speakBack ? ['audio'] : ['text'],
+            tools: TOOLS,
+            tool_choice: 'auto',
+        };
+        if (mode === 'vad') s.audio = { input: { turn_detection: { type: 'server_vad', threshold: 0.5, silence_duration_ms: 700 } } };
+        send({ type: 'session.update', session: s });
     }
 
     function onMessage(ev) {
         let m; try { m = JSON.parse(ev.data); } catch { return; }
         switch (m.type) {
-            case 'response.audio.delta': if (speakBack) playPCM(m.delta); break;
+            // GA emits response.output_audio.* / response.output_text.*; older builds
+            // emit response.audio.* / response.text.*. Handle both.
+            case 'response.audio.delta':
+            case 'response.output_audio.delta': if (speakBack) playPCM(m.delta); break;
             case 'response.audio_transcript.delta':
-            case 'response.text.delta': curText += (m.delta || ''); setAssistant(curText); break;
+            case 'response.output_audio_transcript.delta':
+            case 'response.text.delta':
+            case 'response.output_text.delta': curText += (m.delta || ''); setAssistant(curText); break;
             case 'response.audio_transcript.done':
-            case 'response.text.done': break;
+            case 'response.output_audio_transcript.done':
+            case 'response.text.done':
+            case 'response.output_text.done': break;
             case 'response.function_call_arguments.done':
                 execToolItem({ name: m.name, call_id: m.call_id, arguments: m.arguments }); break;
             case 'response.done': {
