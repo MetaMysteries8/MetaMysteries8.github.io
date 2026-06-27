@@ -25,6 +25,11 @@
     let curText = '';
     const handledCalls = new Set();
     let recog = null, wakePhrase = 'hey mario';
+    // RT Play — the realtime model SEES the screen and DRIVES Mario.
+    let rtPlaying = false, rtTimer = null, rtBusy = false, rtAuto = true;
+    let rtTask = 'Beat the game — make progress, collect stars, explore, and avoid dying.';
+    const MOVE_ENUM = ['forward', 'backward', 'turn', 'forward-left', 'forward-right', 'jump', 'jump-forward', 'long_jump', 'dive', 'ground_pound', 'crouch', 'wait'];
+    const MOVE_TOOL = { type: 'function', name: 'move', description: 'Control Mario RIGHT NOW. The movement is HELD until your next move() call, so call it every turn to keep playing.', parameters: { type: 'object', properties: { action: { type: 'string', enum: MOVE_ENUM }, say: { type: 'string', description: 'optional brief commentary' } }, required: ['action'] } };
 
     const SYS_PROMPT =
         "You are the friendly voice assistant inside an SM64 AI-player web app. The user " +
@@ -54,6 +59,7 @@
                 case 'deep_train': b.deepTrain && b.deepTrain(!!a.on); return { ok: true, on: !!a.on };
                 case 'set_hyper_speed': b.hyper && b.hyper(!!a.on); return { ok: true, on: !!a.on };
                 case 'get_status': return (b.status && b.status()) || {};
+                case 'move': b.rt && b.rt.act && b.rt.act(a.action); if (a.say) log('ai', a.say); return { ok: true, action: a.action };
                 default: return { error: 'unknown tool ' + name };
             }
         } catch (e) { return { error: String(e) }; }
@@ -114,6 +120,7 @@
     function sendText(t) {
         if (!t) return;
         if (!connected) { connect().then(() => setTimeout(() => sendText(t), 400)); return; }
+        if (rtPlaying) { rtGuide(t); return; }   // text becomes live guidance during RT Play
         send({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: t }] } });
         send({ type: 'response.create' });
         log('you', t); setStatus('thinking…');
@@ -146,7 +153,8 @@
                 for (const it of out) if (it.type === 'function_call') execToolItem(it);
                 if (curText) { if (!speakBack) speakText(curText); finalizeAssistant(); }
                 curText = '';
-                if (mode !== 'vad' && talking === false) setStatus('ready');
+                if (rtPlaying) { rtBusy = false; if (rtAuto) { clearTimeout(rtTimer); rtTimer = setTimeout(rtTick, 500); } setStatus('RT Play'); }
+                else if (mode !== 'vad' && talking === false) setStatus('ready');
                 break;
             }
             case 'input_audio_buffer.speech_started': setStatus('listening…'); break;
@@ -160,9 +168,11 @@
         if (it.call_id) handledCalls.add(it.call_id);
         let args = {}; try { args = JSON.parse(it.arguments || '{}'); } catch {}
         const result = runTool(it.name, args);
-        log('tool', it.name + '(' + JSON.stringify(args) + ') → ' + JSON.stringify(result));
+        if (it.name !== 'move') log('tool', it.name + '(' + JSON.stringify(args) + ') → ' + JSON.stringify(result));
         if (it.call_id) send({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: it.call_id, output: JSON.stringify(result) } });
-        send({ type: 'response.create' });
+        // 'move' ends the turn silently (the rtTick loop drives the next frame); other
+        // tools get a spoken confirmation.
+        if (it.name !== 'move') send({ type: 'response.create' });
     }
 
     // ── audio playback (PCM16 24k → scheduled) ──
@@ -222,7 +232,18 @@
             setStatus('no audio captured — check mic'); log('sys', 'no audio captured (mic gave ' + sentSamples + ' samples). Try the text box to test the model.');
             return;
         }
-        setStatus('thinking…'); log('you', '(' + Math.round(sentSamples / SR * 100) / 100 + 's audio)');
+        log('you', '(' + Math.round(sentSamples / SR * 100) / 100 + 's audio)');
+        if (rtPlaying) {
+            try { send({ type: 'response.cancel' }); } catch {}
+            send({ type: 'input_audio_buffer.commit' });
+            rtBusy = true; setStatus('RT Play — guiding');
+            const b = B(); (b.rt && b.rt.frame ? b.rt.frame() : Promise.resolve(null)).then(f => {
+                if (f) send({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_image', image_url: f }] } });
+                send({ type: 'response.create' });
+            });
+            return;
+        }
+        setStatus('thinking…');
         send({ type: 'input_audio_buffer.commit' }); send({ type: 'response.create' });
     }
     async function setHandsFree(on) {
@@ -244,6 +265,58 @@
         try { recog.start(); setStatus('wake word: say "' + wakePhrase + '"'); } catch (e) { console.warn('[voice] recog', e); }
     }
     function stopWakeRecog() { try { recog && (recog.onend = null, recog.stop()); } catch {} recog = null; }
+
+    // ── RT PLAY ──────────────────────────────────────────────────────────────
+    function rtPrompt() {
+        return "You ARE playing Super Mario 64 in REAL TIME. Every turn you get the current screen as an image. " +
+            "Decide Mario's next movement and CALL the `move` tool — the move is HELD until your next call, so call it every turn. " +
+            "YOUR TASK: " + rtTask + ". Keep Mario progressing; if you look stuck, try jumping, turning, or a long jump. " +
+            "Speak short, occasional commentary. The user can interrupt by voice or text to change the task or guide you — always obey them.";
+    }
+    function rtSession() {
+        const s = { type: 'realtime', instructions: rtPrompt(), output_modalities: speakBack ? ['audio'] : ['text'], tools: TOOLS.concat([MOVE_TOOL]), tool_choice: 'auto' };
+        const audio = {}; if (speakBack) audio.output = { voice: 'alloy' }; if (Object.keys(audio).length) s.audio = audio;
+        send({ type: 'session.update', session: s });
+    }
+    async function startRtPlay() {
+        if (rtPlaying) return;
+        if (!connected) await connect();
+        rtPlaying = true; rtBusy = false; mode = 'ptt';
+        rtSession(); openPanel();
+        const ms = $('voice-mode'); if (ms) ms.value = 'ptt';
+        log('sys', '🎮 RT Play — task: ' + rtTask); setStatus('RT Play'); updateButtons();
+        setTimeout(rtTick, 600);
+    }
+    function stopRtPlay() {
+        rtPlaying = false; if (rtTimer) { clearTimeout(rtTimer); rtTimer = null; }
+        const b = B(); b.rt && b.rt.release && b.rt.release();
+        setStatus(connected ? 'connected' : 'idle'); updateButtons();
+    }
+    async function rtTick() {
+        if (!rtPlaying || !connected) return;
+        if (rtBusy || talking) { rtTimer = setTimeout(rtTick, 300); return; }   // don't step on a guidance turn
+        if (!rtAuto) return;                 // on-request mode: only act on your guidance
+        await rtTurn(null);
+    }
+    // Live guidance interrupts the play loop with your message + the current frame.
+    function rtGuide(text) {
+        if (!rtPlaying) return false;
+        if (text) log('you', text);
+        try { send({ type: 'response.cancel' }); } catch {}
+        rtBusy = false; rtTurn(text || null); return true;
+    }
+    async function rtTurn(extra) {
+        if (!rtPlaying || !connected || rtBusy) return;
+        const b = B();
+        let frame = null; try { frame = (b.rt && b.rt.frame) ? await b.rt.frame() : null; } catch {}
+        const content = [{ type: 'input_text', text: (extra ? ('User says: ' + extra + '\n') : '') + 'Here is the screen now. Call move() for the next action. Task: ' + rtTask }];
+        if (frame) content.push({ type: 'input_image', image_url: frame });
+        send({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content } });
+        send({ type: 'response.create' });
+        rtBusy = true; setStatus('RT Play — thinking');
+    }
+    function rtSetTask(t) { if (t && t.trim()) { rtTask = t.trim(); if (rtPlaying) { rtSession(); log('sys', 'task → ' + rtTask); } } }
+    function rtSetAuto(on) { rtAuto = !!on; if (rtPlaying && rtAuto && !rtBusy) rtTick(); }
     async function wakeTurn() {
         if (!connected) await connect();
         const prev = mode; mode = 'vad'; sendSession();
@@ -289,9 +362,20 @@
         const doSend = () => { if (txt && txt.value.trim()) { sendText(txt.value.trim()); txt.value = ''; } };
         if (sendBtn) sendBtn.addEventListener('click', doSend);
         if (txt) txt.addEventListener('keydown', e => { if (e.key === 'Enter') doSend(); });
+        // RT Play controls
+        const taskEl = $('voice-rt-task'); if (taskEl) { taskEl.value = rtTask; taskEl.addEventListener('change', e => rtSetTask(e.target.value)); }
+        const autoEl = $('voice-rt-auto'); if (autoEl) { autoEl.checked = rtAuto; autoEl.addEventListener('change', e => rtSetAuto(e.target.checked)); }
+        // Global hotkeys (active in RT Play / when connected): hold ` to talk, press T to type.
+        document.addEventListener('keydown', e => {
+            const tag = e.target && e.target.tagName; if (tag && /INPUT|TEXTAREA|SELECT/.test(tag)) return;
+            if (!rtPlaying && !connected) return;
+            if (e.code === 'Backquote') { e.preventDefault(); if (!talking) beginTalk(); }
+            else if (e.code === 'KeyT') { e.preventDefault(); openPanel(); const tb = $('voice-text'); if (tb) setTimeout(() => tb.focus(), 30); }
+        });
+        document.addEventListener('keyup', e => { if (e.code === 'Backquote' && talking) { e.preventDefault(); endTalk(); } });
         updateButtons();
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wire); else wire();
-    window.sm64VoiceAgent = { connect, disconnect, open: openPanel };
+    window.sm64VoiceAgent = { connect, disconnect, open: openPanel, startRtPlay, stopRtPlay, guide: rtGuide };
 })();

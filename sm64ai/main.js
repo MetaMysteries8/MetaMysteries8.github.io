@@ -2777,10 +2777,10 @@ let _lastGradeTime = 0;
 //                  (clean demonstration signal).
 let _playMode = (() => { try { return localStorage.getItem('sm64_play_mode') || 'ai'; } catch { return 'ai'; } })();
 function _playModeLabel(m) {
-    return { ai: '🤖 AI Play', rl: '🧒 RL Play', 'player-teach': '🧓 Player Teach', 'ai-teach': '👨‍🏫 AI Teach' }[m] || '🤖 AI Play';
+    return { ai: '🤖 AI Play', rl: '🧒 RL Play', 'player-teach': '🧓 Player Teach', 'ai-teach': '👨‍🏫 AI Teach', rtplay: '🎙️ RT Play' }[m] || '🤖 AI Play';
 }
 function setPlayMode(m) {
-    if (!['ai', 'rl', 'player-teach', 'ai-teach'].includes(m)) m = 'ai';
+    if (!['ai', 'rl', 'player-teach', 'ai-teach', 'rtplay'].includes(m)) m = 'ai';
     _playMode = m;
     try { localStorage.setItem('sm64_play_mode', m); } catch {}
     const sel = document.getElementById('play-mode'); if (sel) sel.value = m;
@@ -4368,7 +4368,7 @@ async function toggleAIPlayer() {
         // Source of truth for the mode is the dropdown's CURRENT value at press time
         // (don't rely only on the change event having fired).
         const _modeSel = document.getElementById('play-mode');
-        if (_modeSel && ['ai', 'rl', 'player-teach', 'ai-teach'].includes(_modeSel.value)) {
+        if (_modeSel && ['ai', 'rl', 'player-teach', 'ai-teach', 'rtplay'].includes(_modeSel.value)) {
             _playMode = _modeSel.value;
             try { localStorage.setItem('sm64_play_mode', _playMode); } catch {}
         }
@@ -4423,7 +4423,7 @@ async function toggleAIPlayer() {
 
         // Auto-study the guide before playing (once), in the background. RL Play uses
         // no LLM, so it skips this.
-        if (_playMode !== 'rl' && aiNotes.length === 0 && getActiveKey()) {
+        if (_playMode !== 'rl' && _playMode !== 'rtplay' && aiNotes.length === 0 && getActiveKey()) {
             updateAIStatus('📚 Studying the guide before playing…');
             runStudy({ silent: true }).catch(() => {});
         }
@@ -4445,6 +4445,14 @@ function _startSelectedMode() {
         tts.speak('R L player active. The child is playing on its own.');
         _showRatingWidget(true);                 // rate its run any time
         updateDebugHUD(); scheduleRLLoop(); rlThinkAndAct();
+        return;
+    }
+    if (_playMode === 'rtplay') {
+        updateAIStatus('🎙️ RT Play — gpt-realtime-2 is playing. Hold ` (or the talk button) to guide it; press T to type.');
+        tts.speak('Real time play. The realtime model is playing. Hold the talk button to guide it.');
+        if (window.sm64VoiceAgent && window.sm64VoiceAgent.startRtPlay) window.sm64VoiceAgent.startRtPlay();
+        else updateAIStatus('⚠ Voice agent not loaded — reload the page.');
+        updateDebugHUD();
         return;
     }
     if (_playMode === 'player-teach') {
@@ -4525,6 +4533,7 @@ function stopAIPlayer() {
     stopLiveLoop();
     stopElderWatch();
     stopRealtimeRL();
+    if (window.sm64VoiceAgent && window.sm64VoiceAgent.stopRtPlay) window.sm64VoiceAgent.stopRtPlay();
     _showoffRunning = false; _showoffBuffer = [];
     _showElderBanner(false); _showRatingWidget(false);
     if (_captureVideo) { _captureVideo.srcObject = null; }
@@ -5270,4 +5279,20 @@ window.sm64Voice = {
         replay: _replay.length,
         vision: _visionStatus,
     }),
+    // RT Play: let the realtime model SEE the game and DRIVE Mario.
+    rt: {
+        frame: async () => { try { const ss = await captureScreen(aiStream); return ss ? await _downscaleJpeg(ss, 384) : null; } catch { return null; } },
+        act: (cat) => { try { _rlSetHeld(_catToHeld(cat || 'wait')); } catch {} },
+        release: () => { try { _rlReleaseAll(); } catch {} },
+    },
 };
+// Shrink a capture data URL for cheap realtime image input.
+async function _downscaleJpeg(url, maxW) {
+    try {
+        const img = await _loadImage(url);
+        const s = Math.min(1, maxW / (img.width || maxW));
+        const c = document.createElement('canvas'); c.width = Math.round((img.width || maxW) * s); c.height = Math.round((img.height || maxW) * s);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        return c.toDataURL('image/jpeg', 0.6);
+    } catch { return url; }
+}
