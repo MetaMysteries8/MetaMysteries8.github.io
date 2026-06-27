@@ -15,7 +15,12 @@
     const SR = 24000;
     const B = () => window.sm64Voice || {};   // reuse the app bridge (key + rt frame/act/release)
 
-    let ws = null, connected = false, playing = false, busy = false, auto = true;
+    let ws = null, connected = false, playing = false, busy = false;
+    // auto = the AI acts on its own in a loop. OFF by default — it BURNS CREDITS
+    // (every tick sends a frame + gets a spoken reply). By default it only ever
+    // responds when YOU talk or type to it.
+    let auto = false;
+    try { auto = localStorage.getItem('sm64_rt_auto') === '1'; } catch {}
     let role = 'coach';   // 'coach' = AI coaches human (human plays) | 'player' = AI plays, human coaches
     try { role = localStorage.getItem('sm64_rt_role') === 'player' ? 'player' : 'coach'; } catch {}
     let task = 'Beat the game — make progress, collect stars, explore, and avoid dying.';
@@ -39,7 +44,7 @@
             '<div class="rtp-head"><b>🎮 RT Realtime</b> <span id="rtp-status">idle</span><button id="rtp-min" title="hide">▭</button></div>' +
             '<label class="rtp-row"><span>Direction</span><select id="rtp-role"><option value="coach">🎓 AI coaches me — I play</option><option value="player">🎮 AI plays — I coach it</option></select></label>' +
             '<label class="rtp-row"><span>Goal</span><input id="rtp-task" type="text"></label>' +
-            '<label class="rtp-row" style="flex-direction:row;gap:6px;align-items:center"><input id="rtp-auto" type="checkbox" checked> <span id="rtp-auto-lbl">Auto-coach</span></label>' +
+            '<label class="rtp-row" style="flex-direction:row;gap:6px;align-items:center"><input id="rtp-auto" type="checkbox"> <span id="rtp-auto-lbl">Auto-run</span></label>' +
             '<div class="rtp-keys"><button id="rtp-ptt" title="Hold to talk — interrupts it">🎤 Hold to talk</button>' +
             '<button id="rtp-bind-ptt" title="rebind talk key">Talk: `</button><button id="rtp-bind-text" title="rebind type key">Type: T</button></div>' +
             '<div class="rtp-row" style="flex-direction:row;gap:6px"><input id="rtp-text" type="text" placeholder="…or type" style="flex:1"><button id="rtp-send">Send</button></div>' +
@@ -73,7 +78,7 @@
         while (el.log.childNodes.length > 40) el.log.removeChild(el.log.firstChild);
     }
     function updateRoleUI() {
-        if (el.autoLbl) el.autoLbl.textContent = isPlayer() ? 'Auto-play (off = only when you tell it)' : 'Auto-coach (off = only when you ask)';
+        if (el.autoLbl) el.autoLbl.textContent = (isPlayer() ? 'Auto-play' : 'Auto-coach') + ' — AI keeps going on its own ⚠ uses credits';
         if (el.textInput) el.textInput.placeholder = isPlayer() ? '…or type a tip / command' : '…or ask a question / change the goal';
         const sb = el.root && el.root.querySelector('#rtp-send'); if (sb) sb.textContent = isPlayer() ? 'Coach' : 'Ask';
     }
@@ -187,7 +192,12 @@
         turn(text || null);
     }
     function setTask(t) { if (t && t.trim()) { task = t.trim(); if (playing) { session(); log('sys', 'goal → ' + task); } } }
-    function setAuto(on) { auto = !!on; if (playing && auto && !busy) look(); }
+    function setAuto(on) {
+        auto = !!on; try { localStorage.setItem('sm64_rt_auto', auto ? '1' : '0'); } catch {}
+        if (auto) log('sys', '⚠ Auto-run ON — the AI will keep sending frames & talking on its own. This uses credits continuously.');
+        else { if (timer) { clearTimeout(timer); timer = null; } log('sys', 'Auto-run off — it only responds when you talk or type.'); }
+        if (playing && auto && !busy) look();
+    }
     function setRole(r) {
         r = (r === 'player') ? 'player' : 'coach';
         if (r === role) return;
@@ -293,8 +303,11 @@
         buildUI(); show(true);
         await connect();
         playing = true; busy = false;
-        session(); log('sys', (isPlayer() ? '🎮 AI plays — you coach. ' : '🎓 AI coaches you. ') + 'goal: ' + task); setStatus('RT Realtime');
-        setTimeout(look, 900);
+        session();
+        log('sys', (isPlayer() ? '🎮 AI plays — you coach. ' : '🎓 AI coaches you. ') + 'goal: ' + task);
+        log('sys', auto ? '⚠ Auto-run is ON (uses credits).' : 'Ready — it responds only when you talk (' + keyLabel(pttKey) + ') or type. Auto-run is off.');
+        setStatus('RT Realtime — waiting for you');
+        if (auto) setTimeout(look, 900);
     }
     function stop() {
         playing = false; if (timer) { clearTimeout(timer); timer = null; }
