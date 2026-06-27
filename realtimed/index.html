@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VoiceEnable Agent</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="hero panel">
+      <div class="hero-copy">
+        <p class="eyebrow">BYOP voice agent</p>
+        <h1>Talk naturally. Generate anything.</h1>
+        <p class="subcopy">Realtime conversations with <code>gpt-realtime-2</code>, or push-to-talk with your own text, speech, embedding, and media model choices.</p>
+      </div>
+      <div class="auth-card">
+        <span id="authState" class="pill danger">Not connected</span>
+        <button id="connectByop" class="button primary">Connect Pollen</button>
+        <button id="clearKey" class="button ghost">Forget key</button>
+        <small>The publishable app key is static client code. Users approve BYOP and receive their own scoped key.</small>
+      </div>
+    </section>
+
+    <section class="stage panel">
+      <div id="mediaDock" class="media-dock hidden">
+        <div class="generating-card">
+          <div class="shader"></div>
+          <p id="generationStatus">Preparing generation...</p>
+        </div>
+      </div>
+
+      <div id="orb" class="orb idle" aria-label="Voice visualizer">
+        <div class="orb-core"></div>
+        <div class="orb-ring"></div>
+      </div>
+
+      <div class="controls">
+        <div class="mode-toggle" role="group" aria-label="Conversation mode">
+          <button id="modeRealtime" class="mode active">Realtime</button>
+          <button id="modePush" class="mode">Push2Talk</button>
+        </div>
+        <button id="mainAction" class="button talk">Start realtime</button>
+        <button id="stopAction" class="button ghost">Stop</button>
+      </div>
+      <audio id="modelAudio" autoplay playsinline></audio>
+    </section>
+
+    <section class="grid">
+      <aside class="panel settings">
+        <h2>Model Routing</h2>
+        <p id="modelStatus" class="model-status">Loading live model lists...</p>
+        <label>Realtime model
+          <input id="realtimeModel" value="gpt-realtime-2" disabled>
+        </label>
+        <label>Push2Talk text model
+          <input id="textModel" value="openai" list="textModels">
+        </label>
+        <label>Coder model callable by agent
+          <input id="coderModel" value="qwen-coder" list="textModels">
+        </label>
+        <label>Speech-to-text model
+          <input id="sttModel" value="whisper" list="audioModels">
+        </label>
+        <label>Optional TTS voice
+          <input id="ttsVoice" value="nova">
+        </label>
+        <label>Embedding model
+          <input id="embeddingModel" value="openai-3-small" list="embeddingModels">
+        </label>
+        <label>Image model
+          <input id="imageModel" value="flux" list="imageModels">
+        </label>
+        <label>Video model
+          <input id="videoModel" value="veo" list="imageModels">
+        </label>
+        <label>Music/audio model
+          <input id="audioModel" value="elevenmusic" list="audioModels">
+        </label>
+        <datalist id="textModels"></datalist>
+        <datalist id="imageModels"></datalist>
+        <datalist id="audioModels"></datalist>
+        <datalist id="embeddingModels"></datalist>
+      </aside>
+
+      <section class="panel transcript-panel">
+        <div class="panel-head">
+          <h2>Conversation</h2>
+          <button id="clearConversation" class="button ghost small">Clear</button>
+        </div>
+        <div id="transcript" class="transcript"></div>
+        <form id="textForm" class="composer">
+          <input id="textInput" placeholder="Type a fallback message or request an image/video/music...">
+          <button class="button primary" type="submit">Send</button>
+        </form>
+      </section>
+    </section>
+
+    <section class="grid bottom-grid">
+      <section class="panel gallery-panel">
+        <div class="panel-head">
+          <h2>Local Gallery</h2>
+          <button id="clearGallery" class="button ghost small">Clear</button>
+        </div>
+        <div id="gallery" class="gallery"></div>
+      </section>
+
+      <section class="panel mcp-panel">
+        <h2>MCP Servers</h2>
+        <p>Browser builds can call HTTP MCP-compatible gateways. Stdio MCP servers need a local bridge.</p>
+        <form id="mcpForm" class="mcp-form">
+          <input id="mcpName" placeholder="Server name">
+          <input id="mcpUrl" placeholder="https://localhost:3000/mcp">
+          <button class="button primary" type="submit">Add</button>
+        </form>
+        <div id="mcpList" class="mcp-list"></div>
+      </section>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
