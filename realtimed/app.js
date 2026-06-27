@@ -10,6 +10,7 @@ const state = {
   realtimeHealthTimer: null,
   mediaRecorder: null,
   chunks: [],
+  stoppingRealtime: false,
   messages: JSON.parse(localStorage.getItem("conversation") || "[]"),
   mcps: JSON.parse(localStorage.getItem("mcp_servers") || "[]"),
 };
@@ -228,6 +229,7 @@ function requireKey() {
 }
 
 async function startRealtime() {
+  state.stoppingRealtime = false;
   setRealtimeStatus("Requesting microphone...", "live");
   const audioContext = new AudioContext({ sampleRate: 24000 });
   const output = audioContext.createMediaStreamDestination();
@@ -254,10 +256,9 @@ async function startRealtime() {
         type: "realtime",
         instructions: systemPrompt(),
         modalities: ["text", "audio"],
-        voice: value("realtimeVoice") || "marin",
+        voice: value("realtimeVoice") || "alloy",
         input_audio_format: "pcm16",
         output_audio_format: "pcm16",
-        input_audio_transcription: { model: value("sttModel") || "whisper" },
         turn_detection: {
           type: "server_vad",
           threshold: 0.5,
@@ -265,7 +266,7 @@ async function startRealtime() {
           silence_duration_ms: 650,
           create_response: true,
         },
-        tools: toolDefinitions(),
+        tools: realtimeToolDefinitions(),
       },
     }));
     source.connect(processor);
@@ -285,7 +286,7 @@ async function startRealtime() {
   };
 
   socket.addEventListener("message", (event) => handleRealtimeEvent(JSON.parse(event.data)));
-  socket.addEventListener("close", stopRealtime);
+  socket.addEventListener("close", (event) => handleRealtimeClose(event));
   socket.addEventListener("error", () => {
     setRealtimeStatus("Realtime socket error. Push2Talk is available as a fallback.", "warning");
     addMessage("system", "Realtime socket error. Try Push2Talk if the browser/network blocks WebSockets.");
@@ -336,7 +337,30 @@ function playPcmDelta(base64) {
 function stopRealtime() {
   const rt = state.realtime;
   if (!rt) return;
-  rt.socket?.readyState === WebSocket.OPEN && rt.socket.close();
+  state.stoppingRealtime = true;
+  if (rt.socket?.readyState === WebSocket.OPEN || rt.socket?.readyState === WebSocket.CONNECTING) {
+    rt.socket.close();
+    return;
+  }
+  cleanupRealtime();
+  setRealtimeStatus("Realtime idle", "idle");
+}
+
+function handleRealtimeClose(event) {
+  const wasManual = state.stoppingRealtime;
+  cleanupRealtime();
+  if (wasManual || event.code === 1000) {
+    setRealtimeStatus("Realtime idle", "idle");
+    return;
+  }
+  const reason = event.reason ? `: ${event.reason}` : "";
+  setRealtimeStatus(`Realtime closed (${event.code || "unknown"})${reason}. Try reconnecting or use Push2Talk.`, "warning");
+  addMessage("system", `Realtime closed (${event.code || "unknown"})${reason}.`);
+}
+
+function cleanupRealtime() {
+  const rt = state.realtime;
+  if (!rt) return;
   clearTimeout(state.realtimeHealthTimer);
   state.realtimeHealthTimer = null;
   rt.processor?.disconnect();
@@ -344,8 +368,8 @@ function stopRealtime() {
   rt.stream?.getTracks().forEach((track) => track.stop());
   rt.audioContext?.close();
   state.realtime = null;
+  state.stoppingRealtime = false;
   el.mainAction.textContent = "Start realtime";
-  setRealtimeStatus("Realtime idle", "idle");
   setOrb("idle");
 }
 
@@ -523,6 +547,10 @@ function toolDefinitions() {
     { name: "ask_coder_model", description: "Delegate coding tasks to the configured coder text model.", parameters: objectParams({ task: "Coding task or question" }, ["task"]) },
     { name: "call_mcp_server", description: "Call a configured HTTP MCP gateway tool.", parameters: objectParams({ server: "Configured server name", tool: "MCP tool name", arguments: "Tool arguments object" }, ["server", "tool"]) },
   ];
+}
+
+function realtimeToolDefinitions() {
+  return toolDefinitions().map((tool) => ({ type: "function", ...tool }));
 }
 
 function objectParams(properties, required) {
