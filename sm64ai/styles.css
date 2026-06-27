@@ -1313,3 +1313,15 @@ body {
 .bm-ago { color: #5a647c; font-size: 10px; float: right; }
 /* keep the debug HUD out of broadcasts */
 #app.streamer-mode #debug-hud { display: none !important; }
+
+/* ── RT cost warning modal (GPT Realtime 2 pricing) ── */
+.rt-cost-backdrop { position: fixed; inset: 0; z-index: 9999; display: none; align-items: center; justify-content: center; background: rgba(2, 4, 10, 0.78); backdrop-filter: blur(4px); padding: 20px; }
+.rt-cost-backdrop.open { display: flex; }
+.rt-cost-box { max-width: 560px; width: 100%; background: #11151f; border: 1px solid #2a3550; border-radius: 14px; padding: 22px 24px; box-shadow: 0 24px 70px rgba(0,0,0,0.6); animation: rtCostPop .18s ease-out; }
+@keyframes rtCostPop { from { transform: scale(.94); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.rt-cost-box h2 { margin: 0 0 10px; font-size: 20px; color: #ffd166; }
+.rt-cost-box p { margin: 8px 0; color: #c9d2e4; font-size: 14px; line-height: 1.5; }
+.rt-cost-box .rt-cost-tip { color: #9aa6bf; font-size: 13px; }
+.rt-cost-img { display: block; width: 100%; border-radius: 10px; margin: 12px 0; border: 1px solid #2a3550; }
+.rt-cost-ok { margin-top: 8px; width: 100%; padding: 11px; border: 0; border-radius: 10px; background: linear-gradient(135deg, #e0a317, #d4790f); color: #1a1206; font-weight: 700; font-size: 14px; cursor: pointer; }
+.rt-cost-ok:hover { filter: brightness(1.08); }

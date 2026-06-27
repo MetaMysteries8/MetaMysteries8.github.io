@@ -2789,6 +2789,28 @@ function setPlayMode(m) {
 }
 window.sm64Mode = (m) => { if (m) setPlayMode(m); return _playMode; };
 
+// ── RT cost warning — pops the GPT Realtime 2 pricing when you switch to RT mode ──
+function _showRtCostWarning() {
+    let m = document.getElementById('rt-cost-modal');
+    if (!m) {
+        m = document.createElement('div'); m.id = 'rt-cost-modal'; m.className = 'rt-cost-backdrop';
+        m.innerHTML =
+            '<div class="rt-cost-box">' +
+            '<h2>💸 Heads up — this shit is expensive</h2>' +
+            '<p>RT Realtime runs on <b>GPT Realtime 2</b> (Pollinations). Each turn sends a screenshot and gets a spoken reply, and the rates stack up <b>fast</b>:</p>' +
+            '<img src="./image.png" alt="GPT Realtime 2 pricing" class="rt-cost-img">' +
+            '<p class="rt-cost-tip">That\'s why RT modes stay silent until you talk to them, and <b>Auto-run is off by default</b>. Leave it off unless you really mean it.</p>' +
+            '<button id="rt-cost-ok" class="rt-cost-ok">Got it — I\'ll be careful</button>' +
+            '</div>';
+        document.body.appendChild(m);
+        const close = () => m.classList.remove('open');
+        m.addEventListener('click', e => { if (e.target === m) close(); });
+        m.querySelector('#rt-cost-ok').addEventListener('click', close);
+        document.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+    }
+    m.classList.add('open');
+}
+
 // ── RL SOLO CONTROL — the child plays with no LLM, off its learned Q-table ──
 // State generalizes across regions (it borrows stats from same stuck|vis context),
 // so a child taught in one spot can act in another. Epsilon-greedy exploration.
@@ -4557,7 +4579,7 @@ function stopAIPlayer() {
 }
 
 aiBtn.addEventListener('click', toggleAIPlayer);
-document.getElementById('play-mode')?.addEventListener('change', (e) => { if (aiPlayerActive) stopAIPlayer(); setPlayMode(e.target.value); });
+document.getElementById('play-mode')?.addEventListener('change', (e) => { if (aiPlayerActive) stopAIPlayer(); setPlayMode(e.target.value); if (e.target.value === 'rtplay') _showRtCostWarning(); });
 setPlayMode(_playMode);   // sync the selector + button label to the saved mode
 document.getElementById('rf-exit-btn')?.addEventListener('click', exitRapidFire);
 
