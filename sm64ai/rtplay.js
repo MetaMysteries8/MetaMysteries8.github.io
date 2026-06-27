@@ -1,28 +1,27 @@
 // ─────────────────────────────────────────────────────────────────────────
-// rtplay.js — RT PLAY: gpt-realtime-2 SEES the screen and PLAYS Mario itself.
+// rtplay.js — RT PLAY (guided): gpt-realtime-2 WATCHES the screen and COACHES
+// YOU in real time. It does NOT control Mario — the human plays; the AI guides.
 // A SEPARATE system from the voice assistant (voice.js): its own realtime
-// connection, its own control overlay, and ONLY a move tool (no app-control tools).
-// Each turn it gets the current frame as an image and calls move(); it narrates via
-// native TTS. Guide it live by voice (hold the Talk key) or text. Started by the
-// "rtplay" play mode (main.js) via window.sm64RtPlay.start()/stop(). Chrome + mic.
+// connection and its own corner overlay. No move tool (the model was terrible at
+// mapping perception → controls). Each look it gets the current frame and gives
+// SHORT spoken guidance. Ask it anything by voice (hold the Talk key) or text;
+// talking BARGES IN and cuts its audio instantly. Started by the "rtplay" play
+// mode (main.js) via window.sm64RtPlay.start()/stop(). Chrome + mic.
 // ─────────────────────────────────────────────────────────────────────────
 (function () {
     'use strict';
     const RT_URL = 'wss://gen.pollinations.ai/v1/realtime?model=gpt-realtime-2';
     const SR = 24000;
-    const B = () => window.sm64Voice || {};   // reuse the app bridge (key + rt frame/act)
+    const B = () => window.sm64Voice || {};   // reuse the app bridge (key + rt frame)
 
     let ws = null, connected = false, playing = false, busy = false, auto = true;
     let task = 'Beat the game — make progress, collect stars, explore, and avoid dying.';
     let timer = null, curText = '';
     let micStream = null, micCtx = null, micNode = null, micSrc = null, micZero = null, micReady = false, talking = false, sentSamples = 0;
-    let playCtx = null, playHead = 0;
+    let playCtx = null, playHead = 0, liveSources = [], audioMuted = false;
     let speakBack = true;
     let pttKey = 'Backquote', textKey = 'KeyT', capturing = null;
     try { pttKey = localStorage.getItem('sm64_rt_ptt') || 'Backquote'; textKey = localStorage.getItem('sm64_rt_textkey') || 'KeyT'; } catch {}
-
-    const MOVE_ENUM = ['forward', 'backward', 'turn', 'forward-left', 'forward-right', 'jump', 'jump-forward', 'long_jump', 'dive', 'ground_pound', 'crouch', 'wait'];
-    const MOVE_TOOL = { type: 'function', name: 'move', description: 'Control Mario RIGHT NOW. The movement is HELD until your next move() call, so call it every turn.', parameters: { type: 'object', properties: { action: { type: 'string', enum: MOVE_ENUM }, say: { type: 'string', description: 'optional brief commentary' } }, required: ['action'] } };
 
     // ── overlay UI (built once, lives in its own corner panel) ──
     let el = {};
@@ -30,12 +29,12 @@
         if (el.root) return;
         const d = document.createElement('div'); d.id = 'rtp-panel';
         d.innerHTML =
-            '<div class="rtp-head"><b>🎮 RT Play</b> <span id="rtp-status">idle</span><button id="rtp-min" title="hide">▭</button></div>' +
-            '<label class="rtp-row"><span>Task</span><input id="rtp-task" type="text"></label>' +
-            '<label class="rtp-row" style="flex-direction:row;gap:6px;align-items:center"><input id="rtp-auto" type="checkbox" checked> Auto-play (off = only when you ask)</label>' +
-            '<div class="rtp-keys"><button id="rtp-ptt" title="Hold to talk to it">🎤 Hold to talk</button>' +
+            '<div class="rtp-head"><b>🎓 RT Coach</b> <span id="rtp-status">idle</span><button id="rtp-min" title="hide">▭</button></div>' +
+            '<label class="rtp-row"><span>Goal it coaches toward</span><input id="rtp-task" type="text"></label>' +
+            '<label class="rtp-row" style="flex-direction:row;gap:6px;align-items:center"><input id="rtp-auto" type="checkbox" checked> Auto-coach (off = only when you ask)</label>' +
+            '<div class="rtp-keys"><button id="rtp-ptt" title="Hold to talk — interrupts it">🎤 Hold to talk</button>' +
             '<button id="rtp-bind-ptt" title="rebind talk key">Talk: `</button><button id="rtp-bind-text" title="rebind type key">Type: T</button></div>' +
-            '<div class="rtp-row" style="flex-direction:row;gap:6px"><input id="rtp-text" type="text" placeholder="…or type a command" style="flex:1"><button id="rtp-send">Send</button></div>' +
+            '<div class="rtp-row" style="flex-direction:row;gap:6px"><input id="rtp-text" type="text" placeholder="…or ask a question / change the goal" style="flex:1"><button id="rtp-send">Ask</button></div>' +
             '<div id="rtp-log"></div>';
         document.body.appendChild(d); el.root = d;
         el.status = d.querySelector('#rtp-status'); el.log = d.querySelector('#rtp-log');
@@ -59,7 +58,7 @@
     function log(role, msg) {
         if (!el.log) return;
         const d = document.createElement('div'); d.className = 'rtp-' + role;
-        d.textContent = (role === 'you' ? '🗣 ' : role === 'ai' ? '🤖 ' : role === 'move' ? '🎮 ' : '• ') + msg;
+        d.textContent = (role === 'you' ? '🗣 ' : role === 'ai' ? '🤖 ' : role === 'tip' ? '💡 ' : '• ') + msg;
         el.log.appendChild(d); el.log.scrollTop = el.log.scrollHeight;
         while (el.log.childNodes.length > 40) el.log.removeChild(el.log.firstChild);
     }
@@ -78,7 +77,7 @@
         try { ws = new WebSocket(RT_URL + (key ? '&key=' + encodeURIComponent(key) : '')); }
         catch (e) { setStatus('connect failed'); console.warn('[rtplay]', e); return; }
         await new Promise(res => {
-            ws.onopen = () => { connected = true; setStatus('connected'); session(); log('sys', 'RT Play connected'); res(); };
+            ws.onopen = () => { connected = true; setStatus('connected'); session(); log('sys', 'RT Coach connected'); res(); };
             ws.onclose = () => { connected = false; setStatus('disconnected'); };
             ws.onerror = () => setStatus('socket error');
             ws.onmessage = onMessage;
@@ -87,13 +86,16 @@
     }
     function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
     function prompt() {
-        return "You ARE playing Super Mario 64 in REAL TIME. Each turn you get the current screen as an image. " +
-            "Decide Mario's next movement and CALL the move tool — it is HELD until your next call, so call it every turn. " +
-            "YOUR TASK: " + task + ". Keep Mario progressing; if stuck, try jumping, turning, or a long jump. Brief, occasional " +
-            "commentary only. The user may interrupt by voice or text to change the task or guide you — always obey them.";
+        return "You are a friendly, expert Super Mario 64 COACH watching the player's screen in REAL TIME. " +
+            "You do NOT control the game — the HUMAN plays; you only GUIDE them. Each look you get the current frame. " +
+            "Give SHORT, timely spoken guidance: where to go next, when to jump, hazards to avoid, how to reach the next star. " +
+            "One or two sentences MAX, and only when it actually helps — silence is fine if nothing changed. Never read out button " +
+            "names or pretend to press anything. GOAL you're coaching toward: " + task + ". " +
+            "The player may talk or type any time to ask a question or change the goal — answer them directly and briefly.";
     }
     function session() {
-        const s = { type: 'realtime', instructions: prompt(), output_modalities: speakBack ? ['audio'] : ['text'], tools: [MOVE_TOOL], tool_choice: 'auto' };
+        // No tools: the model coaches with speech/text only. It never controls Mario.
+        const s = { type: 'realtime', instructions: prompt(), output_modalities: speakBack ? ['audio'] : ['text'], tool_choice: 'none' };
         if (speakBack) s.audio = { output: { voice: 'alloy' } };
         send({ type: 'session.update', session: s });
     }
@@ -103,61 +105,51 @@
         console.log('[rtplay] ◀', m.type, m.error ? JSON.stringify(m.error) : '');
         if (m.type && /\.error$|^error$/.test(m.type)) { const msg = (m.error && (m.error.message || m.error.code)) || JSON.stringify(m.error || m); log('sys', 'ERROR: ' + msg); setStatus('err'); return; }
         switch (m.type) {
+            case 'response.created': audioMuted = false; break;  // a new answer starts → let its audio through
             case 'response.audio.delta':
-            case 'response.output_audio.delta': if (speakBack) playPCM(m.delta); break;
+            case 'response.output_audio.delta': if (speakBack && !audioMuted) playPCM(m.delta); break;
             case 'response.audio_transcript.delta':
             case 'response.output_audio_transcript.delta':
             case 'response.text.delta':
             case 'response.output_text.delta': curText += (m.delta || ''); break;
-            case 'response.function_call_arguments.done':
-                execMove({ name: m.name, call_id: m.call_id, arguments: m.arguments }); break;
             case 'response.done': {
-                const out = (m.response && m.response.output) || [];
-                for (const it of out) if (it.type === 'function_call') execMove(it);
-                if (curText) { log('ai', curText); if (!speakBack) speakText(curText); }
+                if (curText) { log('tip', curText.trim()); if (!speakBack) speakText(curText); }
                 curText = '';
-                if (playing) { busy = false; if (auto) { clearTimeout(timer); timer = setTimeout(tick, 500); } setStatus('RT Play'); }
+                if (playing) { busy = false; if (auto) { clearTimeout(timer); timer = setTimeout(look, 2600); } setStatus('RT Coach'); }
                 break;
             }
         }
     }
-    const handled = new Set();
-    function execMove(it) {
-        if (!it || it.name !== 'move' || (it.call_id && handled.has(it.call_id))) return;
-        if (it.call_id) handled.add(it.call_id);
-        let a = {}; try { a = JSON.parse(it.arguments || '{}'); } catch {}
-        try { B().rt && B().rt.act && B().rt.act(a.action); } catch {}
-        log('move', a.action + (a.say ? ' — ' + a.say : ''));
-        if (it.call_id) send({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: it.call_id, output: JSON.stringify({ ok: true }) } });
-        // No follow-up response.create — the tick loop drives the next frame.
-    }
 
-    // ── play loop ──
-    async function tick() {
+    // ── coaching loop (auto = periodic glance; otherwise only when you ask) ──
+    async function look() {
         if (!playing || !connected) return;
-        if (busy || talking) { timer = setTimeout(tick, 300); return; }
+        if (busy || talking) { timer = setTimeout(look, 400); return; }
         if (!auto) return;
-        await turn(null);
+        await observe(null);
     }
-    async function turn(extra) {
+    async function observe(extra) {
         if (!playing || !connected || busy) return;
         let frame = null; try { frame = (B().rt && B().rt.frame) ? await B().rt.frame() : null; } catch {}
-        const content = [{ type: 'input_text', text: (extra ? ('User says: ' + extra + '\n') : '') + 'Screen now. Call move() for the next action. Task: ' + task }];
+        const ask = extra
+            ? ('The player says: "' + extra + '". Answer them, using the current screen.')
+            : 'Glance at the screen. If a short tip would help me reach the goal right now, give it — otherwise stay brief or quiet.';
+        const content = [{ type: 'input_text', text: ask }];
         if (frame) content.push({ type: 'input_image', image_url: frame });
         send({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content } });
         send({ type: 'response.create' });
-        busy = true; setStatus('RT Play — thinking');
+        busy = true; setStatus(extra ? 'RT Coach — answering' : 'RT Coach — looking');
     }
     function guide(text) {
         if (!playing) return;
         if (text) log('you', text);
-        try { send({ type: 'response.cancel' }); } catch {}
-        busy = false; turn(text || null);
+        interrupt();
+        observe(text || null);
     }
-    function setTask(t) { if (t && t.trim()) { task = t.trim(); if (playing) { session(); log('sys', 'task → ' + task); } } }
-    function setAuto(on) { auto = !!on; if (playing && auto && !busy) tick(); }
+    function setTask(t) { if (t && t.trim()) { task = t.trim(); if (playing) { session(); log('sys', 'goal → ' + task); } } }
+    function setAuto(on) { auto = !!on; if (playing && auto && !busy) look(); }
 
-    // ── audio playback + mic (own) ──
+    // ── audio playback + clean barge-in interrupt ──
     function playPCM(b64) {
         if (!b64) return;
         if (!playCtx) playCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -168,6 +160,21 @@
         const src = playCtx.createBufferSource(); src.buffer = buf; src.connect(playCtx.destination);
         const now = playCtx.currentTime; if (playHead < now) playHead = now;
         src.start(playHead); playHead += buf.duration;
+        liveSources.push(src);
+        src.onended = () => { const i = liveSources.indexOf(src); if (i >= 0) liveSources.splice(i, 1); };
+    }
+    // Cut whatever it's saying RIGHT NOW and cancel the in-flight response.
+    function stopAudio() {
+        audioMuted = true;
+        for (const s of liveSources) { try { s.stop(); } catch {} }
+        liveSources = [];
+        if (playCtx) playHead = playCtx.currentTime;
+        try { speechSynthesis.cancel(); } catch {}
+    }
+    function interrupt() {
+        stopAudio();
+        try { send({ type: 'response.cancel' }); } catch {}
+        busy = false; curText = '';
     }
     function speakText(t) { try { speechSynthesis.speak(new SpeechSynthesisUtterance(t)); } catch {} }
     function i16ToB64(i16) { const b = new Uint8Array(i16.buffer); let s = ''; for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000)); return btoa(s); }
@@ -198,6 +205,7 @@
     }
     async function beginTalk() {
         if (!playing) return;
+        interrupt();                       // barge-in: cut its current speech the instant you start talking
         if (!(await startMic())) return;
         sentSamples = 0; talking = true; setStatus('listening…');
     }
@@ -205,9 +213,8 @@
         if (!talking) return; talking = false;
         if (sentSamples < 2400) { setStatus('no audio — check mic'); return; }
         log('you', '(' + Math.round(sentSamples / SR * 100) / 100 + 's audio)');
-        try { send({ type: 'response.cancel' }); } catch {}
         send({ type: 'input_audio_buffer.commit' });
-        busy = true; setStatus('RT Play — guiding');
+        busy = true; setStatus('RT Coach — answering');
         (B().rt && B().rt.frame ? B().rt.frame() : Promise.resolve(null)).then(f => {
             if (f) send({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_image', image_url: f }] } });
             send({ type: 'response.create' });
@@ -230,12 +237,12 @@
         buildUI(); show(true);
         await connect();
         playing = true; busy = false;
-        session(); log('sys', '🎮 task: ' + task); setStatus('RT Play');
-        setTimeout(tick, 700);
+        session(); log('sys', '🎓 coaching goal: ' + task); setStatus('RT Coach');
+        setTimeout(look, 900);
     }
     function stop() {
         playing = false; if (timer) { clearTimeout(timer); timer = null; }
-        try { B().rt && B().rt.release && B().rt.release(); } catch {}
+        stopAudio();
         stopMic();
         try { ws && ws.close(); } catch {} connected = false;
         setStatus('stopped'); show(false);

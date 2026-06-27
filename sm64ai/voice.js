@@ -15,7 +15,7 @@
 
     let ws = null, connected = false;
     let micStream = null, micCtx = null, micNode = null, micSrc = null, micZero = null, micReady = false;
-    let playCtx = null, playHead = 0;
+    let playCtx = null, playHead = 0, liveSources = [], audioMuted = false;
     let talking = false, mode = 'ptt', speakBack = true, curText = '', sentSamples = 0;
     const handledCalls = new Set();
     let recog = null, wakePhrase = 'hey mario';
@@ -94,6 +94,7 @@
     function sendText(t) {
         if (!t) return;
         if (!connected) { connect().then(() => setTimeout(() => sendText(t), 400)); return; }
+        interrupt();
         send({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: t }] } });
         send({ type: 'response.create' });
         log('you', t); setStatus('thinking…');
@@ -105,9 +106,9 @@
         if (m.type && /\.error$|^error$/.test(m.type)) { const msg = (m.error && (m.error.message || m.error.code)) || JSON.stringify(m.error || m); log('sys', 'ERROR: ' + msg); setStatus('err: ' + msg); return; }
         switch (m.type) {
             case 'session.created': log('sys', 'session ready'); break;
-            case 'response.created': setStatus('responding…'); break;
+            case 'response.created': audioMuted = false; setStatus('responding…'); break;
             case 'response.audio.delta':
-            case 'response.output_audio.delta': if (speakBack) playPCM(m.delta); break;
+            case 'response.output_audio.delta': if (speakBack && !audioMuted) playPCM(m.delta); break;
             case 'response.audio_transcript.delta':
             case 'response.output_audio_transcript.delta':
             case 'response.text.delta':
@@ -122,7 +123,7 @@
                 if (mode !== 'vad' && !talking) setStatus('ready');
                 break;
             }
-            case 'input_audio_buffer.speech_started': setStatus('listening…'); break;
+            case 'input_audio_buffer.speech_started': stopAudio(); setStatus('listening…'); break;
             case 'input_audio_buffer.speech_stopped': setStatus('thinking…'); break;
         }
     }
@@ -146,7 +147,18 @@
         const src = playCtx.createBufferSource(); src.buffer = buf; src.connect(playCtx.destination);
         const now = playCtx.currentTime; if (playHead < now) playHead = now;
         src.start(playHead); playHead += buf.duration;
+        liveSources.push(src);
+        src.onended = () => { const i = liveSources.indexOf(src); if (i >= 0) liveSources.splice(i, 1); };
     }
+    // Cut whatever it's saying RIGHT NOW and cancel the in-flight response (barge-in).
+    function stopAudio() {
+        audioMuted = true;
+        for (const s of liveSources) { try { s.stop(); } catch {} }
+        liveSources = [];
+        if (playCtx) playHead = playCtx.currentTime;
+        try { speechSynthesis.cancel(); } catch {}
+    }
+    function interrupt() { stopAudio(); try { send({ type: 'response.cancel' }); } catch {} curText = ''; }
     function speakText(t) { try { const u = new SpeechSynthesisUtterance(t); speechSynthesis.speak(u); } catch {} }
 
     async function startMic() {
@@ -179,6 +191,7 @@
 
     async function beginTalk() {
         if (!connected) await connect();
+        interrupt();                       // barge-in: cut its current speech the moment you talk
         if (!(await startMic())) return;
         sentSamples = 0; talking = true; setStatus('listening…');
     }
