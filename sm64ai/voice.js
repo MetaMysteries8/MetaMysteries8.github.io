@@ -25,6 +25,26 @@
     let curText = '';
     const handledCalls = new Set();
     let recog = null, wakePhrase = 'hey mario';
+    // Rebindable hotkeys (for keyboards without a ` key).
+    let pttKey = 'Backquote', textKey = 'KeyT', capturing = null;
+    try { pttKey = localStorage.getItem('sm64_voice_ptt') || 'Backquote'; textKey = localStorage.getItem('sm64_voice_textkey') || 'KeyT'; } catch {}
+    function keyLabel(code) {
+        if (!code) return '—';
+        if (code === 'Backquote') return '`';
+        if (code === 'Space') return 'Space';
+        const m = /^Key([A-Z])$/.exec(code) || /^Digit(\d)$/.exec(code); if (m) return m[1];
+        return code.replace('Arrow', '');
+    }
+    function setBinding(which, code) {
+        if (which === 'ptt') { if (code === textKey) return; pttKey = code; try { localStorage.setItem('sm64_voice_ptt', code); } catch {} }
+        else { if (code === pttKey) return; textKey = code; try { localStorage.setItem('sm64_voice_textkey', code); } catch {} }
+        updateRebindLabels();
+    }
+    function updateRebindLabels() {
+        const p = $('voice-rebind-ptt'), t = $('voice-rebind-text');
+        if (p) p.textContent = '🎤 Talk: ' + keyLabel(pttKey);
+        if (t) t.textContent = '⌨ Type: ' + keyLabel(textKey);
+    }
     // RT Play — the realtime model SEES the screen and DRIVES Mario.
     let rtPlaying = false, rtTimer = null, rtBusy = false, rtAuto = true;
     let rtTask = 'Beat the game — make progress, collect stars, explore, and avoid dying.';
@@ -365,14 +385,20 @@
         // RT Play controls
         const taskEl = $('voice-rt-task'); if (taskEl) { taskEl.value = rtTask; taskEl.addEventListener('change', e => rtSetTask(e.target.value)); }
         const autoEl = $('voice-rt-auto'); if (autoEl) { autoEl.checked = rtAuto; autoEl.addEventListener('change', e => rtSetAuto(e.target.checked)); }
-        // Global hotkeys (active in RT Play / when connected): hold ` to talk, press T to type.
+        // Rebind buttons: click, then press the key you want.
+        const rb1 = $('voice-rebind-ptt'), rb2 = $('voice-rebind-text');
+        if (rb1) rb1.addEventListener('click', () => { capturing = 'ptt'; rb1.textContent = 'press a key…'; });
+        if (rb2) rb2.addEventListener('click', () => { capturing = 'text'; rb2.textContent = 'press a key…'; });
+        updateRebindLabels();
+        // Global hotkeys (active in RT Play / when connected): hold the Talk key, press the Type key.
         document.addEventListener('keydown', e => {
+            if (capturing) { e.preventDefault(); if (e.code !== 'Escape') setBinding(capturing, e.code); capturing = null; updateRebindLabels(); return; }
             const tag = e.target && e.target.tagName; if (tag && /INPUT|TEXTAREA|SELECT/.test(tag)) return;
             if (!rtPlaying && !connected) return;
-            if (e.code === 'Backquote') { e.preventDefault(); if (!talking) beginTalk(); }
-            else if (e.code === 'KeyT') { e.preventDefault(); openPanel(); const tb = $('voice-text'); if (tb) setTimeout(() => tb.focus(), 30); }
+            if (e.code === pttKey) { e.preventDefault(); if (!talking) beginTalk(); }
+            else if (e.code === textKey) { e.preventDefault(); openPanel(); const tb = $('voice-text'); if (tb) setTimeout(() => tb.focus(), 30); }
         });
-        document.addEventListener('keyup', e => { if (e.code === 'Backquote' && talking) { e.preventDefault(); endTalk(); } });
+        document.addEventListener('keyup', e => { if (e.code === pttKey && talking) { e.preventDefault(); endTalk(); } });
         updateButtons();
     }
 

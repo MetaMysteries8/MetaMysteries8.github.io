@@ -282,8 +282,12 @@
                     <div style="font-size:12px;color:#8a96b0;margin-bottom:6px">🎮 RT Play — the realtime AI plays Mario (pick <b>RT Play</b> in the mode dropdown + Start)</div>
                     <label class="energy-field"><span>Task (what it should do)</span><input type="text" id="voice-rt-task" value="Beat the game"></label>
                     <label class="energy-field" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="voice-rt-auto" checked style="width:auto"> <span>Auto-play (off = only act when you ask)</span></label>
+                    <div style="display:flex;gap:8px;margin-top:6px">
+                        <button id="voice-rebind-ptt" class="hud-btn" style="flex:1;font-size:12px" title="Click then press a key to rebind push-to-talk">🎤 Talk: `</button>
+                        <button id="voice-rebind-text" class="hud-btn" style="flex:1;font-size:12px" title="Click then press a key to rebind the type/prompt key">⌨ Type: T</button>
+                    </div>
                 </div>
-                <button id="voice-ptt-btn" class="hud-btn" style="width:100%;padding:14px;font-size:15px;touch-action:none;user-select:none">🎤 Hold to talk (or hold the <b>`</b> key)</button>
+                <button id="voice-ptt-btn" class="hud-btn" style="width:100%;padding:14px;font-size:15px;touch-action:none;user-select:none">🎤 Hold to talk (or hold your Talk key)</button>
                 <div class="energy-btn-row" style="margin-top:8px">
                     <input type="text" id="voice-text" placeholder="…or type to test (e.g. 'what's the status?')" style="flex:1;background:#0e1220;border:1px solid var(--panel-border);color:var(--text,#e6e9ef);border-radius:8px;padding:8px 10px;font-size:13px">
                     <button id="voice-send" class="hud-btn">Send</button>
