@@ -7,6 +7,7 @@ const state = {
   apiKey: localStorage.getItem("pollinations_api_key") || "",
   mode: "realtime",
   realtime: null,
+  realtimeHealthTimer: null,
   mediaRecorder: null,
   chunks: [],
   messages: JSON.parse(localStorage.getItem("conversation") || "[]"),
@@ -15,6 +16,7 @@ const state = {
 
 const el = {
   authState: document.querySelector("#authState"),
+  keyHealth: document.querySelector("#keyHealth"),
   connectByop: document.querySelector("#connectByop"),
   clearKey: document.querySelector("#clearKey"),
   modeRealtime: document.querySelector("#modeRealtime"),
@@ -24,6 +26,7 @@ const el = {
   orb: document.querySelector("#orb"),
   mediaDock: document.querySelector("#mediaDock"),
   generationStatus: document.querySelector("#generationStatus"),
+  realtimeStatus: document.querySelector("#realtimeStatus"),
   modelAudio: document.querySelector("#modelAudio"),
   transcript: document.querySelector("#transcript"),
   textForm: document.querySelector("#textForm"),
@@ -40,6 +43,7 @@ const el = {
 
 const fields = [
   "textModel",
+  "realtimeVoice",
   "coderModel",
   "sttModel",
   "ttsVoice",
@@ -58,6 +62,7 @@ function init() {
   renderMcpServers();
   renderGallery();
   loadLiveModels();
+  checkKeyHealth();
 }
 
 function bindEvents() {
@@ -83,6 +88,7 @@ function captureByopReturn() {
     localStorage.setItem("pollinations_api_key", apiKey);
     history.replaceState(null, "", location.pathname + location.search);
     addMessage("system", "Connected with your BYOP key. You can revoke it from the Pollinations dashboard.");
+    checkKeyHealth();
   } else if (error) {
     addMessage("system", `BYOP authorization failed: ${error}`);
   }
@@ -148,6 +154,44 @@ function clearApiKey() {
 function renderAuth() {
   el.authState.textContent = state.apiKey ? "Connected" : "Not connected";
   el.authState.classList.toggle("danger", !state.apiKey);
+  if (!state.apiKey) setKeyHealth("Connect BYOP to check key status.", "idle");
+}
+
+async function checkKeyHealth() {
+  if (!state.apiKey) return;
+  setKeyHealth("Checking key status and balance...", "idle");
+  const [keyResult, balanceResult] = await Promise.allSettled([
+    fetchAccountJson("/account/key"),
+    fetchAccountJson("/account/balance"),
+  ]);
+  if (keyResult.status === "rejected") {
+    setKeyHealth("Key check failed. Reconnect BYOP or verify the key has account access.", "warning");
+    return;
+  }
+  const key = keyResult.value;
+  const balance = balanceResult.status === "fulfilled" ? balanceResult.value : null;
+  const keyType = key.type || key.keyType || (state.apiKey.startsWith("sk_") ? "user key" : "publishable");
+  const balanceText = formatBalance(balance);
+  setKeyHealth(`Key valid: ${keyType}${balanceText ? ` / ${balanceText}` : ""}.`, "healthy");
+}
+
+async function fetchAccountJson(path) {
+  const res = await fetch(`${GEN_BASE}${path}`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(`${path} returned ${res.status}`);
+  return res.json();
+}
+
+function formatBalance(balance) {
+  if (!balance || typeof balance !== "object") return "";
+  const amount = balance.balance ?? balance.pollen ?? balance.remaining ?? balance.amount;
+  if (amount === undefined || amount === null) return "";
+  return `${amount} pollen`;
+}
+
+function setKeyHealth(text, stateName) {
+  el.keyHealth.textContent = text;
+  el.keyHealth.classList.toggle("healthy", stateName === "healthy");
+  el.keyHealth.classList.toggle("warning", stateName === "warning");
 }
 
 function setMode(mode) {
@@ -162,7 +206,15 @@ async function handleMainAction() {
   if (!requireKey()) return;
   if (state.mode === "realtime") {
     if (state.realtime) stopRealtime();
-    else await startRealtime();
+    else {
+      try {
+        await startRealtime();
+      } catch (error) {
+        setRealtimeStatus(error.message || "Realtime failed to start.", "warning");
+        addMessage("system", `Realtime failed to start: ${error.message || error}`);
+        stopRealtime();
+      }
+    }
     return;
   }
   if (state.mediaRecorder?.state === "recording") stopPushRecording();
@@ -176,6 +228,7 @@ function requireKey() {
 }
 
 async function startRealtime() {
+  setRealtimeStatus("Requesting microphone...", "live");
   const audioContext = new AudioContext({ sampleRate: 24000 });
   const output = audioContext.createMediaStreamDestination();
   el.modelAudio.srcObject = output.stream;
@@ -184,25 +237,45 @@ async function startRealtime() {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
   const source = audioContext.createMediaStreamSource(stream);
   const processor = audioContext.createScriptProcessor(4096, 1, 1);
+  const mutedMonitor = audioContext.createGain();
+  mutedMonitor.gain.value = 0;
   const socket = new WebSocket(`${GEN_BASE.replace("https", "wss")}/v1/realtime?model=${REALTIME_MODEL}&key=${encodeURIComponent(state.apiKey)}`);
 
-  state.realtime = { socket, stream, audioContext, processor, output, nextStart: audioContext.currentTime };
+  state.realtime = { socket, stream, audioContext, processor, output, mutedMonitor, nextStart: audioContext.currentTime, gotSession: false, gotAudio: false };
   setOrb("listening");
   el.mainAction.textContent = "Stop realtime";
+  setRealtimeStatus("Opening realtime socket...", "live");
 
   socket.addEventListener("open", () => {
+    setRealtimeStatus("Socket open. Configuring audio session...", "live");
     socket.send(JSON.stringify({
       type: "session.update",
       session: {
         type: "realtime",
         instructions: systemPrompt(),
+        modalities: ["text", "audio"],
+        voice: value("realtimeVoice") || "marin",
         input_audio_format: "pcm16",
         output_audio_format: "pcm16",
+        input_audio_transcription: { model: value("sttModel") || "whisper" },
+        turn_detection: {
+          type: "server_vad",
+          threshold: 0.5,
+          prefix_padding_ms: 300,
+          silence_duration_ms: 650,
+          create_response: true,
+        },
         tools: toolDefinitions(),
       },
     }));
     source.connect(processor);
-    processor.connect(audioContext.destination);
+    processor.connect(mutedMonitor);
+    mutedMonitor.connect(audioContext.destination);
+    state.realtimeHealthTimer = setTimeout(() => {
+      if (state.realtime && !state.realtime.gotAudio) {
+        setRealtimeStatus("Connected, but no model audio yet. Speak a short phrase or switch to Push2Talk if this stays silent.", "warning");
+      }
+    }, 12000);
   });
 
   processor.onaudioprocess = (event) => {
@@ -213,18 +286,34 @@ async function startRealtime() {
 
   socket.addEventListener("message", (event) => handleRealtimeEvent(JSON.parse(event.data)));
   socket.addEventListener("close", stopRealtime);
-  socket.addEventListener("error", () => addMessage("system", "Realtime socket error. Try Push2Talk if the browser/network blocks WebSockets."));
+  socket.addEventListener("error", () => {
+    setRealtimeStatus("Realtime socket error. Push2Talk is available as a fallback.", "warning");
+    addMessage("system", "Realtime socket error. Try Push2Talk if the browser/network blocks WebSockets.");
+  });
 }
 
 function handleRealtimeEvent(event) {
-  if (event.type === "response.audio.delta" && event.delta) {
+  if (event.type === "session.created" || event.type === "session.updated") {
+    if (state.realtime) state.realtime.gotSession = true;
+    setRealtimeStatus("Realtime ready. Speak naturally.", "ready");
+  }
+  if ((event.type === "response.audio.delta" || event.type === "response.output_audio.delta") && event.delta) {
+    if (state.realtime) state.realtime.gotAudio = true;
+    setRealtimeStatus("Model voice playing.", "ready");
     setOrb("speaking");
     playPcmDelta(event.delta);
   }
   if (event.type === "response.audio_transcript.done" && event.transcript) addMessage("agent", event.transcript);
+  if (event.type === "response.output_audio_transcript.done" && event.transcript) addMessage("agent", event.transcript);
   if (event.type === "conversation.item.input_audio_transcription.completed" && event.transcript) addMessage("user", event.transcript);
+  if (event.type === "input_audio_buffer.speech_started") setRealtimeStatus("Listening...", "live");
+  if (event.type === "input_audio_buffer.speech_stopped") setRealtimeStatus("Thinking...", "live");
   if (event.type === "response.function_call_arguments.done") runTool(event.name, JSON.parse(event.arguments || "{}"), event.call_id);
-  if (event.type === "response.done") setOrb("listening");
+  if (event.type === "error") setRealtimeStatus(event.error?.message || "Realtime returned an error.", "warning");
+  if (event.type === "response.done") {
+    setOrb("listening");
+    setRealtimeStatus("Realtime ready. Speak naturally.", "ready");
+  }
 }
 
 function playPcmDelta(base64) {
@@ -248,12 +337,23 @@ function stopRealtime() {
   const rt = state.realtime;
   if (!rt) return;
   rt.socket?.readyState === WebSocket.OPEN && rt.socket.close();
+  clearTimeout(state.realtimeHealthTimer);
+  state.realtimeHealthTimer = null;
   rt.processor?.disconnect();
+  rt.mutedMonitor?.disconnect();
   rt.stream?.getTracks().forEach((track) => track.stop());
   rt.audioContext?.close();
   state.realtime = null;
   el.mainAction.textContent = "Start realtime";
+  setRealtimeStatus("Realtime idle", "idle");
   setOrb("idle");
+}
+
+function setRealtimeStatus(text, mode) {
+  el.realtimeStatus.textContent = text;
+  el.realtimeStatus.classList.toggle("ready", mode === "ready");
+  el.realtimeStatus.classList.toggle("warning", mode === "warning");
+  el.realtimeStatus.classList.toggle("live", mode === "live");
 }
 
 async function startPushRecording() {
@@ -308,7 +408,7 @@ async function chat(text, speak) {
     model: value("textModel"),
     messages: [
       { role: "system", content: systemPrompt() },
-      ...state.messages.filter((m) => m.role !== "system").slice(-12).map((m) => ({ role: m.role === "agent" ? "assistant" : "user", content: m.content })),
+      ...state.messages.filter((m) => m.role === "user" || m.role === "agent").slice(-12).map((m) => ({ role: m.role === "agent" ? "assistant" : "user", content: m.content })),
       { role: "user", content: text },
     ],
     tools: toolDefinitions().map((tool) => ({ type: "function", function: tool })),
@@ -352,13 +452,19 @@ async function speakText(text) {
 }
 
 async function runTool(name, args, realtimeCallId) {
+  const toolId = addToolEvent(name, args);
   let result;
-  if (name === "create_image") result = await generateMedia("image", args.prompt, value("imageModel"));
-  else if (name === "create_video") result = await generateMedia("video", args.prompt, value("videoModel"));
-  else if (name === "create_audio") result = await generateMedia("audio", args.prompt, value("audioModel"));
-  else if (name === "ask_coder_model") result = await askCoder(args.task || args.prompt || "");
-  else if (name === "call_mcp_server") result = await callMcp(args.server, args.tool, args.arguments || {});
-  else result = { error: `Unknown tool: ${name}` };
+  try {
+    if (name === "create_image") result = await generateMedia("image", args.prompt, value("imageModel"), toolId);
+    else if (name === "create_video") result = await generateMedia("video", args.prompt, value("videoModel"), toolId);
+    else if (name === "create_audio") result = await generateMedia("audio", args.prompt, value("audioModel"), toolId);
+    else if (name === "ask_coder_model") result = await askCoder(args.task || args.prompt || "", toolId);
+    else if (name === "call_mcp_server") result = await callMcp(args.server, args.tool, args.arguments || {}, toolId);
+    else result = { error: `Unknown tool: ${name}` };
+  } catch (error) {
+    result = { error: error.message || String(error) };
+  }
+  updateToolEvent(toolId, result?.error ? "error" : "done", summarizeToolResult(name, result));
 
   if (realtimeCallId && state.realtime?.socket?.readyState === WebSocket.OPEN) {
     state.realtime.socket.send(JSON.stringify({
@@ -370,9 +476,10 @@ async function runTool(name, args, realtimeCallId) {
   return result;
 }
 
-async function generateMedia(kind, prompt, model) {
+async function generateMedia(kind, prompt, model, toolId) {
   const label = kind === "video" ? "video generation" : `${kind} generation`;
   showGeneration(`Getting started on your ${label} now. When complete, it will be added to your local gallery.`);
+  updateToolEvent(toolId, "running", `Generating ${kind} with ${model}.`);
   const path = kind === "image" ? `/image/${encodeURIComponent(prompt)}` : kind === "video" ? `/video/${encodeURIComponent(prompt)}` : `/audio/${encodeURIComponent(prompt)}`;
   const url = `${GEN_BASE}${path}?model=${encodeURIComponent(model)}&key=${encodeURIComponent(state.apiKey)}`;
   const res = await fetch(url, { headers: authHeaders() });
@@ -383,7 +490,8 @@ async function generateMedia(kind, prompt, model) {
   return { ok: true, galleryId: item.id, kind, prompt, model };
 }
 
-async function askCoder(task) {
+async function askCoder(task, toolId) {
+  updateToolEvent(toolId, "running", `Asking ${value("coderModel")} to work on the coding task.`);
   const result = await postJson("/v1/chat/completions", {
     model: value("coderModel"),
     messages: [
@@ -394,9 +502,10 @@ async function askCoder(task) {
   return { answer: result?.choices?.[0]?.message?.content || "" };
 }
 
-async function callMcp(serverName, tool, args) {
+async function callMcp(serverName, tool, args, toolId) {
   const server = state.mcps.find((mcp) => mcp.name === serverName || mcp.url === serverName);
   if (!server) return { error: "MCP server not configured in this browser." };
+  updateToolEvent(toolId, "running", `Calling ${tool} on ${server.name}.`);
   const res = await fetch(server.url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -452,8 +561,37 @@ async function failResponse(res, fallback) {
 
 function addMessage(role, content) {
   state.messages.push({ role, content, at: Date.now() });
-  localStorage.setItem("conversation", JSON.stringify(state.messages.slice(-40)));
+  saveConversation();
   renderMessages();
+}
+
+function addToolEvent(name, args) {
+  const id = crypto.randomUUID();
+  state.messages.push({
+    id,
+    role: "tool",
+    name,
+    status: "queued",
+    content: labelForTool(name),
+    detail: summarizeArgs(args),
+    at: Date.now(),
+  });
+  saveConversation();
+  renderMessages();
+  return id;
+}
+
+function updateToolEvent(id, status, detail) {
+  const item = state.messages.find((message) => message.id === id);
+  if (!item) return;
+  item.status = status;
+  item.detail = detail || item.detail;
+  saveConversation();
+  renderMessages();
+}
+
+function saveConversation() {
+  localStorage.setItem("conversation", JSON.stringify(state.messages.slice(-60)));
 }
 
 function renderMessages() {
@@ -461,10 +599,50 @@ function renderMessages() {
   for (const message of state.messages) {
     const div = document.createElement("div");
     div.className = `message ${message.role}`;
-    div.textContent = message.content;
+    if (message.role === "tool") renderToolMessage(div, message);
+    else div.textContent = message.content;
     el.transcript.append(div);
   }
   el.transcript.scrollTop = el.transcript.scrollHeight;
+}
+
+function renderToolMessage(div, message) {
+  const title = document.createElement("div");
+  title.className = "tool-title";
+  const name = document.createElement("span");
+  name.textContent = message.content || labelForTool(message.name);
+  const status = document.createElement("span");
+  status.className = `tool-status ${message.status || "queued"}`;
+  status.textContent = message.status || "queued";
+  const detail = document.createElement("div");
+  detail.className = "tool-detail";
+  detail.textContent = message.detail || "Waiting to start.";
+  title.append(name, status);
+  div.append(title, detail);
+}
+
+function labelForTool(name) {
+  const labels = {
+    create_image: "Image generation",
+    create_video: "Video generation",
+    create_audio: "Audio generation",
+    ask_coder_model: "Coder model",
+    call_mcp_server: "MCP tool call",
+  };
+  return labels[name] || name;
+}
+
+function summarizeArgs(args) {
+  if (!args || typeof args !== "object") return "Preparing tool call.";
+  return args.prompt || args.task || [args.server, args.tool].filter(Boolean).join(" / ") || "Preparing tool call.";
+}
+
+function summarizeToolResult(name, result) {
+  if (result?.error) return result.error;
+  if (name === "ask_coder_model") return "Coder model returned guidance.";
+  if (name === "call_mcp_server") return "MCP server returned a result.";
+  if (result?.galleryId) return `${capitalize(result.kind)} saved to local gallery.`;
+  return "Tool completed.";
 }
 
 function clearConversation() {

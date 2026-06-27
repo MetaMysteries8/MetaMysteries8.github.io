@@ -3,7 +3,8 @@
 A dependency-free static prototype for a voice-centric Pollinations agent.
 
 ## Modes
-- Realtime mode uses `gpt-realtime-2` through `/v1/realtime` and browser BYOP auth via `?key=...` because WebSocket browser clients cannot set auth headers.
+- Realtime mode uses `gpt-realtime-2` through `/v1/realtime` and requests the model's own audio output/voice over the realtime socket. Browser BYOP auth uses `?key=...` because WebSocket browser clients cannot set auth headers.
+- Realtime does not need separate TTS; the model emits audio deltas, and the app routes them into an `<audio>` element so browser echo cancellation has the model voice as its reference.
 - Push2Talk mode records microphone audio, transcribes it, sends it to a configurable text model, and can optionally speak responses with TTS.
 - The agent can call configured tools for image, video, audio/music/TTS generation, a coder model, and HTTP MCP-compatible gateways.
 

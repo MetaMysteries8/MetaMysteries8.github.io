@@ -92,6 +92,19 @@ h2 { margin-bottom: 16px; }
 .auth-card small,
 .mcp-panel p { color: var(--muted); line-height: 1.45; }
 
+.key-health {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.18);
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+
+.key-health.healthy { color: var(--green); border-color: rgba(141, 255, 180, 0.28); }
+.key-health.warning { color: var(--danger); border-color: rgba(255, 108, 136, 0.28); }
+
 .pill {
   width: fit-content;
   padding: 6px 10px;
@@ -155,13 +168,28 @@ h2 { margin-bottom: 16px; }
 .controls {
   position: absolute;
   left: 50%;
-  bottom: 22px;
+  bottom: 46px;
   transform: translateX(-50%);
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
   gap: 10px;
 }
+
+.realtime-status {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+  text-align: center;
+}
+
+.realtime-status.ready { color: var(--green); }
+.realtime-status.warning { color: var(--danger); }
+.realtime-status.live { color: var(--cyan); }
 
 .mode-toggle {
   display: flex;
@@ -283,6 +311,26 @@ input:focus { border-color: rgba(77, 232, 255, 0.7); }
 .message.user { justify-self: end; background: rgba(77, 232, 255, 0.14); }
 .message.agent { justify-self: start; background: rgba(255, 79, 216, 0.12); }
 .message.system { max-width: 100%; color: var(--muted); background: rgba(255, 255, 255, 0.04); }
+.message.tool {
+  max-width: 100%;
+  width: 100%;
+  border: 1px solid rgba(77, 232, 255, 0.22);
+  background: linear-gradient(135deg, rgba(77, 232, 255, 0.08), rgba(142, 108, 255, 0.08));
+}
+
+.tool-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 7px;
+  color: var(--text);
+  font-weight: 800;
+}
+
+.tool-status { color: var(--cyan); font-size: 0.82rem; }
+.tool-status.done { color: var(--green); }
+.tool-status.error { color: var(--danger); }
+.tool-detail { color: var(--muted); font-size: 0.92rem; }
 
 .composer, .mcp-form {
   display: flex;

@@ -16,6 +16,7 @@
       </div>
       <div class="auth-card">
         <span id="authState" class="pill danger">Not connected</span>
+        <div id="keyHealth" class="key-health">Connect BYOP to check key status.</div>
         <button id="connectByop" class="button primary">Connect Pollen</button>
         <button id="clearKey" class="button ghost">Forget key</button>
         <small>The publishable app key is static client code. Users approve BYOP and receive their own scoped key.</small>
@@ -43,6 +44,7 @@
         <button id="mainAction" class="button talk">Start realtime</button>
         <button id="stopAction" class="button ghost">Stop</button>
       </div>
+      <p id="realtimeStatus" class="realtime-status">Realtime idle</p>
       <audio id="modelAudio" autoplay playsinline></audio>
     </section>
 
@@ -52,6 +54,9 @@
         <p id="modelStatus" class="model-status">Loading live model lists...</p>
         <label>Realtime model
           <input id="realtimeModel" value="gpt-realtime-2" disabled>
+        </label>
+        <label>Realtime voice
+          <input id="realtimeVoice" value="marin">
         </label>
         <label>Push2Talk text model
           <input id="textModel" value="openai" list="textModels">
