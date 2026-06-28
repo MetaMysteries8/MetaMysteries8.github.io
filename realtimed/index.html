@@ -51,9 +51,25 @@
         <div id="genDock" class="gen-dock" aria-live="polite"></div>
       </div>
 
-      <div id="orb" class="orb idle" aria-label="Voice visualizer">
-        <div class="orb-core"></div>
-        <div class="orb-ring"></div>
+      <div id="orb" class="orb idle" aria-label="Voice visualizer" role="img">
+        <svg class="orb-svg" viewBox="0 0 200 200" aria-hidden="true">
+          <defs>
+            <radialGradient id="orbGrad" cx="42%" cy="36%" r="70%">
+              <stop offset="0%" stop-color="#ffffff"/>
+              <stop offset="20%" stop-color="#bfeaff"/>
+              <stop offset="58%" stop-color="#8e6cff"/>
+              <stop offset="100%" stop-color="#ff4fd8"/>
+            </radialGradient>
+            <filter id="orbBlur" x="-40%" y="-40%" width="180%" height="180%">
+              <feGaussianBlur stdDeviation="2.2"/>
+            </filter>
+          </defs>
+          <g class="orb-rings"></g>
+          <path class="orb-blob" fill="url(#orbGrad)" filter="url(#orbBlur)"/>
+          <g class="orb-bars"></g>
+          <g class="orb-dots"></g>
+        </svg>
+        <span class="orb-label" aria-hidden="true"></span>
       </div>
 
       <section id="adaptiveWorkspace" class="adaptive-workspace" aria-live="polite">

@@ -1151,8 +1151,8 @@ input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; border: 0; bo
 /* Coder-generated live widget */
 .widget-view { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 14px; background: rgba(0, 0, 0, 0.3); }
 .widget-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: rgba(255, 255, 255, 0.03); }
-.widget-stage { height: 300px; overflow: auto; }
-.widget-stage .widget-frame { width: 100%; height: 100%; border: 0; background: transparent; display: block; }
+.widget-stage { height: 300px; overflow: auto; background: #0c1020; border-radius: 12px; }
+.widget-stage .widget-frame { width: 100%; height: 100%; border: 0; background: #0c1020; display: block; color-scheme: dark; }
 .widget-stage .code-view { height: 100%; max-height: none; }
 
 /* Web-search "scanning" loader */
@@ -1431,3 +1431,142 @@ input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; border: 0; bo
   .lightbox-stage { grid-column: 1; }
   .lightbox-meta { grid-column: 1; }
 }
+
+/* ============================================================
+   High-quality polish layer — refined depth, edges, and motion.
+   Enhancements only; no structural/layout changes.
+   ============================================================ */
+
+/* Crisper panels: a hairline top highlight reads as real glass elevation */
+.panel { border-color: rgba(255, 255, 255, 0.08); }
+.app-header,
+.stage.panel,
+.drawer.panel {
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 64px);
+}
+
+/* Cards: inset top-light + smoother, springier hover lift */
+.workspace-card,
+.gallery-item,
+.gen-tile,
+.widget-row,
+.metric-tile {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.workspace-card,
+.gallery-item {
+  transition: transform 220ms var(--ease), border-color var(--t-fast), box-shadow 220ms var(--ease), background var(--t-fast);
+}
+.workspace-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-1), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+/* Widget card reads like a real mini-app window with a titlebar */
+.widget-view { box-shadow: var(--shadow-1); }
+.widget-bar {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.015));
+}
+.widget-bar .code-lang { color: var(--text); opacity: 0.85; font-weight: 600; letter-spacing: 0; text-transform: none; }
+.widget-actions .code-copy { border-color: var(--line); }
+.widget-actions .code-copy:hover { color: var(--text); border-color: rgba(77, 232, 255, 0.45); background: rgba(77, 232, 255, 0.08); }
+
+/* Nav + drawers: active state gets a gradient underglow */
+.nav-button.active { background: linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.06)); }
+.drawer .panel-head { padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid var(--line); }
+.drawer .panel-head h2 { margin: 0; }
+
+/* Inputs/selects: subtle inner depth, smoother focus */
+input, select, textarea { box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.25); }
+input:focus, select:focus, textarea:focus { box-shadow: var(--ring), inset 0 1px 2px rgba(0, 0, 0, 0.25); }
+
+/* Message bubbles: tighter, with a soft edge highlight */
+.message { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05); }
+.message.tool { box-shadow: inset 0 1px 0 rgba(77, 232, 255, 0.12); }
+
+/* Generation tiles: cohesive titlebar tag + gentle entrance scale */
+.gen-tile { box-shadow: var(--shadow-1), inset 0 1px 0 rgba(255, 255, 255, 0.06); }
+.gen-tile-tag { background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.03)); }
+
+/* Buttons: a touch more life on press/hover */
+.button.primary, .button.talk { letter-spacing: 0.01em; }
+.button.ghost.small:hover { color: var(--text); }
+
+/* Gallery media: framed, consistent aspect, zoom affordance */
+.gallery-item > img { aspect-ratio: 1; object-fit: cover; }
+.gallery-item > video { background: #05070d; }
+.gallery-openable { transition: filter var(--t-fast), transform var(--t-fast); }
+.gallery-openable:hover { filter: brightness(1.06); }
+
+/* Empty states: a hair more refined */
+.empty-workspace strong { letter-spacing: -0.02em; }
+
+/* Honor reduced-motion for the added transforms */
+@media (prefers-reduced-motion: reduce) {
+  .workspace-card:hover, .gallery-item:hover { transform: none; }
+}
+
+/* ============================================================
+   Morphable SVG visualizer
+   ============================================================ */
+.orb-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.orb-blob {
+  transition: opacity 300ms ease;
+  filter: url(#orbBlur) drop-shadow(0 0 calc(18px + var(--level) * 60px) rgba(142, 108, 255, calc(0.3 + var(--level) * 0.5)));
+}
+.orb-bars, .orb-rings, .orb-dots { transition: opacity 260ms ease; }
+.orb-bars path { stroke: var(--cyan); stroke-width: 3.2; stroke-linecap: round; fill: none; filter: drop-shadow(0 0 6px rgba(77, 232, 255, 0.55)); }
+.orb-rings circle { fill: none; stroke: var(--hot); stroke-width: 2; filter: drop-shadow(0 0 6px rgba(255, 79, 216, 0.5)); }
+.orb-dots circle { fill: var(--cyan); filter: drop-shadow(0 0 7px rgba(77, 232, 255, 0.7)); }
+
+/* Per-state accent tinting on the blob's glow */
+.orb.user .orb-blob, .orb.listening .orb-blob { filter: url(#orbBlur) drop-shadow(0 0 calc(20px + var(--level) * 60px) rgba(77, 232, 255, calc(0.35 + var(--level) * 0.5))); }
+.orb.speaking .orb-blob { filter: url(#orbBlur) drop-shadow(0 0 calc(22px + var(--level) * 70px) rgba(255, 79, 216, calc(0.4 + var(--level) * 0.5))); }
+.orb.thinking .orb-dots circle { fill: var(--violet); }
+
+.orb-label {
+  position: absolute;
+  bottom: -6px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 3px 11px;
+  border-radius: 999px;
+  background: rgba(7, 8, 18, 0.7);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.74rem;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 240ms ease;
+  pointer-events: none;
+}
+.orb:not(.idle) .orb-label { opacity: 1; }
+.orb.user .orb-label, .orb.listening .orb-label { color: var(--cyan); border-color: rgba(77, 232, 255, 0.4); }
+.orb.speaking .orb-label { color: var(--hot); border-color: rgba(255, 79, 216, 0.4); }
+
+@media (prefers-reduced-motion: reduce) {
+  .orb-bars, .orb-rings, .orb-dots { opacity: 0 !important; }
+}
+
+/* ============================================================
+   Workspace: reliable scroll + card reorder controls
+   ============================================================ */
+.adaptive-workspace { overflow-y: auto; min-height: 0; }
+.card-meta-wrap { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.card-order { display: flex; gap: 3px; }
+.order-btn {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: color var(--t-fast), border-color var(--t-fast), background var(--t-fast);
+}
+.order-btn:hover { color: var(--text); border-color: rgba(77, 232, 255, 0.45); background: rgba(77, 232, 255, 0.08); }

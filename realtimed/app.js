@@ -13,9 +13,14 @@ const CODER_SYSTEM_PROMPT = [
   "4. Inline ALL CSS in <style> and ALL JavaScript in <script>. No external files, imports, bundlers, build steps, or CDN URLs unless the user explicitly asks.",
   "5. Put no prose before the code block. After the closing ```, add at most two short sentences describing the result.",
   "",
-  "OTHER CODING QUESTIONS (snippets, explanations, debugging, non-web code):",
-  "- Answer normally in prose with standard fenced code blocks (```js, ```py, ```ts, etc.).",
-  "- Do NOT use a ```html block for partial snippets — that block is reserved for one full runnable document.",
+  "STANDALONE NON-WEB FILES (a script, module, config, stylesheet, query, etc. in any language — Python, JS, TS, CSS, SQL, Go, Rust, shell, JSON, YAML, Markdown, …):",
+  "- Return the complete file as a SINGLE fenced block tagged with its language, e.g. ```python … ``` or ```css … ```. It will be saved to the gallery as a downloadable file with the correct extension.",
+  "- Put no prose before the block. After the closing ```, add at most two short sentences.",
+  "- If it helps, name the file on the fence info line, e.g. ```python title=scraper.py — but the language tag alone is enough.",
+  "",
+  "SHORT SNIPPETS / EXPLANATIONS / DEBUGGING (not a whole file):",
+  "- Answer normally in prose with standard fenced code blocks. These are shown inline, not saved as files.",
+  "- Reserve the ```html block for one full runnable document only.",
   "",
   "ALWAYS: never invent or hardcode secret API keys or credentials; use clearly named placeholders.",
 ].join("\n");
@@ -23,7 +28,7 @@ const CODER_SYSTEM_PROMPT = [
 const WIDGET_GUIDE = [
   "Rules:",
   "- Inline ALL CSS and JS. No external files, imports, CDNs, fonts, or network requests.",
-  "- Transparent or dark background; light text (#f4f6ff-ish); use system-ui font. The host card is dark.",
+  "- DARK THEME ONLY. The host card is dark. Set `color-scheme: dark`, a dark/transparent page background (never white or light), and light text (~#eef1ff). Style inputs/buttons explicitly dark — do not rely on default (bright) form-control styling. Accent with one or two colors, not large bright fills.",
   "- Be fluid and bounded: fill 100% width, never exceed it; keep height ~240-420px (scrolls if taller); use box-sizing:border-box and avoid fixed pixel widths.",
   "- Make it genuinely interactive and useful for the spec (controls, canvas, calculations, live editing).",
   "- No secret keys, no alert() spam, no infinite loops.",
@@ -112,6 +117,11 @@ const el = {
   mainAction: document.querySelector("#mainAction"),
   stopAction: document.querySelector("#stopAction"),
   orb: document.querySelector("#orb"),
+  orbBlob: document.querySelector(".orb-blob"),
+  orbBars: document.querySelector(".orb-bars"),
+  orbRings: document.querySelector(".orb-rings"),
+  orbDots: document.querySelector(".orb-dots"),
+  orbLabel: document.querySelector(".orb-label"),
   mediaDock: document.querySelector("#mediaDock"),
   genDock: document.querySelector("#genDock"),
   realtimeStatus: document.querySelector("#realtimeStatus"),
@@ -313,6 +323,7 @@ function init() {
   loadLiveModels();
   checkKeyHealth();
   startBalancePolling();
+  startVizLoop();
 }
 
 function bindEvents() {
@@ -716,7 +727,7 @@ async function startRealtime() {
   source.connect(analyser); // mic drives the orb while listening
   const socket = new WebSocket(`${GEN_BASE.replace("https", "wss")}/v1/realtime?model=${REALTIME_MODEL}&key=${encodeURIComponent(state.apiKey)}`);
 
-  state.realtime = { socket, stream, audioContext, processor, output, mutedMonitor, analyser, nextStart: audioContext.currentTime, gotSession: false, gotAudio: false, retriedWithoutVoice: false, handledCalls: new Set(), scheduled: [] };
+  state.realtime = { socket, stream, audioContext, processor, output, mutedMonitor, analyser, nextStart: audioContext.currentTime, gotSession: false, gotAudio: false, retriedWithoutVoice: false, handledCalls: new Set(), scheduled: [], responseActive: false };
   setOrb("listening");
   startOrbViz(analyser);
   el.mainAction.textContent = "Stop realtime";
@@ -765,10 +776,12 @@ function handleRealtimeEvent(event) {
   if (event.type === "response.output_audio_transcript.done" && event.transcript) addMessage("agent", event.transcript);
   if (event.type === "conversation.item.input_audio_transcription.completed" && event.transcript) addMessage("user", event.transcript);
   if (event.type === "input_audio_buffer.speech_started") {
+    setOrb("user");
     setRealtimeStatus("Listening...", "live");
     // Barge-in: the user started talking over the model — cut its audio short and
     // cancel the in-flight response so it actually stops instead of talking past.
-    if (flag("voiceInterrupt") && state.realtime?.scheduled?.length) interruptRealtime();
+    const rt = state.realtime;
+    if (flag("voiceInterrupt") && rt && (rt.scheduled.length || rt.responseActive)) interruptRealtime();
   }
   if (event.type === "input_audio_buffer.speech_stopped") setRealtimeStatus("Thinking...", "live");
   if (event.type === "response.function_call_arguments.done") {
@@ -779,8 +792,16 @@ function handleRealtimeEvent(event) {
     if (rt && event.call_id) rt.handledCalls.add(event.call_id);
     runTool(event.name, JSON.parse(event.arguments || "{}"), event.call_id);
   }
+  if (event.type === "response.created") {
+    if (state.realtime) state.realtime.responseActive = true;
+    setOrb("thinking");
+    setRealtimeStatus("Thinking...", "live");
+  }
   if (event.type === "error") {
     const message = event.error?.message || "Realtime returned an error.";
+    // Interrupting races the server: cancelling a response that just finished
+    // yields a harmless "no active response" / cancellation error. Ignore quietly.
+    if (/cancel|no active response|already (cancel|complet|done|finish)|response_cancel/i.test(message)) return;
     if (/voice/i.test(message) && /unknown|unsupported|invalid|not (allowed|supported)|param/i.test(message) && state.realtime && !state.realtime.retriedWithoutVoice) {
       state.realtime.retriedWithoutVoice = true;
       state.realtime.socket.send(JSON.stringify({ type: "session.update", session: realtimeSessionConfig(false) }));
@@ -790,7 +811,8 @@ function handleRealtimeEvent(event) {
     setRealtimeStatus(message, "warning");
     playSound("error");
   }
-  if (event.type === "response.done") {
+  if (event.type === "response.done" || event.type === "response.cancelled") {
+    if (state.realtime) state.realtime.responseActive = false;
     setOrb("listening");
     setRealtimeStatus("Realtime ready. Speak naturally.", "ready");
   }
@@ -827,8 +849,13 @@ function interruptRealtime() {
   for (const node of rt.scheduled) { try { node.onended = null; node.stop(); node.disconnect(); } catch { /* already ended */ } }
   rt.scheduled = [];
   rt.nextStart = rt.audioContext.currentTime;
-  if (rt.socket?.readyState === WebSocket.OPEN) rt.socket.send(JSON.stringify({ type: "response.cancel" }));
-  setOrb("listening");
+  // Only cancel when a response is genuinely in flight, or the server errors with
+  // "no active response". Always flush local audio regardless.
+  if (rt.responseActive && rt.socket?.readyState === WebSocket.OPEN) {
+    rt.socket.send(JSON.stringify({ type: "response.cancel" }));
+    rt.responseActive = false;
+  }
+  setOrb("user");
   setRealtimeStatus("Interrupted — listening...", "live");
 }
 
@@ -1193,6 +1220,7 @@ async function runTool(name, args, realtimeCallId) {
     else if (name === "show_workspace") result = showWorkspace(args, toolId);
     else if (name === "request_source_images") result = requestSourceImages(args, toolId);
     else if (name === "remove_workspace") result = removeWorkspace(args, toolId);
+    else if (name === "reorder_workspace") result = reorderWorkspace(args);
     else if (name === "remember") result = rememberFact(args);
     else if (name === "forget") result = forgetMemory(args);
     else if (name === "list_gallery") result = await listGalleryForAgent();
@@ -1373,9 +1401,57 @@ async function askCoder(task, toolId) {
     genJobEnd(jobId, "Project saved to gallery.");
     return { answer: summarizeCoderAnswer(answer), projectGalleryId: item.id };
   }
-  genJobTerminal(jobId, ["Coder response received.", "Returned guidance without a runnable HTML document."], true);
+  // Non-HTML deliverable: save the largest tagged code block as a real file with
+  // the language's extension, so the user can download it as expected.
+  const file = extractCodeFile(answer);
+  if (file) {
+    const filename = file.filename || `${slugify(task) || "snippet"}.${file.ext}`;
+    const item = await saveGalleryItem({ kind: "code", prompt: task, model, blob: new Blob([file.code], { type: "text/plain" }), language: file.language, filename });
+    genJobTerminal(jobId, [`Detected a ${file.language} file.`, `Saved ${filename} to your gallery.`, "Open the Gallery to view or download it."], true);
+    genJobEnd(jobId, `${filename} saved to gallery.`);
+    return { answer: summarizeCoderAnswer(answer), codeGalleryId: item.id, language: file.language, filename };
+  }
+  genJobTerminal(jobId, ["Coder response received.", "Returned guidance / inline snippets."], true);
   genJobEnd(jobId, "Coder returned guidance.");
   return { answer };
+}
+
+// File-extension per fenced-code language tag (for saving coder output as files).
+const LANGUAGE_EXT = {
+  python: "py", py: "py", javascript: "js", js: "js", jsx: "jsx", typescript: "ts", ts: "ts", tsx: "tsx",
+  css: "css", scss: "scss", less: "less", html: "html", json: "json", yaml: "yml", yml: "yml", toml: "toml",
+  markdown: "md", md: "md", sql: "sql", sh: "sh", bash: "sh", shell: "sh", zsh: "sh", c: "c", h: "h",
+  cpp: "cpp", "c++": "cpp", cs: "cs", csharp: "cs", java: "java", kotlin: "kt", kt: "kt", swift: "swift",
+  go: "go", golang: "go", rust: "rs", rs: "rs", ruby: "rb", rb: "rb", php: "php", r: "r", lua: "lua",
+  dart: "dart", scala: "scala", perl: "pl", dockerfile: "dockerfile", makefile: "mk", ini: "ini",
+  xml: "xml", svg: "svg", vue: "vue", graphql: "graphql", proto: "proto", txt: "txt", text: "txt",
+};
+
+// Pulls the largest fenced code block out of a coder reply and resolves a sensible
+// language + extension + optional filename (from a `title=` / `file=` info string).
+function extractCodeFile(text) {
+  if (!text) return null;
+  const blocks = [];
+  const re = /```([^\n`]*)\n([\s\S]*?)```/g;
+  let match;
+  while ((match = re.exec(text))) {
+    const info = match[1].trim();
+    const code = match[2].replace(/\s+$/, "");
+    blocks.push({ info, code });
+  }
+  if (!blocks.length) return null;
+  const best = blocks.sort((a, b) => b.code.length - a.code.length)[0];
+  if (best.code.trim().length < 12) return null;
+  const lang = (best.info.split(/\s+/)[0] || "").toLowerCase();
+  const filenameMatch = best.info.match(/(?:title|file|name)\s*=\s*["']?([^\s"']+)/i);
+  let filename = filenameMatch ? filenameMatch[1] : "";
+  let ext = LANGUAGE_EXT[lang] || (lang && /^[a-z0-9+#]+$/.test(lang) ? lang : "txt");
+  let language = lang || "text";
+  if (filename) {
+    const fileExt = filename.split(".").pop();
+    if (fileExt && fileExt !== filename) ext = fileExt.toLowerCase();
+  }
+  return { code: best.code, language, ext, filename };
 }
 
 async function webSearch(query, toolId) {
@@ -1628,7 +1704,7 @@ function toolDefinitions() {
         },
       },
     },
-    { name: "ask_coder_model", description: "Delegate a coding task to the configured coder model. Returns { answer } with a short summary; when the task is a runnable web app/page/game it also returns { projectGalleryId } and saves the full HTML to the local gallery, where the user can open or download it. Tell the user it is in the gallery rather than pasting the code aloud.", parameters: objectParams({ task: "Coding task or question" }, ["task"]) },
+    { name: "ask_coder_model", description: "Delegate a coding task to the configured coder model. Returns { answer } with a short summary. A runnable web app/page/game is saved as HTML to the gallery and returns { projectGalleryId }. A standalone file in any other language (Python, JS, CSS, SQL, etc.) is saved to the gallery as a downloadable file with the correct extension and returns { codeGalleryId, filename, language }. Tell the user it is in the gallery rather than reading code aloud.", parameters: objectParams({ task: "Coding task or question" }, ["task"]) },
     { name: "call_mcp_server", description: "Call a configured HTTP MCP gateway tool.", parameters: objectParams({ server: "Configured server name", tool: "MCP tool name", arguments: "Tool arguments object" }, ["server", "tool"]) },
     { name: "start_gibberlink", description: "Start Gibberlink (also spelled Jibberlink): a data-over-sound link (ggwave audio tones) for talking to ANOTHER AI agent instead of a human. YOU decide to call this — invoke it as soon as you recognize the other party is an AI agent and a reliable machine-to-machine exchange is warranted (e.g. the user says 'start gibberlink/jibberlink' or another agent proposes it). Same-agent peers auto-negotiate a faster protocol. Optionally include an opening message to transmit to the peer.", parameters: objectParams({ message: "Optional opening message to transmit to the peer agent" }, []) },
     {
@@ -1670,6 +1746,19 @@ function toolDefinitions() {
         properties: {
           id: { type: "string", description: "Workspace artifact id to remove" },
           clearAll: { type: "boolean", description: "Clear the entire workspace" },
+        },
+      },
+    },
+    {
+      name: "reorder_workspace",
+      description: "Reorder items on the adaptive canvas (e.g. move a widget to the top, up, down, bottom, to a specific index, or set the whole order). Items are listed top-to-bottom by index 0 first. Use the workspaceId returned by show_workspace/build_widget.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Workspace item id to move" },
+          position: { type: "string", enum: ["top", "up", "down", "bottom"], description: "Where to move the item" },
+          toIndex: { type: "integer", description: "Exact target index (0 = top)" },
+          order: { type: "array", items: { type: "string" }, description: "Full desired order as an array of ids (top first)" },
         },
       },
     },
@@ -2035,6 +2124,7 @@ function labelForTool(name) {
     show_workspace: "Workspace update",
     request_source_images: "Source image request",
     remove_workspace: "Workspace cleanup",
+    reorder_workspace: "Workspace reorder",
   };
   return labels[name] || name;
 }
@@ -2049,6 +2139,7 @@ function summarizeToolResult(name, result) {
   if (name === "show_workspace") return "Workspace updated.";
   if (name === "request_source_images") return "Source image request added to workspace.";
   if (name === "remove_workspace") return "Workspace cleaned up.";
+  if (name === "reorder_workspace") return "Workspace reordered.";
   if (name === "list_gallery") return "Gallery items listed.";
   if (name === "use_gallery_sources") return "Gallery sources used for generation.";
   if (name === "manage_gallery") return result?.cleared != null ? "Gallery cleared." : result?.deleted != null ? `Deleted ${result.deleted} gallery item(s).` : "Gallery updated.";
@@ -2123,6 +2214,48 @@ function requestSourceImages(args, toolId) {
   return { ok: true, workspaceId: artifact.id, purpose: artifact.purpose };
 }
 
+// Manual reorder from the card's up/down buttons.
+function moveArtifact(id, direction) {
+  const index = state.workspace.findIndex((artifact) => artifact.id === id);
+  if (index < 0) return;
+  const target = index + direction;
+  if (target < 0 || target >= state.workspace.length) return;
+  const [item] = state.workspace.splice(index, 1);
+  state.workspace.splice(target, 0, item);
+  saveWorkspace();
+  renderWorkspace();
+}
+
+// Agent-facing reorder: move one item (top/up/down/bottom or to an index), or set
+// the full order from an array of ids.
+function reorderWorkspace(args) {
+  if (!state.workspace.length) return { error: "The workspace is empty." };
+  if (Array.isArray(args.order) && args.order.length) {
+    const byId = new Map(state.workspace.map((artifact) => [artifact.id, artifact]));
+    const ordered = args.order.map((id) => byId.get(id)).filter(Boolean);
+    for (const artifact of state.workspace) if (!ordered.includes(artifact)) ordered.push(artifact);
+    state.workspace = ordered;
+    saveWorkspace();
+    renderWorkspace();
+    return { ok: true, order: state.workspace.map((artifact) => artifact.id) };
+  }
+  const index = state.workspace.findIndex((artifact) => artifact.id === args.id);
+  if (index < 0) return { error: "No workspace item with that id. Call show_workspace results carry the id." };
+  const [item] = state.workspace.splice(index, 1);
+  let target = index;
+  const position = String(args.position ?? "").toLowerCase();
+  if (position === "top") target = 0;
+  else if (position === "bottom") target = state.workspace.length;
+  else if (position === "up") target = Math.max(0, index - 1);
+  else if (position === "down") target = Math.min(state.workspace.length, index + 1);
+  else if (Number.isInteger(args.toIndex)) target = Math.max(0, Math.min(state.workspace.length, args.toIndex));
+  else target = 0;
+  state.workspace.splice(target, 0, item);
+  saveWorkspace();
+  renderWorkspace();
+  return { ok: true, movedTo: target, order: state.workspace.map((artifact) => artifact.id) };
+}
+
 function removeWorkspace(args) {
   if (args.clearAll) {
     clearWorkspace();
@@ -2160,6 +2293,8 @@ function renderWorkspace() {
     return;
   }
   for (const artifact of state.workspace) el.adaptiveWorkspace.append(renderArtifact(artifact));
+  // New items unshift to the top; keep them in view instead of pushing others off.
+  el.adaptiveWorkspace.scrollTop = 0;
 }
 
 function renderArtifact(artifact) {
@@ -2171,7 +2306,27 @@ function renderArtifact(artifact) {
   const meta = document.createElement("span");
   meta.className = "meta";
   meta.textContent = artifact.layout;
-  header.append(title, meta);
+  const controls = document.createElement("div");
+  controls.className = "card-order";
+  const up = document.createElement("button");
+  up.type = "button";
+  up.className = "order-btn";
+  up.title = "Move up";
+  up.setAttribute("aria-label", "Move up");
+  up.textContent = "↑";
+  up.addEventListener("click", () => moveArtifact(artifact.id, -1));
+  const down = document.createElement("button");
+  down.type = "button";
+  down.className = "order-btn";
+  down.title = "Move down";
+  down.setAttribute("aria-label", "Move down");
+  down.textContent = "↓";
+  down.addEventListener("click", () => moveArtifact(artifact.id, 1));
+  controls.append(up, down);
+  const metaWrap = document.createElement("div");
+  metaWrap.className = "card-meta-wrap";
+  metaWrap.append(meta, controls);
+  header.append(title, metaWrap);
   card.append(header);
   if (artifact.summary) {
     const summary = document.createElement("p");
@@ -2330,6 +2485,23 @@ function makeWidgetFrame(artifact) {
 // assets. A downloaded standalone copy gets its own file:// origin, so the same
 // bridge falls back to localStorage and keeps working offline.
 function injectWidgetBridge(html, { id, data, assets }) {
+  // Overridable dark defaults injected at the top of <head>.
+  const baseStyle = `
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; background: #0c1020; color: #eef1ff; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  * { box-sizing: border-box; }
+  img, video, canvas, svg, table { max-width: 100%; }
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.18); border-radius: 9px; }
+</style>`;
+  // Enforced last so it wins by source order: guarantees a dark surface and dark
+  // native controls regardless of what the model emitted (fixes "too bright").
+  const enforceStyle = `
+<style>
+  html { color-scheme: dark !important; }
+  html, body { background: #0c1020 !important; }
+</style>`;
   const bridge = `
 <script>(function(){
   var ID = ${safeJsonForScript(String(id || ""))};
@@ -2345,9 +2517,14 @@ function injectWidgetBridge(html, { id, data, assets }) {
   };
   document.addEventListener("DOMContentLoaded", function(){ post("ready",{}); });
 })();<\/script>`;
-  if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, `${bridge}\n</body>`);
-  if (/<\/html>/i.test(html)) return html.replace(/<\/html>/i, `${bridge}\n</html>`);
-  return html + bridge;
+  let out = html;
+  if (/<head[^>]*>/i.test(out)) out = out.replace(/<head[^>]*>/i, (match) => `${match}\n${baseStyle}`);
+  else if (/<html[^>]*>/i.test(out)) out = out.replace(/<html[^>]*>/i, (match) => `${match}\n${baseStyle}`);
+  else out = `${baseStyle}\n${out}`;
+  const tail = `${enforceStyle}\n${bridge}`;
+  if (/<\/body>/i.test(out)) return out.replace(/<\/body>/i, `${tail}\n</body>`);
+  if (/<\/html>/i.test(out)) return out.replace(/<\/html>/i, `${tail}\n</html>`);
+  return out + tail;
 }
 
 // JSON safe to inline inside a <script>: neutralize </script> and line separators.
@@ -2750,48 +2927,146 @@ function generationVisualMarkup(kind) {
   return `<div class="diffusion-grid"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>`;
 }
 
+// ---------------------------------------------------------------------------
+// Morphable SVG visualizer. One persistent rAF loop deforms a blob path and
+// state-specific accents (mic bars for the user, radiating rings for the model,
+// orbiting dots for thinking) so you can tell at a glance who's "talking".
+// ---------------------------------------------------------------------------
+const VIZ_STATES = ["idle", "listening", "user", "thinking", "speaking"];
+const VIZ_LABELS = { idle: "", listening: "Listening", user: "You", thinking: "Thinking", speaking: "Speaking" };
+const viz = { raf: 0, analyser: null, data: null, level: 0, target: 0, phase: 0, spin: 0, state: "idle" };
+
 function setOrb(mode) {
-  el.orb.classList.remove("idle", "listening", "speaking");
+  if (!VIZ_STATES.includes(mode)) mode = "idle";
+  el.orb.classList.remove(...VIZ_STATES);
   el.orb.classList.add(mode);
+  viz.state = mode;
+  if (el.orbLabel) el.orbLabel.textContent = VIZ_LABELS[mode] || "";
+  el.orb?.setAttribute("aria-label", `Visualizer — ${mode}`);
 }
 
-// Audio-reactive orb: drives the CSS --level (0..1) from an AnalyserNode's RMS so
-// the visualizer pulses with real mic/model audio instead of a fixed animation.
-const orbViz = { raf: 0, analyser: null, data: null, smoothed: 0 };
-
-function startOrbViz(analyser) {
-  if (!analyser) return;
-  orbViz.analyser = analyser;
-  orbViz.data = new Uint8Array(analyser.frequencyBinCount);
-  cancelAnimationFrame(orbViz.raf);
-  const tick = () => {
-    if (!orbViz.analyser) return;
-    orbViz.analyser.getByteTimeDomainData(orbViz.data);
-    let sum = 0;
-    for (let i = 0; i < orbViz.data.length; i += 1) { const v = (orbViz.data[i] - 128) / 128; sum += v * v; }
-    const rms = Math.sqrt(sum / orbViz.data.length);
-    orbViz.smoothed = orbViz.smoothed * 0.82 + rms * 0.18;
-    const level = Math.min(1, orbViz.smoothed * 3.4);
-    el.orb.style.setProperty("--level", level.toFixed(3));
-    orbViz.raf = requestAnimationFrame(tick);
-  };
-  tick();
-}
-
-function stopOrbViz() {
-  cancelAnimationFrame(orbViz.raf);
-  orbViz.raf = 0;
-  orbViz.analyser = null;
-  orbViz.smoothed = 0;
-  el.orb.style.setProperty("--level", "0");
-}
-
-// Builds an analyser fed by the given source node(s) so the orb can react to it.
 function makeOrbAnalyser(audioContext) {
   const analyser = audioContext.createAnalyser();
   analyser.fftSize = 256;
   analyser.smoothingTimeConstant = 0.7;
   return analyser;
+}
+
+// startOrbViz/stopOrbViz now just attach/detach the audio source; the loop runs
+// continuously (so idle/thinking still morph) and pauses when the tab is hidden.
+function startOrbViz(analyser) {
+  if (analyser) {
+    viz.analyser = analyser;
+    viz.data = new Uint8Array(analyser.frequencyBinCount);
+  }
+  startVizLoop();
+}
+
+function stopOrbViz() {
+  viz.analyser = null;
+  viz.data = null;
+}
+
+function startVizLoop() {
+  if (viz.raf || !el.orbBlob) return;
+  const tick = () => {
+    viz.raf = requestAnimationFrame(tick);
+    if (document.hidden) return;
+    if (viz.analyser && viz.data) {
+      viz.analyser.getByteTimeDomainData(viz.data);
+      let sum = 0;
+      for (let i = 0; i < viz.data.length; i += 1) { const v = (viz.data[i] - 128) / 128; sum += v * v; }
+      viz.target = Math.min(1, Math.sqrt(sum / viz.data.length) * 3.4);
+    } else {
+      // No live audio: synthesize a gentle idle/thinking pulse.
+      viz.target = viz.state === "thinking" ? 0.34 : viz.state === "idle" ? 0.12 : viz.target * 0.9;
+    }
+    viz.level += (viz.target - viz.level) * 0.18;
+    viz.phase += 0.016 + viz.level * 0.05;
+    viz.spin += 0.012 + (viz.state === "thinking" ? 0.05 : 0);
+    renderVizFrame();
+  };
+  tick();
+}
+
+function renderVizFrame() {
+  const level = viz.level;
+  el.orb.style.setProperty("--level", level.toFixed(3));
+  // Morphing blob — lobe amplitude + base radius vary per state and audio level.
+  const lobes = viz.state === "thinking" ? 5 : viz.state === "speaking" ? 8 : 6;
+  const amp = (viz.state === "speaking" ? 13 : viz.state === "user" || viz.state === "listening" ? 9 : viz.state === "thinking" ? 7 : 4) * (0.35 + level);
+  const base = 44 + level * 9;
+  const pts = [];
+  for (let i = 0; i < lobes; i += 1) {
+    const a = (i / lobes) * Math.PI * 2;
+    const r = base + Math.sin(a * 3 + viz.phase * 2) * amp * 0.5 + Math.sin(a * 2 - viz.phase) * amp * 0.5;
+    pts.push([100 + Math.cos(a) * r, 100 + Math.sin(a) * r]);
+  }
+  el.orbBlob.setAttribute("d", smoothClosedPath(pts));
+
+  // Mic equalizer bars (user/listening): radial ticks whose length tracks level.
+  if (el.orbBars) {
+    const showBars = viz.state === "user" || viz.state === "listening";
+    el.orbBars.style.opacity = showBars ? "1" : "0";
+    if (showBars) {
+      const count = 28;
+      let d = "";
+      for (let i = 0; i < count; i += 1) {
+        const a = (i / count) * Math.PI * 2;
+        const len = 6 + (0.5 + 0.5 * Math.sin(viz.phase * 3 + i)) * (8 + level * 26);
+        const r0 = 70;
+        d += `M ${(100 + Math.cos(a) * r0).toFixed(1)} ${(100 + Math.sin(a) * r0).toFixed(1)} L ${(100 + Math.cos(a) * (r0 + len)).toFixed(1)} ${(100 + Math.sin(a) * (r0 + len)).toFixed(1)} `;
+      }
+      el.orbBars.innerHTML = `<path d="${d}" />`;
+    }
+  }
+
+  // Radiating rings (speaking): concentric pulses expanding with the model voice.
+  if (el.orbRings) {
+    const showRings = viz.state === "speaking";
+    el.orbRings.style.opacity = showRings ? "1" : "0";
+    if (showRings) {
+      let rings = "";
+      for (let i = 0; i < 3; i += 1) {
+        const t = ((viz.phase * 0.5 + i / 3) % 1);
+        const r = 50 + t * (40 + level * 30);
+        rings += `<circle cx="100" cy="100" r="${r.toFixed(1)}" opacity="${(1 - t).toFixed(2)}" />`;
+      }
+      el.orbRings.innerHTML = rings;
+    }
+  }
+
+  // Orbiting dots (thinking).
+  if (el.orbDots) {
+    const showDots = viz.state === "thinking";
+    el.orbDots.style.opacity = showDots ? "1" : "0";
+    if (showDots) {
+      let dots = "";
+      for (let i = 0; i < 3; i += 1) {
+        const a = viz.spin + (i / 3) * Math.PI * 2;
+        dots += `<circle cx="${(100 + Math.cos(a) * 66).toFixed(1)}" cy="${(100 + Math.sin(a) * 66).toFixed(1)}" r="5" />`;
+      }
+      el.orbDots.innerHTML = dots;
+    }
+  }
+}
+
+// Catmull-Rom → cubic bezier for a smooth closed blob.
+function smoothClosedPath(p) {
+  const n = p.length;
+  let d = `M ${p[0][0].toFixed(1)} ${p[0][1].toFixed(1)} `;
+  for (let i = 0; i < n; i += 1) {
+    const p0 = p[(i - 1 + n) % n];
+    const p1 = p[i];
+    const p2 = p[(i + 1) % n];
+    const p3 = p[(i + 2) % n];
+    const c1x = p1[0] + (p2[0] - p0[0]) / 6;
+    const c1y = p1[1] + (p2[1] - p0[1]) / 6;
+    const c2x = p2[0] - (p3[0] - p1[0]) / 6;
+    const c2y = p2[1] - (p3[1] - p1[1]) / 6;
+    d += `C ${c1x.toFixed(1)} ${c1y.toFixed(1)} ${c2x.toFixed(1)} ${c2y.toFixed(1)} ${p2[0].toFixed(1)} ${p2[1].toFixed(1)} `;
+  }
+  return `${d}Z`;
 }
 
 function loadSettings() {
@@ -2957,10 +3232,12 @@ async function clearSavedWidgets() {
   renderSavedWidgets();
 }
 
-async function saveGalleryItem({ kind, prompt, model, blob, remoteUrl }) {
+async function saveGalleryItem({ kind, prompt, model, blob, remoteUrl, language, filename }) {
   const db = await openDb();
   const item = { id: crypto.randomUUID(), kind, prompt, model, blob, createdAt: Date.now() };
   if (remoteUrl) item.remoteUrl = remoteUrl;
+  if (language) item.language = language;
+  if (filename) item.filename = filename;
   await putGalleryItem(item, db);
   await renderGallery();
   playSound("genComplete");
@@ -2995,6 +3272,8 @@ async function renderGalleryCard(item, index) {
 
   if (item.kind === "project") {
     card.append(await renderProjectViewer(item));
+  } else if (item.kind === "code") {
+    card.append(await renderCodeFileViewer(item));
   } else {
     const media = item.kind === "image" ? document.createElement("img")
       : item.kind === "video" ? document.createElement("video")
@@ -3012,7 +3291,7 @@ async function renderGalleryCard(item, index) {
 
   const caption = document.createElement("p");
   caption.className = "gallery-caption";
-  caption.textContent = `${item.kind} · ${item.model}`;
+  caption.textContent = item.kind === "code" ? `${item.filename || item.language || "code"} · ${item.model}` : `${item.kind} · ${item.model}`;
   const details = document.createElement("details");
   const summary = document.createElement("summary");
   summary.textContent = shortPrompt(item.prompt);
@@ -3025,12 +3304,12 @@ async function renderGalleryCard(item, index) {
   const link = document.createElement("a");
   link.className = "gallery-download";
   link.href = url;
-  link.download = `${item.kind}-${item.id}.${extensionFor(item.kind, item.blob.type)}`;
+  link.download = downloadNameFor(item);
   link.textContent = "Download";
   const useButton = document.createElement("button");
   useButton.className = "gallery-use";
   useButton.type = "button";
-  useButton.textContent = item.kind === "image" ? "Use as source" : item.kind === "project" ? "Show source on canvas" : "Show in canvas";
+  useButton.textContent = item.kind === "image" ? "Use as source" : (item.kind === "project" || item.kind === "code") ? "Show source on canvas" : "Show in canvas";
   useButton.addEventListener("click", () => addGalleryReference(item));
   const deleteButton = document.createElement("button");
   deleteButton.className = "gallery-delete";
@@ -3049,6 +3328,43 @@ async function renderGalleryCard(item, index) {
 // plain text by default and only execute on demand inside a sandboxed srcdoc
 // frame (no allow-same-origin => opaque origin: no access to this page, its
 // storage, the BYOP key, or cookies).
+// Non-HTML code file: read-only source view with copy (no run tab).
+async function renderCodeFileViewer(item) {
+  const code = await item.blob.text().catch(() => "");
+  const wrap = document.createElement("div");
+  wrap.className = "project-viewer";
+  const tabs = document.createElement("div");
+  tabs.className = "viewer-tabs";
+  const tag = document.createElement("span");
+  tag.className = "viewer-tab active";
+  tag.style.cursor = "default";
+  tag.textContent = item.filename || `${item.language || "code"} file`;
+  const copyBtn = document.createElement("button");
+  copyBtn.type = "button";
+  copyBtn.className = "viewer-copy";
+  copyBtn.textContent = "Copy";
+  copyBtn.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(code); copyBtn.textContent = "Copied"; setTimeout(() => (copyBtn.textContent = "Copy"), 1200); }
+    catch { copyBtn.textContent = "Copy failed"; }
+  });
+  tabs.append(tag, copyBtn);
+  const stage = document.createElement("div");
+  stage.className = "viewer-stage";
+  const pre = document.createElement("pre");
+  pre.className = "code-view";
+  const codeEl = document.createElement("code");
+  codeEl.textContent = code;
+  pre.append(codeEl);
+  stage.append(pre);
+  wrap.append(tabs, stage);
+  return wrap;
+}
+
+function downloadNameFor(item) {
+  if (item.kind === "code") return item.filename || `snippet-${item.id}.${(item.language && LANGUAGE_EXT[item.language]) || "txt"}`;
+  return `${item.kind}-${item.id}.${extensionFor(item.kind, item.blob.type)}`;
+}
+
 async function renderProjectViewer(item) {
   const code = await item.blob.text().catch(() => "");
   const wrap = document.createElement("div");
@@ -3105,13 +3421,13 @@ async function renderProjectViewer(item) {
 }
 
 async function addGalleryReference(item) {
-  if (item.kind === "project") {
+  if (item.kind === "project" || item.kind === "code") {
     const code = await item.blob.text().catch(() => "");
     showWorkspace({
       layout: "code",
-      title: "Project source",
+      title: item.kind === "code" ? (item.filename || "Code file") : "Project source",
       summary: shortPrompt(item.prompt),
-      language: "html",
+      language: item.kind === "code" ? (item.language || "text") : "html",
       content: code,
     });
     closeDrawers();
