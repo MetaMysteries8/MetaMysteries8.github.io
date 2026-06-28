@@ -7,21 +7,32 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <main class="shell">
-    <section class="hero panel">
-      <div class="hero-copy">
-        <p class="eyebrow">BYOP voice agent</p>
-        <h1>Talk naturally. Generate anything.</h1>
-        <p class="subcopy">Realtime conversations with <code>gpt-realtime-2</code>, or push-to-talk with your own text, speech, embedding, and media model choices.</p>
+  <main class="shell app-shell">
+    <header class="app-header panel">
+      <div class="brand">
+        <span class="brand-mark"></span>
+        <div>
+          <strong>VoiceEnable</strong>
+          <span>Realtime agent workspace</span>
+        </div>
       </div>
-      <div class="auth-card">
+
+      <nav class="app-nav" aria-label="Workspace menus">
+        <button class="nav-button" data-drawer="conversationDrawer">Chat</button>
+        <button class="nav-button" data-drawer="settingsDrawer">Models</button>
+        <button class="nav-button" data-drawer="galleryDrawer">Gallery</button>
+        <button class="nav-button" data-drawer="mcpDrawer">MCP</button>
+      </nav>
+
+      <div class="account-strip">
+        <span id="pollenBalance" class="balance-pill">Pollen --</span>
         <span id="authState" class="pill danger">Not connected</span>
-        <div id="keyHealth" class="key-health">Connect BYOP to check key status.</div>
         <button id="connectByop" class="button primary">Connect Pollen</button>
         <button id="clearKey" class="button ghost">Forget key</button>
-        <small>The publishable app key is static client code. Users approve BYOP and receive their own scoped key.</small>
       </div>
-    </section>
+
+      <div id="keyHealth" class="key-health">Connect BYOP to check key status.</div>
+    </header>
 
     <section class="stage panel">
       <div class="stage-topbar">
@@ -61,9 +72,11 @@
       <audio id="modelAudio" autoplay playsinline></audio>
     </section>
 
-    <section class="grid">
-      <aside class="panel settings">
+    <section id="settingsDrawer" class="drawer panel settings" aria-label="Model settings">
+      <div class="panel-head">
         <h2>Model Routing</h2>
+        <button class="button ghost small drawer-close" type="button">Close</button>
+      </div>
         <p id="modelStatus" class="model-status">Loading live model lists...</p>
         <label>Realtime model
           <input id="realtimeModel" value="gpt-realtime-2" disabled>
@@ -99,32 +112,39 @@
         <datalist id="imageModels"></datalist>
         <datalist id="audioModels"></datalist>
         <datalist id="embeddingModels"></datalist>
-      </aside>
+    </section>
 
-      <section class="panel transcript-panel">
+    <section id="conversationDrawer" class="drawer panel transcript-panel" aria-label="Conversation">
         <div class="panel-head">
           <h2>Conversation</h2>
-          <button id="clearConversation" class="button ghost small">Clear</button>
+          <div class="panel-actions">
+            <button id="clearConversation" class="button ghost small">Clear</button>
+            <button class="button ghost small drawer-close" type="button">Close</button>
+          </div>
         </div>
         <div id="transcript" class="transcript"></div>
         <form id="textForm" class="composer">
           <input id="textInput" placeholder="Type a fallback message or request an image/video/music...">
           <button class="button primary" type="submit">Send</button>
         </form>
-      </section>
     </section>
 
-    <section class="grid bottom-grid">
-      <section class="panel gallery-panel">
+    <section id="galleryDrawer" class="drawer panel gallery-panel" aria-label="Local gallery">
         <div class="panel-head">
           <h2>Local Gallery</h2>
-          <button id="clearGallery" class="button ghost small">Clear</button>
+          <div class="panel-actions">
+            <button id="clearGallery" class="button ghost small">Clear</button>
+            <button class="button ghost small drawer-close" type="button">Close</button>
+          </div>
         </div>
         <div id="gallery" class="gallery"></div>
-      </section>
+    </section>
 
-      <section class="panel mcp-panel">
+    <section id="mcpDrawer" class="drawer panel mcp-panel" aria-label="MCP servers">
+        <div class="panel-head">
         <h2>MCP Servers</h2>
+          <button class="button ghost small drawer-close" type="button">Close</button>
+        </div>
         <p>Browser builds can call HTTP MCP-compatible gateways. Stdio MCP servers need a local bridge.</p>
         <form id="mcpForm" class="mcp-form">
           <input id="mcpName" placeholder="Server name">
@@ -132,7 +152,6 @@
           <button class="button primary" type="submit">Add</button>
         </form>
         <div id="mcpList" class="mcp-list"></div>
-      </section>
     </section>
   </main>
 

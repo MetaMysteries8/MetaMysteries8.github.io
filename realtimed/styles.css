@@ -305,9 +305,11 @@ h2 { margin-bottom: 16px; }
 .mode.active { background: rgba(255, 255, 255, 0.12); color: var(--text); }
 
 .button {
+  position: relative;
   padding: 11px 16px;
   background: rgba(255, 255, 255, 0.1);
   border: 1px solid var(--line);
+  overflow: hidden;
 }
 
 .button.primary { background: linear-gradient(135deg, var(--cyan), var(--violet)); color: #070812; font-weight: 800; }
@@ -462,4 +464,210 @@ input:focus { border-color: rgba(77, 232, 255, 0.7); }
   .orb.docked { transform: translateY(-8%); }
   .controls { width: calc(100% - 28px); }
   .composer, .mcp-form { flex-direction: column; }
+}
+
+/* Minimal production app shell overrides */
+body { overflow: hidden; }
+
+.app-shell {
+  width: min(1440px, calc(100% - 24px));
+  height: 100vh;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 12px;
+  padding: 12px 0;
+}
+
+.app-header {
+  position: relative;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: minmax(190px, 1fr) auto minmax(290px, 1fr);
+  align-items: center;
+  gap: 14px;
+  padding: 10px 12px;
+  border-radius: 22px;
+  background: rgba(8, 10, 18, 0.72);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.brand-mark {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 25%, #fff, var(--cyan) 24%, var(--violet) 58%, transparent 72%);
+  box-shadow: 0 0 26px rgba(77, 232, 255, 0.48);
+}
+
+.brand strong { display: block; letter-spacing: -0.03em; }
+.brand span { display: block; color: var(--muted); font-size: 0.82rem; }
+
+.app-nav {
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.nav-button {
+  border: 0;
+  border-radius: 999px;
+  padding: 8px 12px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.nav-button.active,
+.nav-button:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.account-strip {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+
+.balance-pill {
+  position: relative;
+  padding: 8px 12px;
+  border-radius: 999px;
+  color: var(--text);
+  border: 1px solid rgba(141, 255, 180, 0.26);
+  background: rgba(141, 255, 180, 0.1);
+  font-size: 0.84rem;
+  overflow: hidden;
+}
+
+.balance-pill::after,
+.button.primary::after,
+.orb-core::after {
+  content: "";
+  position: absolute;
+  inset: -60% auto -60% -70%;
+  width: 44%;
+  transform: rotate(18deg);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.52), transparent);
+  animation: glimmer 5.4s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes glimmer {
+  0%, 58%, 100% { translate: 0 0; opacity: 0; }
+  68% { opacity: 0.85; }
+  82% { translate: 520% 0; opacity: 0; }
+}
+
+.app-header .key-health {
+  position: absolute;
+  right: 12px;
+  top: calc(100% + 8px);
+  max-width: 380px;
+  opacity: 0;
+  transform: translateY(-4px);
+  pointer-events: none;
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.app-header:hover .key-health,
+.app-header:focus-within .key-health {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.stage.panel {
+  min-height: 0;
+  height: 100%;
+  margin: 0;
+  border-radius: 30px;
+  grid-template-columns: minmax(240px, 0.62fr) minmax(360px, 1fr);
+  padding: 58px 28px 82px;
+  background:
+    radial-gradient(circle at 24% 42%, rgba(77, 232, 255, 0.15), transparent 24rem),
+    radial-gradient(circle at 74% 28%, rgba(255, 255, 255, 0.08), transparent 18rem),
+    rgba(8, 10, 18, 0.64);
+}
+
+.stage-topbar { top: 16px; }
+
+.workspace-mode {
+  border-color: rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.adaptive-workspace {
+  max-height: none;
+  height: 100%;
+  min-height: 0;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.orb { width: min(28vw, 300px); }
+.orb-core { overflow: hidden; }
+
+.controls {
+  bottom: 42px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(7, 8, 18, 0.76);
+  backdrop-filter: blur(18px);
+}
+
+.realtime-status { bottom: 16px; }
+
+.drawer {
+  position: fixed;
+  top: 84px;
+  right: max(12px, calc((100vw - min(1440px, calc(100vw - 24px))) / 2 + 12px));
+  bottom: 12px;
+  z-index: 30;
+  width: min(430px, calc(100vw - 24px));
+  display: flex;
+  flex-direction: column;
+  padding: 18px;
+  opacity: 0;
+  transform: translateX(20px) scale(0.985);
+  pointer-events: none;
+  transition: opacity 180ms ease, transform 180ms ease;
+  overflow: hidden;
+}
+
+.drawer.active {
+  opacity: 1;
+  transform: translateX(0) scale(1);
+  pointer-events: auto;
+}
+
+.drawer .transcript,
+.drawer .gallery,
+.drawer .mcp-list {
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
+}
+
+.drawer.settings { overflow: auto; }
+.drawer .composer { margin-top: auto; }
+.panel-actions { display: flex; gap: 8px; }
+
+@media (max-width: 920px) {
+  body { overflow: auto; }
+  .app-shell { height: auto; min-height: 100vh; }
+  .app-header { grid-template-columns: 1fr; }
+  .app-nav, .account-strip { justify-content: flex-start; flex-wrap: wrap; }
+  .stage.panel { grid-template-columns: 1fr; min-height: 760px; height: auto; }
+  .orb { width: min(64vw, 280px); }
+  .drawer { top: 12px; left: 12px; right: 12px; width: auto; }
 }

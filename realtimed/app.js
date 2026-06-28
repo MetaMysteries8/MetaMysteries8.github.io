@@ -8,6 +8,7 @@ const state = {
   mode: "realtime",
   realtime: null,
   realtimeHealthTimer: null,
+  balanceTimer: null,
   mediaRecorder: null,
   chunks: [],
   stoppingRealtime: false,
@@ -19,6 +20,7 @@ const state = {
 const el = {
   authState: document.querySelector("#authState"),
   keyHealth: document.querySelector("#keyHealth"),
+  pollenBalance: document.querySelector("#pollenBalance"),
   connectByop: document.querySelector("#connectByop"),
   clearKey: document.querySelector("#clearKey"),
   modeRealtime: document.querySelector("#modeRealtime"),
@@ -44,6 +46,8 @@ const el = {
   mcpUrl: document.querySelector("#mcpUrl"),
   mcpList: document.querySelector("#mcpList"),
   modelStatus: document.querySelector("#modelStatus"),
+  navButtons: document.querySelectorAll(".nav-button"),
+  drawerCloses: document.querySelectorAll(".drawer-close"),
 };
 
 const fields = [
@@ -69,6 +73,7 @@ function init() {
   renderGallery();
   loadLiveModels();
   checkKeyHealth();
+  startBalancePolling();
 }
 
 function bindEvents() {
@@ -83,6 +88,8 @@ function bindEvents() {
   el.clearWorkspace.addEventListener("click", clearWorkspace);
   el.clearGallery.addEventListener("click", clearGallery);
   el.mcpForm.addEventListener("submit", addMcpServer);
+  el.navButtons.forEach((button) => button.addEventListener("click", () => openDrawer(button.dataset.drawer)));
+  el.drawerCloses.forEach((button) => button.addEventListener("click", closeDrawers));
   fields.forEach((id) => document.querySelector(`#${id}`).addEventListener("change", saveSettings));
 }
 
@@ -96,6 +103,7 @@ function captureByopReturn() {
     history.replaceState(null, "", location.pathname + location.search);
     addMessage("system", "Connected with your BYOP key. You can revoke it from the Pollinations dashboard.");
     checkKeyHealth();
+    startBalancePolling();
   } else if (error) {
     addMessage("system", `BYOP authorization failed: ${error}`);
   }
@@ -155,13 +163,27 @@ function fillDatalist(id, names) {
 function clearApiKey() {
   state.apiKey = "";
   localStorage.removeItem("pollinations_api_key");
+  stopBalancePolling();
   renderAuth();
 }
 
 function renderAuth() {
   el.authState.textContent = state.apiKey ? "Connected" : "Not connected";
   el.authState.classList.toggle("danger", !state.apiKey);
-  if (!state.apiKey) setKeyHealth("Connect BYOP to check key status.", "idle");
+  if (!state.apiKey) {
+    setKeyHealth("Connect BYOP to check key status.", "idle");
+    setBalanceText("Pollen --");
+  }
+}
+
+function openDrawer(id) {
+  document.querySelectorAll(".drawer").forEach((drawer) => drawer.classList.toggle("active", drawer.id === id));
+  el.navButtons.forEach((button) => button.classList.toggle("active", button.dataset.drawer === id));
+}
+
+function closeDrawers() {
+  document.querySelectorAll(".drawer").forEach((drawer) => drawer.classList.remove("active"));
+  el.navButtons.forEach((button) => button.classList.remove("active"));
 }
 
 async function checkKeyHealth() {
@@ -179,7 +201,31 @@ async function checkKeyHealth() {
   const balance = balanceResult.status === "fulfilled" ? balanceResult.value : null;
   const keyType = key.type || key.keyType || (state.apiKey.startsWith("sk_") ? "user key" : "publishable");
   const balanceText = formatBalance(balance);
+  if (balanceText) setBalanceText(balanceText);
   setKeyHealth(`Key valid: ${keyType}${balanceText ? ` / ${balanceText}` : ""}.`, "healthy");
+}
+
+function startBalancePolling() {
+  if (!state.apiKey) return;
+  stopBalancePolling();
+  refreshBalance();
+  state.balanceTimer = setInterval(refreshBalance, 15000);
+}
+
+function stopBalancePolling() {
+  clearInterval(state.balanceTimer);
+  state.balanceTimer = null;
+}
+
+async function refreshBalance() {
+  if (!state.apiKey) return;
+  try {
+    const balance = await fetchAccountJson("/account/balance");
+    const text = formatBalance(balance);
+    if (text) setBalanceText(text);
+  } catch (error) {
+    setBalanceText("Pollen unavailable");
+  }
 }
 
 async function fetchAccountJson(path) {
@@ -193,6 +239,10 @@ function formatBalance(balance) {
   const amount = balance.balance ?? balance.pollen ?? balance.remaining ?? balance.amount;
   if (amount === undefined || amount === null) return "";
   return `${amount} pollen`;
+}
+
+function setBalanceText(text) {
+  el.pollenBalance.textContent = text;
 }
 
 function setKeyHealth(text, stateName) {
@@ -344,6 +394,7 @@ function stopRealtime() {
 function handleRealtimeClose(event) {
   const wasManual = state.stoppingRealtime;
   cleanupRealtime();
+  refreshBalance();
   if (wasManual || event.code === 1000) {
     setRealtimeStatus("Realtime idle", "idle");
     return;
@@ -505,6 +556,7 @@ async function generateMedia(kind, prompt, model, toolId) {
   const res = await fetch(url, { headers: authHeaders() });
   if (!res.ok) return failResponse(res, `${kind} generation failed.`);
   const blob = await res.blob();
+  refreshBalance();
   const item = await saveGalleryItem({ kind, prompt, model, blob });
   hideGeneration(`${capitalize(kind)} complete and saved to your local gallery.`);
   return { ok: true, galleryId: item.id, kind, prompt, model };
@@ -582,7 +634,9 @@ async function postJson(path, body) {
     body: JSON.stringify(body),
   });
   if (!res.ok) return failResponse(res, "Request failed.");
-  return res.json();
+  const json = await res.json();
+  refreshBalance();
+  return json;
 }
 
 function authHeaders() {
