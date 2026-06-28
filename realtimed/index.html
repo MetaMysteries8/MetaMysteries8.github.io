@@ -26,6 +26,7 @@
         <button class="nav-button" data-drawer="conversationDrawer">Chat</button>
         <button class="nav-button" data-drawer="settingsDrawer">Models</button>
         <button class="nav-button" data-drawer="galleryDrawer">Gallery</button>
+        <button class="nav-button" data-drawer="widgetsDrawer">Widgets</button>
         <button class="nav-button" data-drawer="mcpDrawer">MCP</button>
       </nav>
 
@@ -47,10 +48,7 @@
       </div>
 
       <div id="mediaDock" class="media-dock hidden">
-        <div id="generationCard" class="generating-card image-loader">
-          <div id="generationVisual" class="generation-visual image-visual" aria-hidden="true"></div>
-          <p id="generationStatus">Preparing generation...</p>
-        </div>
+        <div id="genDock" class="gen-dock" aria-live="polite"></div>
       </div>
 
       <div id="orb" class="orb idle" aria-label="Voice visualizer">
@@ -91,6 +89,13 @@
         <label>Web search model
           <select id="searchModel"><option>gemini-search</option></select>
         </label>
+        <div class="memory-block">
+          <div class="memory-head">
+            <span>Long-term memory</span>
+            <button id="clearMemory" class="button ghost small" type="button">Forget all</button>
+          </div>
+          <div id="memoryList" class="memory-list"></div>
+        </div>
         <label>Theme
           <select id="themePreset">
             <option value="aurora">Aurora</option>
@@ -133,7 +138,7 @@
           <select id="sttModel"><option>whisper</option></select>
         </label>
         <label>Push2Talk TTS model
-          <select id="ttsModel"><option>openai-audio</option></select>
+          <select id="ttsModel"><option>elevenflash</option></select>
         </label>
         <label>Push2Talk TTS voice
           <select id="ttsVoice">
@@ -202,6 +207,18 @@
           </div>
         </div>
         <div id="gallery" class="gallery"></div>
+    </section>
+
+    <section id="widgetsDrawer" class="drawer panel widgets-panel" aria-label="Saved widgets">
+        <div class="panel-head">
+          <h2>Saved Widgets</h2>
+          <div class="panel-actions">
+            <button id="clearWidgets" class="button ghost small">Clear</button>
+            <button class="button ghost small drawer-close" type="button">Close</button>
+          </div>
+        </div>
+        <p class="drawer-hint">Widgets you save keep their own stored data and can be reopened on the canvas anytime. Ask the agent to build or edit one.</p>
+        <div id="widgetList" class="widget-list"></div>
     </section>
 
     <section id="mcpDrawer" class="drawer panel mcp-panel" aria-label="MCP servers">

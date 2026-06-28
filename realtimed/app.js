@@ -20,16 +20,35 @@ const CODER_SYSTEM_PROMPT = [
   "ALWAYS: never invent or hardcode secret API keys or credentials; use clearly named placeholders.",
 ].join("\n");
 
-const WIDGET_SYSTEM_PROMPT = [
-  "You build ONE small, self-contained, interactive HTML widget that gets embedded in a card inside a dark, glassy web app.",
-  "Output exactly one complete HTML document inside a single ```html code block, then nothing else.",
+const WIDGET_GUIDE = [
   "Rules:",
   "- Inline ALL CSS and JS. No external files, imports, CDNs, fonts, or network requests.",
   "- Transparent or dark background; light text (#f4f6ff-ish); use system-ui font. The host card is dark.",
-  "- Be fluid and bounded: fill 100% width, never exceed it; keep height ~220-320px; use box-sizing:border-box and avoid fixed pixel widths.",
-  "- Make it genuinely interactive and useful for the spec (controls, canvas, calculations, live updates).",
-  "- If given JSON data, use it directly.",
+  "- Be fluid and bounded: fill 100% width, never exceed it; keep height ~240-420px (scrolls if taller); use box-sizing:border-box and avoid fixed pixel widths.",
+  "- Make it genuinely interactive and useful for the spec (controls, canvas, calculations, live editing).",
   "- No secret keys, no alert() spam, no infinite loops.",
+  "",
+  "PERSISTENT STORAGE — the host injects a global `WidgetStore` you SHOULD use so the user's data survives reloads, saving, and downloading:",
+  "  WidgetStore.load()        -> returns the previously saved data object (or null on first run). Restore your UI from it on startup.",
+  "  WidgetStore.save(obj)     -> persist the current data object. Call it whenever the user edits something (e.g. a spreadsheet cell, a list, settings).",
+  "  WidgetStore.requestDownload() -> ask the host to download this widget as a standalone file.",
+  "Build data-backed tools (spreadsheets, trackers, note pads, editors) on top of WidgetStore so nothing is lost.",
+  "",
+  "MEDIA ASSETS — `WidgetStore.assets` is an array of the gallery items the user attached: each is { kind:'image'|'video'|'audio', name, prompt, url }.",
+  "Use `item.url` directly as the src of <img>/<video>/<audio>. The urls are self-contained (data URLs) so they keep working after download.",
+].join("\n");
+
+const WIDGET_SYSTEM_PROMPT = [
+  "You build ONE small, self-contained, interactive HTML widget/mini-app that gets embedded in a card inside a dark, glassy web app.",
+  "Output exactly one complete HTML document inside a single ```html code block, then nothing else.",
+  WIDGET_GUIDE,
+].join("\n");
+
+const WIDGET_EDIT_SYSTEM_PROMPT = [
+  "You are editing an EXISTING self-contained HTML widget/mini-app. You will be given its current full document and a change request.",
+  "Apply the requested changes and return the COMPLETE updated document inside a single ```html code block, then nothing else.",
+  "Preserve everything that still works; only change what the request implies. Keep using the injected WidgetStore for persistence (do not remove saved-data handling).",
+  WIDGET_GUIDE,
 ].join("\n");
 
 const state = {
@@ -43,13 +62,35 @@ const state = {
   chunks: [],
   generationActive: 0,
   generationQueue: [],
+  genJobs: [],
   modelMeta: { text: [], image: [], audio: [], embeddings: [] },
   stoppingRealtime: false,
   messages: JSON.parse(localStorage.getItem("conversation") || "[]"),
+  memory: JSON.parse(localStorage.getItem("agent_memory") || "[]"),
   workspace: JSON.parse(localStorage.getItem("workspace") || "[]"),
   settings: JSON.parse(localStorage.getItem("settings") || "{}"),
   mcps: JSON.parse(localStorage.getItem("mcp_servers") || "[]"),
+  flags: JSON.parse(localStorage.getItem("feature_flags") || "{}"),
+  camera: null,
 };
+
+// Feature toggles surfaced in the Config panel. Defaults chosen so the app works
+// out of the box; the user can disable any of them.
+const FLAG_DEFAULTS = {
+  endConversation: true,   // let the agent stop the session when the user asks
+  voiceInterrupt: true,    // barge-in: user speech cuts off the model in realtime
+  autosaveUploads: true,   // uploaded images land in the gallery automatically
+  camera: false,           // allow attaching live camera frames in realtime
+};
+
+function flag(name) {
+  return state.flags[name] ?? FLAG_DEFAULTS[name] ?? false;
+}
+
+function setFlag(name, value) {
+  state.flags[name] = !!value;
+  localStorage.setItem("feature_flags", JSON.stringify(state.flags));
+}
 
 const el = {
   authState: document.querySelector("#authState"),
@@ -64,9 +105,7 @@ const el = {
   stopAction: document.querySelector("#stopAction"),
   orb: document.querySelector("#orb"),
   mediaDock: document.querySelector("#mediaDock"),
-  generationCard: document.querySelector("#generationCard"),
-  generationVisual: document.querySelector("#generationVisual"),
-  generationStatus: document.querySelector("#generationStatus"),
+  genDock: document.querySelector("#genDock"),
   realtimeStatus: document.querySelector("#realtimeStatus"),
   modelAudio: document.querySelector("#modelAudio"),
   transcript: document.querySelector("#transcript"),
@@ -85,6 +124,10 @@ const el = {
   modelStatus: document.querySelector("#modelStatus"),
   soundToggle: document.querySelector("#soundToggle"),
   soundVolume: document.querySelector("#soundVolume"),
+  memoryList: document.querySelector("#memoryList"),
+  clearMemory: document.querySelector("#clearMemory"),
+  widgetList: document.querySelector("#widgetList"),
+  clearWidgets: document.querySelector("#clearWidgets"),
   navButtons: document.querySelectorAll(".nav-button"),
   drawerCloses: document.querySelectorAll(".drawer-close"),
 };
@@ -251,7 +294,9 @@ function init() {
   renderMessages();
   renderWorkspace();
   renderMcpServers();
+  renderMemory();
   renderGallery();
+  renderSavedWidgets();
   loadLiveModels();
   checkKeyHealth();
   startBalancePolling();
@@ -274,6 +319,9 @@ function bindEvents() {
   el.soundToggle.addEventListener("click", () => setSoundMuted(!sound.muted));
   el.soundVolume.value = String(Math.round(sound.volume * 100));
   el.soundVolume.addEventListener("input", () => setSoundVolume(Number(el.soundVolume.value) / 100));
+  el.clearMemory.addEventListener("click", () => forgetMemory({ all: true }));
+  el.clearWidgets?.addEventListener("click", clearSavedWidgets);
+  window.addEventListener("message", handleWidgetMessage);
   el.navButtons.forEach((button) => button.addEventListener("click", () => toggleDrawer(button.dataset.drawer)));
   el.drawerCloses.forEach((button) => button.addEventListener("click", closeDrawers));
   el.scrim = document.createElement("div");
@@ -328,10 +376,18 @@ async function loadLiveModels() {
   fillSelect("coderModel", text.map(modelName), "qwen-coder");
   fillSelect("imageModel", imageModelsOnly().map(modelName), "flux");
   fillSelect("videoModel", videoModelsOnly().map(modelName), "ltx-2");
-  fillSelect("audioModel", audio.map(modelName), "elevenmusic");
-  fillSelect("ttsModel", audio.map(modelName), "openai-audio");
-  fillSelect("sttModel", audio.map(modelName), "whisper");
+  const tts = ttsModelsOnly();
+  const music = musicModelsOnly();
+  const stt = sttModelsOnly();
+  fillSelect("audioModel", music.map(modelName), defaultModelName(music, "elevenmusic"));
+  fillSelect("ttsModel", tts.map(modelName), defaultModelName(tts, "elevenflash", "qwen-tts", "elevenlabs"));
+  fillSelect("sttModel", stt.map(modelName), defaultModelName(stt, "whisper"));
   fillSelect("embeddingModel", embeddings.map(modelName), "openai-3-small");
+  // A previously-saved invalid audio model (e.g. the old "openai-audio") breaks
+  // TTS/music; force the selection back to a real model from the live list.
+  coerceSelect("audioModel", music, defaultModelName(music, "elevenmusic"));
+  coerceSelect("ttsModel", tts, defaultModelName(tts, "elevenflash", "qwen-tts", "elevenlabs"));
+  coerceSelect("sttModel", stt, defaultModelName(stt, "whisper"));
   const loaded = [text, image, audio, embeddings].filter((items) => items.length).length;
   el.modelStatus.textContent = loaded
     ? `Loaded live model dropdowns from ${loaded}/4 Pollinations model endpoints.`
@@ -366,6 +422,53 @@ function searchModelsOnly() {
   const list = state.modelMeta.text || [];
   const search = list.filter((model) => model?.capabilities?.web_search || /search|perplexity/i.test(modelName(model) || ""));
   return search.length ? search : list;
+}
+
+// Split the live audio model list by role. TTS models carry a voice list (or a
+// speech-y name); music/sfx and speech-to-text are matched by name. This is what
+// fixes TTS picking a non-existent model like the old hardcoded "openai-audio".
+function audioModelsByKind() {
+  const list = state.modelMeta.audio || [];
+  const tts = [];
+  const music = [];
+  const stt = [];
+  for (const model of list) {
+    const name = (modelName(model) || "").toLowerCase();
+    const voices = model.voices || model.supported_voices || model.supportedVoices || model.voice;
+    const hasVoices = Array.isArray(voices) ? voices.length > 0 : Boolean(voices);
+    if (/whisper|scribe|universal|transcri|\bstt\b/.test(name)) stt.push(model);
+    else if (/music|acestep|stable-audio|sfx|song|sound-?effect/.test(name)) music.push(model);
+    else if (hasVoices || /tts|eleven|qwen-tts|speech|voice|narrat/.test(name)) tts.push(model);
+    else music.push(model);
+  }
+  return { tts, music, stt };
+}
+
+function ttsModelsOnly() { return audioModelsByKind().tts; }
+function musicModelsOnly() { return audioModelsByKind().music; }
+function sttModelsOnly() { return audioModelsByKind().stt; }
+
+function defaultModelName(list, ...preferred) {
+  const names = list.map(modelName).filter(Boolean);
+  for (const name of preferred) if (names.includes(name)) return name;
+  return names[0] || preferred[0];
+}
+
+function ttsModelName() {
+  const current = value("ttsModel");
+  const names = ttsModelsOnly().map(modelName);
+  if (names.length && !names.includes(current)) return defaultModelName(ttsModelsOnly(), "elevenflash", "qwen-tts", "elevenlabs");
+  return current || "elevenflash";
+}
+
+// Force a select onto a valid live model when its saved value isn't real anymore.
+function coerceSelect(id, liveList, fallback) {
+  if (!liveList.length) return;
+  const names = liveList.map(modelName);
+  const select = document.querySelector(`#${id}`);
+  if (!select || names.includes(select.value)) return;
+  select.value = names.includes(fallback) ? fallback : names[0];
+  saveSettings();
 }
 
 function searchModel() {
@@ -588,10 +691,13 @@ async function startRealtime() {
   const processor = audioContext.createScriptProcessor(4096, 1, 1);
   const mutedMonitor = audioContext.createGain();
   mutedMonitor.gain.value = 0;
+  const analyser = makeOrbAnalyser(audioContext);
+  source.connect(analyser); // mic drives the orb while listening
   const socket = new WebSocket(`${GEN_BASE.replace("https", "wss")}/v1/realtime?model=${REALTIME_MODEL}&key=${encodeURIComponent(state.apiKey)}`);
 
-  state.realtime = { socket, stream, audioContext, processor, output, mutedMonitor, nextStart: audioContext.currentTime, gotSession: false, gotAudio: false, retriedWithoutVoice: false };
+  state.realtime = { socket, stream, audioContext, processor, output, mutedMonitor, analyser, nextStart: audioContext.currentTime, gotSession: false, gotAudio: false, retriedWithoutVoice: false };
   setOrb("listening");
+  startOrbViz(analyser);
   el.mainAction.textContent = "Stop realtime";
   setRealtimeStatus("Opening realtime socket...", "live");
 
@@ -669,6 +775,7 @@ function playPcmDelta(base64) {
   const source = rt.audioContext.createBufferSource();
   source.buffer = buffer;
   source.connect(rt.output);
+  if (rt.analyser) source.connect(rt.analyser); // model voice drives the orb while speaking
   rt.nextStart = Math.max(rt.nextStart, rt.audioContext.currentTime);
   source.start(rt.nextStart);
   rt.nextStart += buffer.duration;
@@ -713,6 +820,7 @@ function cleanupRealtime() {
   state.realtime = null;
   state.stoppingRealtime = false;
   el.mainAction.textContent = "Start realtime";
+  stopOrbViz();
   setOrb("idle");
 }
 
@@ -730,6 +838,13 @@ async function startPushRecording() {
   state.mediaRecorder.ondataavailable = (event) => event.data.size && state.chunks.push(event.data);
   state.mediaRecorder.onstop = () => finishPushRecording(stream);
   state.mediaRecorder.start();
+  try {
+    const vizCtx = new AudioContext();
+    const analyser = makeOrbAnalyser(vizCtx);
+    vizCtx.createMediaStreamSource(stream).connect(analyser);
+    state.pushViz = vizCtx;
+    startOrbViz(analyser);
+  } catch { /* visualizer is optional */ }
   setOrb("listening");
   el.mainAction.textContent = "Stop recording";
   playSound("convoStart");
@@ -741,6 +856,9 @@ function stopPushRecording() {
 
 async function finishPushRecording(stream) {
   stream.getTracks().forEach((track) => track.stop());
+  stopOrbViz();
+  state.pushViz?.close?.().catch(() => {});
+  state.pushViz = null;
   setOrb("idle");
   el.mainAction.textContent = "Hold to talk";
   const blob = new Blob(state.chunks, { type: state.mediaRecorder.mimeType || "audio/webm" });
@@ -814,12 +932,25 @@ async function handleToolCalls(messages, assistantMessage, speak) {
 }
 
 async function speakText(text) {
-  const res = await fetch(`${GEN_BASE}/v1/audio/speech`, {
-    method: "POST",
-    headers: { ...authHeaders(), "Content-Type": "application/json" },
-    body: JSON.stringify({ model: value("ttsModel") || "openai-audio", voice: value("ttsVoice") || "nova", input: text }),
-  });
-  if (!res.ok) return;
+  const model = ttsModelName();
+  const voice = value("ttsVoice") || "nova";
+  let res;
+  try {
+    res = await fetch(`${GEN_BASE}/v1/audio/speech`, {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ model, voice, input: text, response_format: "mp3" }),
+    });
+  } catch (error) {
+    addMessage("system", `Text-to-speech network error: ${error.message || error}`);
+    return;
+  }
+  if (!res.ok) {
+    const detail = (await res.text().catch(() => "")).slice(0, 160);
+    addMessage("system", `Text-to-speech failed with ${model} (${res.status}). ${detail} — try another TTS model in Config.`);
+    playSound("error");
+    return;
+  }
   const blob = await res.blob();
   el.modelAudio.srcObject = null;
   el.modelAudio.src = URL.createObjectURL(blob);
@@ -834,18 +965,24 @@ async function runTool(name, args, realtimeCallId) {
     else if (name === "create_video") result = await generateMedia("video", args.prompt, value("videoModel"), toolId, args);
     else if (name === "create_audio") {
       const audioKind = detectLoaderKind("audio", args.prompt, "");
-      const model = audioKind === "tts" ? value("ttsModel") : value("audioModel");
+      const model = audioKind === "tts" ? ttsModelName() : value("audioModel");
       result = await generateMedia("audio", args.prompt, model, toolId, args);
     }
     else if (name === "web_search") result = await webSearch(args.query || args.q || args.prompt || "", toolId);
     else if (name === "build_widget") result = await buildWidget(args, toolId);
+    else if (name === "edit_widget") result = await editWidget(args, toolId);
+    else if (name === "save_widget") result = await saveWidgetTool(args);
+    else if (name === "end_conversation") result = endConversationTool();
     else if (name === "ask_coder_model") result = await askCoder(args.task || args.prompt || "", toolId);
     else if (name === "call_mcp_server") result = await callMcp(args.server, args.tool, args.arguments || {}, toolId);
     else if (name === "start_gibberlink") result = await activateGibberlink(args.message || "");
     else if (name === "show_workspace") result = showWorkspace(args, toolId);
     else if (name === "request_source_images") result = requestSourceImages(args, toolId);
     else if (name === "remove_workspace") result = removeWorkspace(args, toolId);
+    else if (name === "remember") result = rememberFact(args);
+    else if (name === "forget") result = forgetMemory(args);
     else if (name === "list_gallery") result = await listGalleryForAgent();
+    else if (name === "manage_gallery") result = await manageGallery(args, toolId);
     else if (name === "use_gallery_sources") result = await useGallerySources(args, toolId);
     // Models often spell the tool differently (jibberlink, gibber_link, start_jibber...).
     else if (/[gj]ibber.?link|[gj]ibber/i.test(name)) result = await activateGibberlink(args.message || args.text || "");
@@ -867,11 +1004,16 @@ async function runTool(name, args, realtimeCallId) {
 
 async function generateMedia(kind, prompt, model, toolId, options = {}) {
   const count = generationCount(kind, options);
+  const loaderKind = detectLoaderKind(kind, prompt, model);
   const jobs = [];
   for (let index = 0; index < count; index += 1) {
+    // Every item starts as a queued tile; the queue pump flips it to active when
+    // a slot frees, so concurrent tiles tile/shrink and waiting ones stay grey.
+    const label = count > 1 ? `${labelForKind(loaderKind)} ${index + 1}/${count}` : labelForKind(loaderKind);
+    const jobId = genJobStart({ kind: loaderKind, title: label, status: "queued", detail: "Queued…" });
     const position = state.generationQueue.length + Math.max(0, state.generationActive - 1);
     if (state.generationActive >= 2) updateToolEvent(toolId, "queued", `Queued behind ${position} generation${position === 1 ? "" : "s"}.`);
-    jobs.push(enqueueGeneration(() => runMediaGeneration(kind, prompt, model, toolId, { ...options, batchIndex: index, batchCount: count })));
+    jobs.push(enqueueGeneration(() => runMediaGeneration(kind, prompt, model, toolId, { ...options, batchIndex: index, batchCount: count, jobId })));
   }
   const results = await Promise.all(jobs);
   if (count === 1) return results[0];
@@ -908,6 +1050,9 @@ function pumpGenerationQueue() {
 }
 
 async function runMediaGeneration(kind, prompt, model, toolId, options = {}) {
+  // A tile may already exist (created queued by generateMedia); otherwise make one
+  // so direct callers (source-image form) still get dock feedback.
+  let jobId = options.jobId;
   if (kind === "audio" && detectLoaderKind(kind, prompt, model) === "tts") prompt = cleanTtsPrompt(prompt);
   if ((kind === "image" || kind === "video") && options.images?.length && !supportsImageInput(model)) {
     const replacement = sourceCapableModel(kind);
@@ -918,23 +1063,28 @@ async function runMediaGeneration(kind, prompt, model, toolId, options = {}) {
       const message = `No available ${kind} model supports source/reference images, so the ${kind === "video" ? "image-to-video" : "image edit"} was skipped. Pick a ${kind} model that supports reference images.`;
       addMessage("system", message);
       playSound("error");
+      if (jobId) genJobEnd(jobId, "No source-capable model.");
       return { error: message };
     }
   }
-  const label = kind === "video" ? "video generation" : `${kind} generation`;
   const loaderKind = detectLoaderKind(kind, prompt, model);
-  showGeneration(loaderKind, `Getting started on your ${label} now. When complete, it will be added to your local gallery.`);
+  if (jobId) genJobActivate(jobId, { kind: loaderKind, detail: `Generating with ${model}…` });
+  else jobId = genJobStart({ kind: loaderKind, title: labelForKind(loaderKind), status: "active", detail: `Generating with ${model}…` });
   updateToolEvent(toolId, "running", `Generating ${kind} with ${model}.`);
   const path = kind === "image" ? `/image/${encodeURIComponent(prompt)}` : kind === "video" ? `/video/${encodeURIComponent(prompt)}` : `/audio/${encodeURIComponent(prompt)}`;
   const params = mediaParams(kind, loaderKind, model, options);
   params.set("key", state.apiKey);
   const url = `${GEN_BASE}${path}?${params}`;
   const res = await fetch(url, { headers: authHeaders() });
-  if (!res.ok) return failResponse(res, `${kind} generation failed.`);
+  if (!res.ok) {
+    const failure = await failResponse(res, `${kind} generation failed.`);
+    if (jobId) genJobEnd(jobId, "Generation failed.");
+    return failure;
+  }
   const blob = await res.blob();
   refreshBalance();
   const item = await saveGalleryItem({ kind, prompt, model, blob, remoteUrl: res.url });
-  hideGeneration(`${capitalize(kind)} complete and saved to your local gallery.`);
+  if (jobId) genJobEnd(jobId, `${capitalize(kind)} saved to gallery.`);
   return { ok: true, galleryId: item.id, kind, prompt, model };
 }
 
@@ -989,8 +1139,8 @@ async function askCoder(task, toolId) {
     return { error: "No coding task was provided." };
   }
   updateToolEvent(toolId, "running", `Asking ${model} to work on the coding task.`);
-  startLoop(); // matched by the hideGeneration() in every path below
-  showCoderTerminal([`$ coder-model --model ${model}`, "Booting coding worker...", `Task: ${task.slice(0, 180)}`]);
+  const jobId = genJobStart({ kind: "terminal", title: "Coder", status: "active" });
+  genJobTerminal(jobId, [`$ coder-model --model ${model}`, "Booting coding worker...", `Task: ${task.slice(0, 180)}`], false);
   const result = await postJson("/v1/chat/completions", {
     model,
     messages: [
@@ -999,25 +1149,25 @@ async function askCoder(task, toolId) {
     ],
   });
   if (result?.error) {
-    showCoderTerminal(["Coder request failed.", result.error], true);
-    hideGeneration("Coder model request failed.");
+    genJobTerminal(jobId, ["Coder request failed.", result.error], true);
+    genJobEnd(jobId, "Coder request failed.");
     return { error: result.error };
   }
   const answer = result?.choices?.[0]?.message?.content || "";
   if (!answer) {
-    showCoderTerminal(["No response returned from coder model."], true);
-    hideGeneration("Coder model returned no content.");
+    genJobTerminal(jobId, ["No response returned from coder model."], true);
+    genJobEnd(jobId, "Coder returned no content.");
     return { error: "Coder model returned no content." };
   }
   const html = extractHtmlProject(answer);
   if (html) {
     const item = await saveGalleryItem({ kind: "project", prompt: task, model, blob: new Blob([html], { type: "text/html" }) });
-    showCoderTerminal(["HTML project detected.", "Saved a runnable project to your gallery.", "Open the Gallery to run or download it."], true);
-    hideGeneration("Project saved to your local gallery.");
+    genJobTerminal(jobId, ["HTML project detected.", "Saved a runnable project to your gallery.", "Open the Gallery to run or download it."], true);
+    genJobEnd(jobId, "Project saved to gallery.");
     return { answer: summarizeCoderAnswer(answer), projectGalleryId: item.id };
   }
-  showCoderTerminal(["Coder response received.", "Returned guidance without a runnable HTML document."], true);
-  hideGeneration("Coder model returned guidance.");
+  genJobTerminal(jobId, ["Coder response received.", "Returned guidance without a runnable HTML document."], true);
+  genJobEnd(jobId, "Coder returned guidance.");
   return { answer };
 }
 
@@ -1026,7 +1176,7 @@ async function webSearch(query, toolId) {
   if (!query) return { error: "No search query was provided." };
   const model = searchModel();
   updateToolEvent(toolId, "running", `Searching the web with ${model} for "${query.slice(0, 80)}".`);
-  showGeneration("search", `Searching the web for "${query.slice(0, 80)}".`);
+  const jobId = genJobStart({ kind: "search", title: "Web search", status: "active", detail: `Searching “${query.slice(0, 42)}”…` });
   const result = await postJson("/v1/chat/completions", {
     model,
     messages: [
@@ -1035,17 +1185,15 @@ async function webSearch(query, toolId) {
     ],
   });
   if (result?.error) {
-    // postJson's failResponse already hid the dock for HTTP errors; only network
-    // errors slip through without hiding (they carry a "Network error" message).
-    if (/^Network error/.test(result.error)) hideGeneration("Search failed.");
+    genJobEnd(jobId, "Search failed.");
     return { error: result.error };
   }
   const answer = result?.choices?.[0]?.message?.content?.trim();
   if (!answer) {
-    hideGeneration("Search returned no result.");
+    genJobEnd(jobId, "No results.");
     return { error: "Search returned no result." };
   }
-  hideGeneration("Search complete.");
+  genJobEnd(jobId, "Search complete.");
   return { query, model, answer };
 }
 
@@ -1055,10 +1203,12 @@ async function buildWidget(args, toolId) {
   const title = args.title || "Custom widget";
   const model = value("coderModel");
   updateToolEvent(toolId, "running", `Building widget "${title}" with ${model}.`);
-  showCoderTerminal([`$ widget-builder --model ${model}`, "Designing interactive widget...", `Spec: ${spec.slice(0, 160)}`]);
-  startLoop(); // matched by hideGeneration() in every path below
+  const jobId = genJobStart({ kind: "widget", title: "Widget", status: "active" });
+  genJobTerminal(jobId, [`$ widget-builder --model ${model}`, "Designing interactive widget...", `Spec: ${spec.slice(0, 160)}`], false);
+  const assets = await galleryAssetsFromIds(args.galleryIds || args.sources || []);
   const userParts = [spec];
   if (args.data !== undefined) userParts.push(`\n\nUse this JSON data:\n${JSON.stringify(args.data).slice(0, 6000)}`);
+  if (assets.length) userParts.push(`\n\nWidgetStore.assets contains ${assets.length} attached gallery item(s): ${assets.map((a, i) => `[${i}] ${a.kind} "${a.name}"`).join(", ")}. Reference them via WidgetStore.assets[i].url.`);
   const result = await postJson("/v1/chat/completions", {
     model,
     messages: [
@@ -1067,20 +1217,115 @@ async function buildWidget(args, toolId) {
     ],
   });
   if (result?.error) {
-    showCoderTerminal(["Widget build failed.", result.error], true);
-    hideGeneration("Widget build failed.");
+    genJobTerminal(jobId, ["Widget build failed.", result.error], true);
+    genJobEnd(jobId, "Widget build failed.");
     return { error: result.error };
   }
   const html = extractHtmlProject(result?.choices?.[0]?.message?.content || "");
   if (!html) {
-    showCoderTerminal(["Coder did not return a widget document."], true);
-    hideGeneration("Widget build produced no widget.");
+    genJobTerminal(jobId, ["Coder did not return a widget document."], true);
+    genJobEnd(jobId, "No widget produced.");
     return { error: "Coder did not return a self-contained widget document." };
   }
-  const artifact = showWorkspace({ layout: "widget", title, summary: spec.slice(0, 200), content: html });
-  showCoderTerminal(["Widget ready.", "Rendered live to the adaptive workspace."], true);
-  hideGeneration("Widget added to the canvas.");
+  const artifact = showWorkspace({ layout: "widget", title, summary: spec.slice(0, 200), content: html, spec, data: args.data ?? null, assets });
+  genJobTerminal(jobId, ["Widget ready.", "Rendered live to the adaptive workspace."], true);
+  genJobEnd(jobId, "Widget added to canvas.");
   return { ok: true, workspaceId: artifact.workspaceId };
+}
+
+// Edit/fix an existing live widget by handing its current document + a change
+// request to the coder model, then swapping the HTML in place (data preserved).
+async function editWidget(args, toolId) {
+  const id = args.workspaceId || args.id || "";
+  const artifact = state.workspace.find((item) => item.id === id && item.layout === "widget")
+    || state.workspace.find((item) => item.layout === "widget"); // fall back to the most recent widget
+  if (!artifact) return { error: "No widget on the canvas to edit. Build one first with build_widget." };
+  const changes = String(args.changes || args.change || args.spec || "").trim();
+  if (!changes) return { error: "Describe what to change about the widget." };
+  const model = value("coderModel");
+  updateToolEvent(toolId, "running", `Editing widget "${artifact.title}" with ${model}.`);
+  const jobId = genJobStart({ kind: "widget", title: "Edit widget", status: "active" });
+  genJobTerminal(jobId, [`$ widget-editor --model ${model}`, `Editing: ${artifact.title}`, `Change: ${changes.slice(0, 160)}`], false);
+  const newAssets = await galleryAssetsFromIds(args.addGalleryIds || []);
+  const assets = [...(artifact.assets || []), ...newAssets];
+  const userParts = [
+    `Current widget document:\n\`\`\`html\n${String(artifact.content || "").slice(0, 40000)}\n\`\`\``,
+    `\n\nApply these changes: ${changes}`,
+  ];
+  if (newAssets.length) userParts.push(`\n\n${newAssets.length} new gallery asset(s) are now in WidgetStore.assets; reference them by url.`);
+  const result = await postJson("/v1/chat/completions", {
+    model,
+    messages: [
+      { role: "system", content: WIDGET_EDIT_SYSTEM_PROMPT },
+      { role: "user", content: userParts.join("") },
+    ],
+  });
+  if (result?.error) {
+    genJobTerminal(jobId, ["Widget edit failed.", result.error], true);
+    genJobEnd(jobId, "Widget edit failed.");
+    return { error: result.error };
+  }
+  const html = extractHtmlProject(result?.choices?.[0]?.message?.content || "");
+  if (!html) {
+    genJobTerminal(jobId, ["Coder did not return an updated document."], true);
+    genJobEnd(jobId, "No update produced.");
+    return { error: "Coder did not return an updated widget document." };
+  }
+  artifact.content = html;
+  artifact.assets = assets;
+  artifact.summary = changes.slice(0, 200);
+  saveWorkspace();
+  renderWorkspace();
+  if (artifact.savedWidgetId) await updateSavedWidget(artifact.savedWidgetId, { html, assets });
+  genJobTerminal(jobId, ["Widget updated.", "Re-rendered on the canvas."], true);
+  genJobEnd(jobId, "Widget updated.");
+  return { ok: true, workspaceId: artifact.id };
+}
+
+// Ends the live session, but only via the gated tool — the system prompt tells
+// the model to call it solely when the user explicitly asks to stop. Defer the
+// actual teardown a tick so the tool's function_call_output can flush first.
+function endConversationTool() {
+  if (!flag("endConversation")) return { error: "The end-conversation tool is disabled in Config." };
+  const wasActive = Boolean(state.realtime || state.gibber || state.mediaRecorder?.state === "recording");
+  addMessage("system", "Ending the conversation at your request.");
+  setTimeout(() => stopAll(), 400);
+  return { ok: true, ended: wasActive };
+}
+
+async function saveWidgetTool(args) {
+  const id = args.workspaceId || args.id || "";
+  const artifact = state.workspace.find((item) => item.id === id && item.layout === "widget")
+    || state.workspace.find((item) => item.layout === "widget");
+  if (!artifact) return { error: "No widget on the canvas to save. Build one first with build_widget." };
+  const record = await saveWidgetFromArtifact(artifact);
+  return { ok: true, savedWidgetId: record.id, title: record.title };
+}
+
+// Resolve gallery item ids to self-contained assets (data URLs) for widgets.
+async function galleryAssetsFromIds(ids) {
+  const list = (Array.isArray(ids) ? ids : [ids]).filter(Boolean);
+  if (!list.length) return [];
+  const items = await getGalleryItems().catch(() => []);
+  const assets = [];
+  for (const id of list) {
+    const item = items.find((entry) => entry.id === id);
+    if (!item || item.kind === "project") continue;
+    try {
+      const url = await blobToDataUrl(item.blob);
+      assets.push({ id: item.id, kind: item.kind, name: shortPrompt(item.prompt), prompt: item.prompt, url });
+    } catch { /* skip unreadable asset */ }
+  }
+  return assets;
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
 }
 
 async function callMcp(serverName, tool, args, toolId) {
@@ -1097,7 +1342,7 @@ async function callMcp(serverName, tool, args, toolId) {
 }
 
 function toolDefinitions() {
-  return [
+  const tools = [
     {
       name: "create_image",
       description: "Generate one or more image variations and save them to the local gallery. Use count for multi-image generation.",
@@ -1141,15 +1386,39 @@ function toolDefinitions() {
     { name: "web_search", description: "Search the live web for current, factual, or time-sensitive information (news, prices, docs, events, anything past your training cutoff) and get a concise answer with cited sources. Returns { answer } with inline [n] citations and a Sources list.", parameters: objectParams({ query: "The search query" }, ["query"]) },
     {
       name: "build_widget",
-      description: "Build a CUSTOM interactive widget for the adaptive workspace by delegating to the coder model. Use this for anything beyond the simple presets (note/chart/table/checklist/metrics/code) — calculators, interactive diagrams, timers, mini-tools, bespoke visualizations. Describe it in 'spec' (and optionally pass 'data'); the coder writes a sandboxed HTML widget rendered live on the canvas. Prefer show_workspace for plain structured data; use build_widget when interactivity or a custom design is needed.",
+      description: "Build a CUSTOM interactive widget/mini-app on the adaptive canvas by delegating to the coder model. This is the DEFAULT for anything visual or interactive that isn't plain info: charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, bespoke visualizations. The widget is sandboxed HTML rendered live, can persist its own data (a WidgetStore the user keeps across reloads/saves/downloads), and can embed gallery media. Pass galleryIds to let the widget use saved images/video/audio. Reserve show_workspace for plain note/table/metrics/code; use build_widget whenever interactivity, charts, or custom design help.",
       parameters: {
         type: "object",
         properties: {
           title: { type: "string", description: "Short widget title" },
-          spec: { type: "string", description: "Detailed description of the widget and how it should look and behave" },
-          data: { type: "array", description: "Optional structured data the widget should use", items: { type: "object", additionalProperties: true } },
+          spec: { type: "string", description: "Detailed description of the widget/mini-app and how it should look, behave, and persist data" },
+          data: { type: "array", description: "Optional structured data the widget should seed from", items: { type: "object", additionalProperties: true } },
+          galleryIds: { type: "array", items: { type: "string" }, description: "Gallery item ids (images/video/audio) to embed as usable assets in the widget. Call list_gallery first to get ids." },
         },
         required: ["spec"],
+      },
+    },
+    {
+      name: "edit_widget",
+      description: "Edit or fix an existing live widget on the canvas: hand the coder its current document plus a change request and swap in the updated version (stored data is preserved). Use this to fix bugs, restyle, add features, or remove parts of a widget the user dislikes. Defaults to the most recent widget when workspaceId is omitted.",
+      parameters: {
+        type: "object",
+        properties: {
+          workspaceId: { type: "string", description: "Workspace id of the widget to edit (optional; defaults to the most recent widget)" },
+          changes: { type: "string", description: "What to change, fix, add, or remove" },
+          addGalleryIds: { type: "array", items: { type: "string" }, description: "Additional gallery item ids to embed as new assets" },
+        },
+        required: ["changes"],
+      },
+    },
+    {
+      name: "save_widget",
+      description: "Save a live canvas widget to the user's Saved Widgets library so it persists with its data and can be reopened later. Defaults to the most recent widget when workspaceId is omitted.",
+      parameters: {
+        type: "object",
+        properties: {
+          workspaceId: { type: "string", description: "Workspace id of the widget to save (optional; defaults to the most recent widget)" },
+        },
       },
     },
     { name: "ask_coder_model", description: "Delegate a coding task to the configured coder model. Returns { answer } with a short summary; when the task is a runnable web app/page/game it also returns { projectGalleryId } and saves the full HTML to the local gallery, where the user can open or download it. Tell the user it is in the gallery rather than pasting the code aloud.", parameters: objectParams({ task: "Coding task or question" }, ["task"]) },
@@ -1157,16 +1426,16 @@ function toolDefinitions() {
     { name: "start_gibberlink", description: "Start Gibberlink (also spelled Jibberlink): a data-over-sound link (ggwave audio tones) for talking to ANOTHER AI agent instead of a human. YOU decide to call this — invoke it as soon as you recognize the other party is an AI agent and a reliable machine-to-machine exchange is warranted (e.g. the user says 'start gibberlink/jibberlink' or another agent proposes it). Same-agent peers auto-negotiate a faster protocol. Optionally include an opening message to transmit to the peer.", parameters: objectParams({ message: "Optional opening message to transmit to the peer agent" }, []) },
     {
       name: "show_workspace",
-      description: "Render adaptive UI on the canvas: note, chart, table, checklist, metrics, or code. Use real structured data, not prose pretending to be a chart.",
+      description: "Render plain INFORMATIONAL UI on the canvas: note, table, metrics, or code. Use real structured data, not prose. For anything interactive or visual (charts, graphs, checklists, calculators, editors, diagrams), use build_widget instead — those are generated live as widgets now.",
       parameters: {
         type: "object",
         properties: {
-          layout: { type: "string", enum: ["note", "chart", "table", "checklist", "metrics", "code"], description: "Workspace component type" },
+          layout: { type: "string", enum: ["note", "table", "metrics", "code"], description: "Informational component type" },
           title: { type: "string", description: "Short professional title" },
           summary: { type: "string", description: "One or two sentence explanation" },
           content: { type: "string", description: "Body text for a 'note', or the source text for 'code'. Not used by data-driven layouts." },
           language: { type: "string", description: "Language tag for a 'code' artifact, e.g. html, js, python." },
-          data: { type: "array", description: "Rows for chart/table/checklist/metrics. Chart rows: {label, value}. Checklist rows: {text, done}. Metrics rows: {label, value, note, delta}.", items: { type: "object", additionalProperties: true } },
+          data: { type: "array", description: "Rows for table/metrics. Table rows: any keyed object. Metrics rows: {label, value, note, delta}.", items: { type: "object", additionalProperties: true } },
         },
         required: ["layout", "title"],
       },
@@ -1202,6 +1471,22 @@ function toolDefinitions() {
       description: "List locally saved gallery items so you can reference or reuse them.",
       parameters: { type: "object", properties: {} },
     },
+    { name: "remember", description: "Store a durable fact about the user in long-term memory that persists across sessions (name, preferences, defaults, ongoing projects). Use only for things that stay useful over time, not one-off details.", parameters: objectParams({ text: "The fact to remember, written as a concise statement" }, ["text"]) },
+    { name: "forget", description: "Remove something from long-term memory by id or matching text, or clear it all with { all: true }.", parameters: { type: "object", properties: { id: { type: "string", description: "Memory id to forget" }, text: { type: "string", description: "Forget memories containing this text" }, all: { type: "boolean", description: "Clear all memory" } } } },
+    {
+      name: "manage_gallery",
+      description: "Manage the user's local gallery: delete specific items, clear everything, or retag an item's caption. Call list_gallery first to get ids. Deleting and clearing are permanent — only do so when the user asks or clearly wants cleanup.",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["delete", "clear", "retag"], description: "What to do" },
+          ids: { type: "array", items: { type: "string" }, description: "Gallery item ids to delete" },
+          id: { type: "string", description: "Single gallery item id for retag" },
+          prompt: { type: "string", description: "New caption/prompt when retagging" },
+        },
+        required: ["action"],
+      },
+    },
     {
       name: "use_gallery_sources",
       description: "Use selected gallery images as source/reference images for image editing or image-to-video generation.",
@@ -1216,6 +1501,14 @@ function toolDefinitions() {
       },
     },
   ];
+  if (flag("endConversation")) {
+    tools.push({
+      name: "end_conversation",
+      description: "End/stop the current live session (realtime, push-to-talk, or gibberlink). ONLY call this when the user explicitly asks to end, stop, hang up, wrap up, or finish the conversation. Never end on your own initiative or to avoid a task.",
+      parameters: { type: "object", properties: {} },
+    });
+  }
+  return tools;
 }
 
 function realtimeToolDefinitions() {
@@ -1244,7 +1537,13 @@ function objectParams(properties, required) {
 }
 
 function systemPrompt() {
-  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. When visual structure helps, call show_workspace to render a chart, table, checklist, note, metrics, or code block instead of speaking a dense answer. For charts, provide rows with label and numeric value. For checklists, provide rows with text and done. For metrics, provide rows with label, value, and optional note or delta. To show source code or markup, use layout "code" with the source in content and a language tag. For anything interactive or custom that the presets can't express (calculators, interactive diagrams, mini-tools, bespoke visualizations), call build_widget to have the coder model generate a live sandboxed widget on the canvas. If the user asks to reuse a prior image/video/audio, call list_gallery first. If the user asks to edit an existing image or use an existing image as a reference, use use_gallery_sources when the target is already in the gallery, otherwise call request_source_images. You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize that the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink to switch to a data-over-sound link; ask the human's consent first unless they already requested it. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."`;
+  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. For plain informational structure, call show_workspace with layout note, table, metrics, or code (real structured data, not prose). For ANYTHING interactive or visual — charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, custom visualizations — call build_widget, which generates a live sandboxed widget on the canvas. Widgets can persist their own data (a WidgetStore the user keeps) and embed gallery media: pass galleryIds to give a widget images/video/audio to use. To fix, restyle, or extend a widget the user already has, call edit_widget with the change; call save_widget to keep one in their library. To show source code or markup, use layout "code". If the user asks to reuse a prior image/video/audio, call list_gallery first. If the user asks to edit an existing image or use one as a reference, use use_gallery_sources when it is already in the gallery, otherwise call request_source_images. The user can upload images directly (saved to the gallery and shared with you); reference what they uploaded by its gallery entry. You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink; ask the human's consent first unless they already requested it. You have a persistent long-term memory across sessions: call remember to store a durable fact about the user and forget to remove one — only durable things, not one-off chatter. You can manage the user's saved media with manage_gallery. Only end the live session (end_conversation) when the user explicitly asks to stop, end, or hang up — never on your own initiative. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."${memoryPromptSection()}`;
+}
+
+function memoryPromptSection() {
+  if (!state.memory.length) return "";
+  const lines = state.memory.map((entry) => `- ${entry.text}`).join("\n");
+  return `\n\nLong-term memory about this user (from past conversations):\n${lines}`;
 }
 
 function personalityInstruction() {
@@ -1302,16 +1601,6 @@ function summarizeCoderAnswer(answer) {
   return answer.replace(/```[\s\S]*?```/g, "[code saved to gallery]").trim().slice(0, 1200);
 }
 
-function showCoderTerminal(lines, done = false) {
-  el.mediaDock.classList.remove("hidden");
-  document.querySelector(".stage")?.classList.add("generating");
-  el.orb.classList.add("docked");
-  el.generationCard.className = "generating-card terminal-loader";
-  el.generationVisual.className = "generation-visual terminal-visual";
-  el.generationVisual.innerHTML = `<div class="terminal-output">${lines.map((line) => `<p>${escapeHtml(line)}</p>`).join("")}${done ? "" : "<span class=\"terminal-cursor\"></span>"}</div>`;
-  el.generationStatus.textContent = done ? "Coder job complete." : "Coder model working...";
-}
-
 function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
 }
@@ -1325,7 +1614,7 @@ async function failResponse(res, fallback) {
   const message = text || `${fallback} (${res.status})`;
   addMessage("system", message);
   playSound("error");
-  hideGeneration("Generation failed.");
+  // Per-job tiles are ended by their own callers; nothing global to hide here.
   return { error: message };
 }
 
@@ -1527,9 +1816,15 @@ function labelForTool(name) {
     create_audio: "Audio generation",
     ask_coder_model: "Coder model",
     build_widget: "Widget builder",
+    edit_widget: "Widget editor",
+    save_widget: "Save widget",
     web_search: "Web search",
     call_mcp_server: "MCP tool call",
+    manage_gallery: "Gallery management",
+    remember: "Memory saved",
+    forget: "Memory removed",
     start_gibberlink: "Gibberlink handoff",
+    end_conversation: "End conversation",
     show_workspace: "Workspace update",
     request_source_images: "Source image request",
     remove_workspace: "Workspace cleanup",
@@ -1549,9 +1844,14 @@ function summarizeToolResult(name, result) {
   if (name === "remove_workspace") return "Workspace cleaned up.";
   if (name === "list_gallery") return "Gallery items listed.";
   if (name === "use_gallery_sources") return "Gallery sources used for generation.";
+  if (name === "manage_gallery") return result?.cleared != null ? "Gallery cleared." : result?.deleted != null ? `Deleted ${result.deleted} gallery item(s).` : "Gallery updated.";
+  if (name === "remember") return "Saved to long-term memory.";
+  if (name === "forget") return "Updated long-term memory.";
   if (name === "ask_coder_model") return "Coder model returned guidance.";
   if (name === "web_search") return "Web search results returned.";
   if (name === "build_widget") return "Custom widget added to the canvas.";
+  if (name === "edit_widget") return "Widget updated on the canvas.";
+  if (name === "save_widget") return "Widget saved to your library.";
   if (name === "call_mcp_server") return "MCP server returned a result.";
   if (name === "start_gibberlink") return result?.turbo ? "Gibberlink active (turbo channel)." : "Gibberlink active.";
   if (result?.galleryId) return `${capitalize(result.kind)} saved to local gallery.`;
@@ -1559,23 +1859,28 @@ function summarizeToolResult(name, result) {
 }
 
 function showWorkspace(args, toolId) {
+  const isWidget = args.layout === "widget";
   const artifact = {
     id: crypto.randomUUID(),
     layout: args.layout || "note",
     title: args.title || "Workspace",
     summary: args.summary || "",
-    content: typeof args.content === "string" ? args.content.slice(0, 60000) : "",
+    content: typeof args.content === "string" ? args.content.slice(0, 80000) : "",
     language: args.language || "",
     prompt: args.prompt || "",
     purpose: args.purpose || "",
     minImages: args.minImages || 1,
     maxImages: args.maxImages || 4,
-    data: Array.isArray(args.data) ? args.data.slice(0, 12) : [],
+    // For widgets, `data` is the widget's own persisted store object (not table
+    // rows), and assets/spec ride along so it can be re-rendered, saved, edited.
+    data: isWidget ? (args.data ?? null) : (Array.isArray(args.data) ? args.data.slice(0, 12) : []),
+    spec: isWidget ? (args.spec || "") : undefined,
+    assets: isWidget ? (args.assets || []) : undefined,
     createdAt: Date.now(),
   };
   state.workspace.unshift(artifact);
   state.workspace = state.workspace.slice(0, 8);
-  localStorage.setItem("workspace", JSON.stringify(state.workspace));
+  saveWorkspace();
   renderWorkspace();
   updateToolEvent(toolId, "running", `Rendering ${artifact.layout}: ${artifact.title}`);
   return { ok: true, workspaceId: artifact.id, layout: artifact.layout };
@@ -1624,7 +1929,17 @@ function removeWorkspace(args) {
 }
 
 function saveWorkspace() {
-  localStorage.setItem("workspace", JSON.stringify(state.workspace));
+  try {
+    localStorage.setItem("workspace", JSON.stringify(state.workspace));
+  } catch {
+    // Quota blown (usually a widget with big inlined media assets). Persist a
+    // light copy — saved widgets live in IndexedDB, so nothing important is lost.
+    try {
+      const light = state.workspace.map((artifact) =>
+        artifact.layout === "widget" ? { ...artifact, content: "", assets: [] } : artifact);
+      localStorage.setItem("workspace", JSON.stringify(light));
+    } catch { /* give up persisting workspace this cycle */ }
+  }
 }
 
 function renderWorkspace() {
@@ -1657,9 +1972,7 @@ function renderArtifact(artifact) {
     summary.textContent = artifact.summary;
     card.append(summary);
   }
-  if (artifact.layout === "chart") card.append(renderChart(artifact.data));
-  else if (artifact.layout === "table") card.append(renderTable(artifact.data));
-  else if (artifact.layout === "checklist") card.append(renderChecklist(artifact.data, artifact.id));
+  if (artifact.layout === "table") card.append(renderTable(artifact.data));
   else if (artifact.layout === "metrics") card.append(renderMetrics(artifact.data));
   else if (artifact.layout === "code") card.append(renderCode(artifact));
   else if (artifact.layout === "widget") card.append(renderWidget(artifact));
@@ -1672,43 +1985,6 @@ function renderArtifact(artifact) {
   remove.addEventListener("click", () => removeWorkspace({ id: artifact.id }));
   card.append(remove);
   return card;
-}
-
-function renderChart(data) {
-  const wrap = document.createElement("div");
-  wrap.className = "chart-wrap";
-  const rows = normalizeRows(data).map((row) => ({ label: row.label || row.name || row.metric || "Item", value: Number(row.value ?? row.count ?? row.amount) || 0 })).slice(0, 8);
-  const max = Math.max(...rows.map((row) => row.value), 1);
-  const points = rows.map((row, index) => {
-    const x = rows.length === 1 ? 50 : (index / (rows.length - 1)) * 100;
-    const y = 90 - (row.value / max) * 72;
-    return `${x},${y}`;
-  }).join(" ");
-  const area = `0,92 ${points} 100,92`;
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 100 100");
-  svg.setAttribute("preserveAspectRatio", "none");
-  svg.setAttribute("class", "workspace-svg-chart");
-  const grid = [18, 38, 58, 78].map((y) => `<line x1="0" y1="${y}" x2="100" y2="${y}"/>`).join("");
-  svg.innerHTML = `<g class="chart-grid">${grid}</g><polygon class="chart-area" points="${area}"/><polyline points="${points}"/><path d="M0 92H100"/>`;
-  wrap.append(svg);
-  const bars = document.createElement("div");
-  bars.className = "chart-bars";
-  rows.forEach((row, index) => {
-    const pct = Math.min(100, (row.value / max) * 100);
-    const item = document.createElement("div");
-    item.className = "chart-row";
-    item.title = `${row.label}: ${row.value}`;
-    item.innerHTML = `<span class="chart-label"></span><span class="chart-track"><span class="chart-fill"></span></span><span class="chart-value"></span>`;
-    item.querySelector(".chart-label").textContent = row.label;
-    item.querySelector(".chart-value").textContent = String(row.value ?? "");
-    const fill = item.querySelector(".chart-fill");
-    fill.style.setProperty("--delay", `${index * 60}ms`);
-    requestAnimationFrame(() => { fill.style.width = `${pct}%`; });
-    bars.append(item);
-  });
-  wrap.append(bars);
-  return wrap;
 }
 
 function renderMetrics(data) {
@@ -1767,8 +2043,9 @@ function renderCode(artifact) {
   return wrap;
 }
 
-// Coder-generated widget: runs live in a sandboxed srcdoc frame (opaque origin,
-// no access to the page/storage/BYOP key), with a source toggle for transparency.
+// Coder-generated widget/mini-app: runs live in a sandboxed srcdoc frame (opaque
+// origin, no access to the page/storage/BYOP key). The injected WidgetStore lets
+// it persist its own data (bridged back to the app) and use gallery assets.
 function renderWidget(artifact) {
   const wrap = document.createElement("div");
   wrap.className = "widget-view";
@@ -1776,21 +2053,28 @@ function renderWidget(artifact) {
   bar.className = "widget-bar";
   const tag = document.createElement("span");
   tag.className = "code-lang";
-  tag.textContent = "live widget";
-  const toggle = document.createElement("button");
-  toggle.type = "button";
-  toggle.className = "code-copy";
-  toggle.textContent = "View source";
-  bar.append(tag, toggle);
+  tag.textContent = artifact.assets?.length ? `live widget · ${artifact.assets.length} asset(s)` : "live widget";
+
+  const actions = document.createElement("div");
+  actions.className = "widget-actions";
+  const saveBtn = mkWidgetBtn(artifact.savedWidgetId ? "Saved ✓" : "Save", async () => {
+    saveBtn.disabled = true;
+    try { await saveWidgetFromArtifact(artifact); saveBtn.textContent = "Saved ✓"; }
+    catch { saveBtn.textContent = "Save failed"; }
+    finally { saveBtn.disabled = false; }
+  });
+  const editBtn = mkWidgetBtn("Edit", () => {
+    const changes = window.prompt(`Describe how to change "${artifact.title}":`);
+    if (changes && changes.trim()) editWidget({ workspaceId: artifact.id, changes: changes.trim() });
+  });
+  const dlBtn = mkWidgetBtn("Download", () => downloadWidgetBundle(artifact));
+  const toggle = mkWidgetBtn("View source", () => {});
+  actions.append(saveBtn, editBtn, dlBtn, toggle);
+  bar.append(tag, actions);
 
   const stage = document.createElement("div");
   stage.className = "widget-stage";
-  const frame = document.createElement("iframe");
-  frame.className = "widget-frame";
-  frame.setAttribute("sandbox", "allow-scripts allow-pointer-lock allow-modals");
-  frame.setAttribute("referrerpolicy", "no-referrer");
-  frame.srcdoc = artifact.content || "";
-  stage.append(frame);
+  stage.append(makeWidgetFrame(artifact));
 
   let pre = null;
   let showingSource = false;
@@ -1807,13 +2091,120 @@ function renderWidget(artifact) {
       stage.replaceChildren(pre);
       toggle.textContent = "Run widget";
     } else {
-      stage.replaceChildren(frame);
+      stage.replaceChildren(makeWidgetFrame(artifact));
       toggle.textContent = "View source";
     }
   });
 
   wrap.append(bar, stage);
   return wrap;
+}
+
+function mkWidgetBtn(label, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "code-copy";
+  button.textContent = label;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function makeWidgetFrame(artifact) {
+  const frame = document.createElement("iframe");
+  frame.className = "widget-frame";
+  frame.setAttribute("sandbox", "allow-scripts allow-pointer-lock allow-modals allow-downloads");
+  frame.setAttribute("referrerpolicy", "no-referrer");
+  frame.srcdoc = injectWidgetBridge(artifact.content || "", { id: artifact.id, data: artifact.data ?? null, assets: artifact.assets || [] });
+  return frame;
+}
+
+// Injects the WidgetStore bridge so a sandboxed widget can persist data (via the
+// parent, since opaque-origin frames can't use localStorage) and reach gallery
+// assets. A downloaded standalone copy gets its own file:// origin, so the same
+// bridge falls back to localStorage and keeps working offline.
+function injectWidgetBridge(html, { id, data, assets }) {
+  const bridge = `
+<script>(function(){
+  var ID = ${safeJsonForScript(String(id || ""))};
+  var DATA = ${safeJsonForScript(data ?? null)};
+  var ASSETS = ${safeJsonForScript(assets || [])};
+  function post(type, payload){ try{ var m={__widget:true,id:ID,type:type}; if(payload){ for(var k in payload) m[k]=payload[k]; } parent.postMessage(m,"*"); }catch(e){} }
+  window.WidgetStore = {
+    load: function(){ try{ var s=localStorage.getItem("ve_widget_"+ID); if(s) return JSON.parse(s); }catch(e){} return DATA; },
+    save: function(d){ DATA=d; try{ localStorage.setItem("ve_widget_"+ID, JSON.stringify(d)); }catch(e){} post("save",{data:d}); },
+    assets: ASSETS,
+    asset: function(i){ return ASSETS[i]; },
+    requestDownload: function(){ post("download",{}); }
+  };
+  document.addEventListener("DOMContentLoaded", function(){ post("ready",{}); });
+})();<\/script>`;
+  if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, `${bridge}\n</body>`);
+  if (/<\/html>/i.test(html)) return html.replace(/<\/html>/i, `${bridge}\n</html>`);
+  return html + bridge;
+}
+
+// JSON safe to inline inside a <script>: neutralize </script> and line separators.
+function safeJsonForScript(value) {
+  // Neutralize < so an embedded JSON string can never spawn a closing script tag.
+  // (U+2028/U+2029 are valid in JS string literals since ES2019, so JSON is otherwise safe.)
+  var esc = String.fromCharCode(92) + "u003c";
+  return JSON.stringify(value === undefined ? null : value).split("<").join(esc);
+}
+
+function handleWidgetMessage(event) {
+  const message = event.data;
+  if (!message || message.__widget !== true || !message.id) return;
+  if (message.type === "save") persistWidgetData(message.id, message.data);
+  else if (message.type === "download") {
+    const artifact = state.workspace.find((item) => item.id === message.id);
+    if (artifact) downloadWidgetBundle(artifact);
+  }
+}
+
+function persistWidgetData(id, data) {
+  const artifact = state.workspace.find((item) => item.id === id);
+  if (!artifact) return;
+  artifact.data = data;
+  saveWorkspace();
+  if (artifact.savedWidgetId) saveWidgetData(artifact.savedWidgetId, data);
+}
+
+async function saveWidgetFromArtifact(artifact) {
+  const record = {
+    id: artifact.savedWidgetId || crypto.randomUUID(),
+    title: artifact.title || "Widget",
+    spec: artifact.spec || artifact.summary || "",
+    html: artifact.content || "",
+    data: artifact.data ?? null,
+    assets: artifact.assets || [],
+    createdAt: artifact.savedAt || Date.now(),
+    updatedAt: Date.now(),
+  };
+  await saveWidgetRecord(record);
+  artifact.savedWidgetId = record.id;
+  artifact.savedAt = record.createdAt;
+  saveWorkspace();
+  renderSavedWidgets();
+  playSound("genComplete");
+  addMessage("system", `Saved widget "${record.title}". Reopen it anytime from the Widgets panel.`);
+  return record;
+}
+
+function downloadWidgetBundle(artifact) {
+  const html = injectWidgetBridge(artifact.content || "", { id: artifact.id, data: artifact.data ?? null, assets: artifact.assets || [] });
+  const blob = new Blob([html], { type: "text/html" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${slugify(artifact.title || "widget")}.html`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+function slugify(text) {
+  return String(text).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "widget";
 }
 
 function renderNoteBody(content) {
@@ -1854,47 +2245,11 @@ function renderTable(data) {
   return table;
 }
 
-function renderChecklist(data, artifactId) {
-  data = normalizeRows(data);
-  const wrap = document.createElement("div");
-  wrap.className = "checklist-wrap";
-  const done = data.filter((row) => row.done !== false).length;
-  const progress = document.createElement("div");
-  progress.className = "checklist-progress";
-  progress.innerHTML = `<span class="checklist-count"></span><span class="checklist-track"><span class="checklist-fill"></span></span>`;
-  progress.querySelector(".checklist-count").textContent = `${done}/${data.length || 0} done`;
-  progress.querySelector(".checklist-fill").style.width = `${data.length ? (done / data.length) * 100 : 0}%`;
-  const list = document.createElement("ul");
-  list.className = "checklist";
-  data.forEach((row, index) => {
-    const li = document.createElement("li");
-    li.className = row.done === false ? "" : "complete";
-    const check = document.createElement("span");
-    check.className = "check";
-    check.textContent = row.done === false ? "" : "✓";
-    const text = document.createElement("span");
-    text.textContent = row.text || row.label || row.task || "Item";
-    li.append(check, text);
-    li.addEventListener("click", () => toggleChecklistItem(artifactId, index));
-    list.append(li);
-  });
-  wrap.append(progress, list);
-  return wrap;
-}
-
 function normalizeRows(data) {
   if (Array.isArray(data)) return data.map((item) => typeof item === "string" ? { text: item, label: item } : item || {});
   if (typeof data === "string") return data.split(/\n|,/).map((text) => text.trim()).filter(Boolean).map((text) => ({ text, label: text, value: Number(text.match(/\d+(\.\d+)?/)?.[0]) || 1 }));
   if (data && typeof data === "object") return Object.entries(data).map(([label, value]) => ({ label, value }));
   return [];
-}
-
-function toggleChecklistItem(artifactId, index) {
-  const artifact = state.workspace.find((item) => item.id === artifactId);
-  if (!artifact?.data?.[index]) return;
-  artifact.data[index].done = artifact.data[index].done === false;
-  saveWorkspace();
-  renderWorkspace();
 }
 
 function renderImageRequest(artifact) {
@@ -2053,27 +2408,115 @@ function detectLoaderKind(kind, prompt, model) {
   return kind;
 }
 
-function showGeneration(kind, text) {
-  startLoop();
-  el.mediaDock.classList.remove("hidden");
-  document.querySelector(".stage")?.classList.add("generating");
-  el.orb.classList.add("docked");
-  el.generationCard.className = `generating-card ${kind}-loader`;
-  el.generationVisual.className = `generation-visual ${kind}-visual`;
-  el.generationVisual.innerHTML = generationVisualMarkup(kind);
-  el.generationStatus.textContent = text;
-  addMessage("agent", text);
+// ---------------------------------------------------------------------------
+// Generation dock: one tile per in-flight job. Concurrent jobs tile into a grid
+// and shrink; queued jobs render as muted boxes with a glyph of what's coming.
+// Replaces the old single-card dock so multiple generations no longer collide.
+// ---------------------------------------------------------------------------
+function labelForKind(kind) {
+  return { image: "Image", video: "Video", music: "Music", tts: "Voice", search: "Web search", terminal: "Coder", widget: "Widget" }[kind] || "Generating";
 }
 
-function hideGeneration(text) {
-  stopLoop();
-  el.generationStatus.textContent = text;
+function genJobStart({ kind, title, status = "active", detail = "" }) {
+  const job = { id: crypto.randomUUID(), kind, title: title || labelForKind(kind), status, detail, terminal: null, terminalDone: false, loopHeld: false };
+  if (status === "active") { startLoop(); job.loopHeld = true; }
+  state.genJobs.push(job);
+  renderGenDock();
+  return job.id;
+}
+
+function genJobActivate(id, patch = {}) {
+  const job = state.genJobs.find((j) => j.id === id);
+  if (!job) return;
+  job.status = "active";
+  Object.assign(job, patch);
+  if (!job.loopHeld) { startLoop(); job.loopHeld = true; }
+  renderGenDock();
+}
+
+function genJobUpdate(id, patch = {}) {
+  const job = state.genJobs.find((j) => j.id === id);
+  if (!job) return;
+  Object.assign(job, patch);
+  renderGenDock();
+}
+
+function genJobTerminal(id, lines, done) {
+  const job = state.genJobs.find((j) => j.id === id);
+  if (!job) return;
+  job.kind = "terminal";
+  job.terminal = lines.slice(-7);
+  job.terminalDone = done;
+  renderGenDock();
+}
+
+function genJobEnd(id, detail) {
+  const job = state.genJobs.find((j) => j.id === id);
+  if (!job) return;
+  job.status = "done";
+  if (detail) job.detail = detail;
+  if (job.loopHeld) { stopLoop(); job.loopHeld = false; }
+  renderGenDock();
   setTimeout(() => {
+    state.genJobs = state.genJobs.filter((j) => j.id !== id);
+    renderGenDock();
+  }, 1300);
+}
+
+function renderGenDock() {
+  const jobs = state.genJobs;
+  if (!jobs.length) {
+    el.genDock.innerHTML = "";
+    el.genDock.dataset.count = "0";
     el.mediaDock.classList.add("hidden");
     document.querySelector(".stage")?.classList.remove("generating");
     el.orb.classList.remove("docked");
-    el.generationVisual.innerHTML = "";
-  }, 1400);
+    return;
+  }
+  el.mediaDock.classList.remove("hidden");
+  document.querySelector(".stage")?.classList.add("generating");
+  el.orb.classList.add("docked");
+  el.genDock.dataset.count = String(jobs.length);
+  el.genDock.innerHTML = "";
+  for (const job of jobs) el.genDock.append(buildGenTile(job));
+}
+
+function buildGenTile(job) {
+  const tile = document.createElement("div");
+  tile.className = `gen-tile ${job.kind}-loader ${job.status}`;
+  const tag = document.createElement("span");
+  tag.className = "gen-tile-tag";
+  tag.textContent = job.title || labelForKind(job.kind);
+  const visual = document.createElement("div");
+  visual.className = `generation-visual ${job.kind}-visual`;
+  if (job.status === "queued") {
+    visual.classList.add("queued-visual");
+    visual.innerHTML = `<div class="queued-glyph">${queuedGlyph(job.kind)}</div>`;
+  } else if (job.terminal) {
+    visual.classList.add("terminal-visual");
+    visual.innerHTML = `<div class="terminal-output">${job.terminal.map((line) => `<p>${escapeHtml(line)}</p>`).join("")}${job.terminalDone ? "" : "<span class=\"terminal-cursor\"></span>"}</div>`;
+  } else {
+    visual.innerHTML = generationVisualMarkup(job.kind);
+  }
+  const status = document.createElement("p");
+  status.className = "gen-tile-status";
+  status.textContent = job.detail || (job.status === "queued" ? "Queued…" : `${labelForKind(job.kind)}…`);
+  tile.append(tag, visual, status);
+  return tile;
+}
+
+// A simple glyph hinting what a queued job will produce, shown in its grey box.
+function queuedGlyph(kind) {
+  const glyphs = {
+    image: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M3 17l5-4 4 3 3-2 6 5"/></svg>',
+    video: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="13" height="14" rx="2"/><path d="M16 10l5-3v10l-5-3z"/></svg>',
+    music: '<svg viewBox="0 0 24 24"><path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></svg>',
+    tts: '<svg viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>',
+    search: '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>',
+    terminal: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>',
+    widget: '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></svg>',
+  };
+  return glyphs[kind] || glyphs.image;
 }
 
 function generationVisualMarkup(kind) {
@@ -2103,6 +2546,45 @@ function generationVisualMarkup(kind) {
 function setOrb(mode) {
   el.orb.classList.remove("idle", "listening", "speaking");
   el.orb.classList.add(mode);
+}
+
+// Audio-reactive orb: drives the CSS --level (0..1) from an AnalyserNode's RMS so
+// the visualizer pulses with real mic/model audio instead of a fixed animation.
+const orbViz = { raf: 0, analyser: null, data: null, smoothed: 0 };
+
+function startOrbViz(analyser) {
+  if (!analyser) return;
+  orbViz.analyser = analyser;
+  orbViz.data = new Uint8Array(analyser.frequencyBinCount);
+  cancelAnimationFrame(orbViz.raf);
+  const tick = () => {
+    if (!orbViz.analyser) return;
+    orbViz.analyser.getByteTimeDomainData(orbViz.data);
+    let sum = 0;
+    for (let i = 0; i < orbViz.data.length; i += 1) { const v = (orbViz.data[i] - 128) / 128; sum += v * v; }
+    const rms = Math.sqrt(sum / orbViz.data.length);
+    orbViz.smoothed = orbViz.smoothed * 0.82 + rms * 0.18;
+    const level = Math.min(1, orbViz.smoothed * 3.4);
+    el.orb.style.setProperty("--level", level.toFixed(3));
+    orbViz.raf = requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+function stopOrbViz() {
+  cancelAnimationFrame(orbViz.raf);
+  orbViz.raf = 0;
+  orbViz.analyser = null;
+  orbViz.smoothed = 0;
+  el.orb.style.setProperty("--level", "0");
+}
+
+// Builds an analyser fed by the given source node(s) so the orb can react to it.
+function makeOrbAnalyser(audioContext) {
+  const analyser = audioContext.createAnalyser();
+  analyser.fftSize = 256;
+  analyser.smoothingTimeConstant = 0.7;
+  return analyser;
 }
 
 function loadSettings() {
@@ -2155,11 +2637,116 @@ function renderMcpServers() {
 
 function openDb() {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open("voiceenable-gallery", 1);
-    request.onupgradeneeded = () => request.result.createObjectStore("items", { keyPath: "id" });
+    const request = indexedDB.open("voiceenable-gallery", 2);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains("items")) db.createObjectStore("items", { keyPath: "id" });
+      if (!db.objectStoreNames.contains("widgets")) db.createObjectStore("widgets", { keyPath: "id" });
+    };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
+}
+
+// ---- Saved widgets store (durable mini-apps that keep their own data) ----
+async function saveWidgetRecord(record) {
+  const db = await openDb();
+  await txDone(db.transaction("widgets", "readwrite").objectStore("widgets").put(record));
+}
+
+async function getWidgetRecords() {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const request = db.transaction("widgets").objectStore("widgets").getAll();
+    request.onsuccess = () => resolve(request.result.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)));
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function getWidgetRecord(id) {
+  const records = await getWidgetRecords().catch(() => []);
+  return records.find((record) => record.id === id);
+}
+
+async function deleteWidgetRecord(id) {
+  const db = await openDb();
+  await txDone(db.transaction("widgets", "readwrite").objectStore("widgets").delete(id));
+}
+
+async function saveWidgetData(id, data) {
+  const record = await getWidgetRecord(id);
+  if (!record) return;
+  record.data = data;
+  record.updatedAt = Date.now();
+  await saveWidgetRecord(record);
+}
+
+async function updateSavedWidget(id, patch) {
+  const record = await getWidgetRecord(id);
+  if (!record) return;
+  Object.assign(record, patch, { updatedAt: Date.now() });
+  await saveWidgetRecord(record);
+}
+
+async function renderSavedWidgets() {
+  if (!el.widgetList) return;
+  const records = await getWidgetRecords().catch(() => []);
+  el.widgetList.innerHTML = "";
+  if (!records.length) {
+    const empty = document.createElement("p");
+    empty.className = "memory-empty";
+    empty.textContent = "No saved widgets yet. Build one on the canvas and press Save, or ask the agent to make you a tool.";
+    el.widgetList.append(empty);
+    return;
+  }
+  for (const record of records) el.widgetList.append(renderSavedWidgetRow(record));
+}
+
+function renderSavedWidgetRow(record) {
+  const row = document.createElement("div");
+  row.className = "widget-row";
+  const info = document.createElement("div");
+  info.className = "widget-row-info";
+  const title = document.createElement("strong");
+  title.textContent = record.title || "Widget";
+  const meta = document.createElement("span");
+  const bits = [record.assets?.length ? `${record.assets.length} asset(s)` : "", shortPrompt(record.spec || "")].filter(Boolean);
+  meta.textContent = bits.join(" · ") || "Saved widget";
+  info.append(title, meta);
+  const actions = document.createElement("div");
+  actions.className = "widget-row-actions";
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "button ghost small";
+  open.textContent = "Open";
+  open.addEventListener("click", () => openSavedWidget(record));
+  const download = document.createElement("button");
+  download.type = "button";
+  download.className = "button ghost small";
+  download.textContent = "Download";
+  download.addEventListener("click", () => downloadWidgetBundle({ id: record.id, title: record.title, content: record.html, data: record.data, assets: record.assets }));
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "memory-remove";
+  remove.textContent = "✕";
+  remove.title = "Delete saved widget";
+  remove.addEventListener("click", async () => { await deleteWidgetRecord(record.id); renderSavedWidgets(); });
+  actions.append(open, download, remove);
+  row.append(info, actions);
+  return row;
+}
+
+function openSavedWidget(record) {
+  const result = showWorkspace({ layout: "widget", title: record.title, summary: record.spec || "", content: record.html, spec: record.spec || "", data: record.data ?? null, assets: record.assets || [] });
+  const live = state.workspace.find((artifact) => artifact.id === result.workspaceId);
+  if (live) { live.savedWidgetId = record.id; live.savedAt = record.createdAt; saveWorkspace(); }
+  closeDrawers();
+}
+
+async function clearSavedWidgets() {
+  const records = await getWidgetRecords().catch(() => []);
+  for (const record of records) await deleteWidgetRecord(record.id);
+  renderSavedWidgets();
 }
 
 async function saveGalleryItem({ kind, prompt, model, blob, remoteUrl }) {
@@ -2231,7 +2818,14 @@ async function renderGalleryCard(item) {
   useButton.type = "button";
   useButton.textContent = item.kind === "image" ? "Use as source" : item.kind === "project" ? "Show source on canvas" : "Show in canvas";
   useButton.addEventListener("click", () => addGalleryReference(item));
-  actions.append(link, useButton);
+  const deleteButton = document.createElement("button");
+  deleteButton.className = "gallery-delete";
+  deleteButton.type = "button";
+  deleteButton.title = "Delete from gallery";
+  deleteButton.setAttribute("aria-label", "Delete from gallery");
+  deleteButton.textContent = "✕";
+  deleteButton.addEventListener("click", async () => { await deleteGalleryItemById(item.id); await renderGallery(); });
+  actions.append(link, useButton, deleteButton);
 
   card.append(caption, details, actions);
   return card;
@@ -2332,6 +2926,103 @@ async function clearGallery() {
   renderGallery();
 }
 
+// ---- Persistent conversation memory (durable facts across sessions) ----
+function saveMemory() {
+  state.memory = state.memory.slice(-40);
+  localStorage.setItem("agent_memory", JSON.stringify(state.memory));
+}
+
+function rememberFact(args) {
+  const text = String(args.text || args.fact || "").trim();
+  if (!text) return { error: "No fact provided to remember." };
+  if (state.memory.some((entry) => entry.text.toLowerCase() === text.toLowerCase())) {
+    return { ok: true, note: "Already remembered." };
+  }
+  const entry = { id: crypto.randomUUID(), text, at: Date.now() };
+  state.memory.push(entry);
+  saveMemory();
+  renderMemory();
+  addMessage("system", `Remembered: ${text}`);
+  return { ok: true, id: entry.id };
+}
+
+function forgetMemory(args) {
+  if (args.all) {
+    const count = state.memory.length;
+    state.memory = [];
+    saveMemory();
+    renderMemory();
+    addMessage("system", "Cleared all long-term memory.");
+    return { ok: true, cleared: count };
+  }
+  const before = state.memory.length;
+  if (args.id) state.memory = state.memory.filter((entry) => entry.id !== args.id);
+  else if (args.text) state.memory = state.memory.filter((entry) => !entry.text.toLowerCase().includes(String(args.text).toLowerCase()));
+  else return { error: "Provide an id, text, or all:true to forget." };
+  saveMemory();
+  renderMemory();
+  return { ok: true, removed: before - state.memory.length };
+}
+
+function renderMemory() {
+  if (!el.memoryList) return;
+  el.memoryList.innerHTML = "";
+  if (!state.memory.length) {
+    const empty = document.createElement("p");
+    empty.className = "memory-empty";
+    empty.textContent = "No saved memories yet. The agent stores durable facts here.";
+    el.memoryList.append(empty);
+    return;
+  }
+  state.memory.forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = "memory-entry";
+    const text = document.createElement("span");
+    text.textContent = entry.text;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "memory-remove";
+    remove.textContent = "✕";
+    remove.title = "Forget this";
+    remove.addEventListener("click", () => forgetMemory({ id: entry.id }));
+    row.append(text, remove);
+    el.memoryList.append(row);
+  });
+}
+
+async function deleteGalleryItemById(id) {
+  const db = await openDb();
+  await txDone(db.transaction("items", "readwrite").objectStore("items").delete(id));
+}
+
+// Agent-facing gallery management: delete by ids, clear all, or retag a caption.
+async function manageGallery(args, toolId) {
+  const action = String(args.action || "").toLowerCase();
+  const items = await getGalleryItems().catch(() => []);
+  if (action === "delete") {
+    const ids = (Array.isArray(args.ids) ? args.ids : [args.id]).filter(Boolean);
+    if (!ids.length) return { error: "No gallery ids were provided to delete." };
+    const present = ids.filter((id) => items.some((item) => item.id === id));
+    for (const id of present) await deleteGalleryItemById(id);
+    await renderGallery();
+    updateToolEvent(toolId, "running", `Deleted ${present.length} gallery item(s).`);
+    return { ok: true, deleted: present.length };
+  }
+  if (action === "clear") {
+    await clearGallery();
+    return { ok: true, cleared: items.length };
+  }
+  if (action === "retag") {
+    const item = items.find((entry) => entry.id === args.id);
+    if (!item) return { error: "No matching gallery item to retag." };
+    item.prompt = String(args.prompt ?? item.prompt);
+    await putGalleryItem(item);
+    await renderGallery();
+    return { ok: true, id: item.id };
+  }
+  return { error: `Unknown gallery action "${action}". Use list, delete, clear, or retag.` };
+}
+
 function txDone(request) {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve();
@@ -2405,8 +3096,10 @@ async function startGibberlink() {
   const processor = audioContext.createScriptProcessor(4096, 1, 1);
   const sink = audioContext.createGain();
   sink.gain.value = 0;
+  const analyser = makeOrbAnalyser(audioContext);
+  source.connect(analyser);
 
-  state.gibber = { ggwave, instance, audioContext, stream, source, processor, sink, peer: null, turbo: false, transmitting: false, thinking: false, helloTimer: null, helloTries: 0 };
+  state.gibber = { ggwave, instance, audioContext, stream, source, processor, sink, analyser, peer: null, turbo: false, transmitting: false, thinking: false, helloTimer: null, helloTries: 0 };
 
   processor.onaudioprocess = (event) => {
     const g = state.gibber;
@@ -2428,6 +3121,7 @@ async function startGibberlink() {
   updateGibberStatus("Listening. Broadcasting handshake — waiting for a peer agent.");
   addMessage("system", "Gibberlink active: broadcasting handshake over sound. Bring another VoiceEnable agent within mic range.");
   playSound("convoStart");
+  startOrbViz(analyser);
   scheduleGibberHandshake();
 }
 
@@ -2465,6 +3159,7 @@ async function gibberSend(frame, options = {}) {
   const node = g.audioContext.createBufferSource();
   node.buffer = buffer;
   node.connect(g.audioContext.destination);
+  if (g.analyser) node.connect(g.analyser); // outgoing tones drive the orb
   g.transmitting = true;
   setOrb("speaking");
   node.start();
@@ -2562,6 +3257,7 @@ function stopGibberlink() {
   playSound("convoEnd");
   state.gibber = null;
   clearTimeout(g.helloTimer);
+  stopOrbViz();
   try { g.processor.disconnect(); } catch {}
   try { g.source.disconnect(); } catch {}
   try { g.sink.disconnect(); } catch {}

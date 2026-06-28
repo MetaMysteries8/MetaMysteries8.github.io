@@ -199,13 +199,34 @@ h2 { margin-bottom: 16px; }
   border-radius: 50%;
 }
 
+.orb {
+  --level: 0;
+}
+
 .orb-core {
   inset: 20%;
   background:
     radial-gradient(circle at 42% 35%, white, rgba(255, 255, 255, 0.2) 18%, transparent 26%),
     conic-gradient(from 110deg, var(--cyan), var(--violet), var(--hot), var(--cyan));
   filter: blur(0.2px);
-  box-shadow: 0 0 60px rgba(77, 232, 255, 0.42), inset 0 0 36px rgba(255, 255, 255, 0.22);
+  transform: scale(calc(0.9 + var(--level) * 0.2));
+  box-shadow:
+    0 0 calc(40px + var(--level) * 70px) rgba(77, 232, 255, calc(0.32 + var(--level) * 0.5)),
+    inset 0 0 36px rgba(255, 255, 255, 0.22);
+  transition: transform 70ms linear, box-shadow 70ms linear;
+}
+
+/* Reactive halo that blooms with audio level */
+.orb::after {
+  content: "";
+  position: absolute;
+  inset: 14%;
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(circle, rgba(77, 232, 255, calc(var(--level) * 0.5)), transparent 62%);
+  transform: scale(calc(1 + var(--level) * 0.7));
+  opacity: calc(0.25 + var(--level) * 0.75);
+  transition: transform 80ms linear, opacity 80ms linear;
 }
 
 .orb-ring {
@@ -216,6 +237,7 @@ h2 { margin-bottom: 16px; }
 
 .orb.listening .orb-ring { animation-duration: 0.8s; border-color: var(--cyan); }
 .orb.speaking .orb-ring { animation-duration: 0.55s; border-color: var(--hot); }
+.orb.speaking::after { background: radial-gradient(circle, rgba(255, 79, 216, calc(var(--level) * 0.55)), transparent 62%); }
 
 @keyframes breathe {
   0%, 100% { transform: scale(0.94); opacity: 0.45; }
@@ -1148,6 +1170,20 @@ input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; border: 0; bo
 @keyframes srcPulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
 @keyframes lensScan { 0%, 100% { left: 2%; top: 14%; } 50% { left: 66%; top: 48%; } }
 
+/* Gallery delete button */
+.gallery-delete { flex: 0 0 auto; width: 34px; padding: 8px 0; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--muted); cursor: pointer; transition: color var(--t-fast), border-color var(--t-fast), background var(--t-fast); }
+.gallery-delete:hover { color: var(--danger); border-color: rgba(255, 108, 136, 0.4); background: rgba(255, 108, 136, 0.08); }
+
+/* Long-term memory panel */
+.memory-block { display: grid; gap: 8px; margin-bottom: 12px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: rgba(0, 0, 0, 0.18); }
+.memory-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 0.9rem; }
+.memory-list { display: grid; gap: 6px; max-height: 180px; overflow: auto; }
+.memory-empty { margin: 0; color: var(--muted); font-size: 0.84rem; line-height: 1.4; }
+.memory-entry { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255, 255, 255, 0.03); }
+.memory-entry span { flex: 1; font-size: 0.86rem; overflow-wrap: anywhere; }
+.memory-remove { flex: 0 0 auto; width: 24px; height: 24px; border: 0; border-radius: 7px; background: rgba(255, 255, 255, 0.06); color: var(--muted); cursor: pointer; transition: color var(--t-fast), background var(--t-fast); }
+.memory-remove:hover { color: var(--danger); background: rgba(255, 108, 136, 0.12); }
+
 @media (max-width: 560px) {
   .viewer-stage { height: 200px; }
   .metric-grid { grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); }
@@ -1161,3 +1197,96 @@ input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; border: 0; bo
     scroll-behavior: auto !important;
   }
 }
+
+/* ============================================================
+   Multi-tile generation dock (one tile per in-flight job)
+   ============================================================ */
+.gen-dock {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  max-height: min(78vh, 560px);
+  overflow: auto;
+}
+.gen-dock[data-count="2"] { grid-template-columns: repeat(2, 1fr); }
+.gen-dock[data-count="3"],
+.gen-dock[data-count="4"] { grid-template-columns: repeat(2, 1fr); }
+.gen-dock[data-count="3"] .gen-tile:first-child { grid-column: span 2; }
+
+.gen-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--panel-strong);
+  overflow: hidden;
+  animation: cardArrive 320ms var(--ease);
+}
+.gen-tile .generation-visual { min-height: 120px; }
+.gen-dock[data-count="1"] .gen-tile .generation-visual { min-height: 190px; }
+.gen-tile-tag {
+  align-self: flex-start;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+.gen-tile-status { margin: 0; color: var(--muted); font-size: 0.82rem; overflow-wrap: anywhere; }
+.gen-tile.done { opacity: 0.7; }
+.gen-tile.done .gen-tile-tag { background: rgba(123, 255, 175, 0.16); color: var(--green); }
+
+/* Queued job: muted box with a glyph of what's coming */
+.gen-tile.queued { opacity: 0.85; }
+.queued-visual {
+  display: grid;
+  place-items: center;
+  background:
+    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.03) 0 10px, rgba(255, 255, 255, 0.06) 10px 20px),
+    rgba(8, 10, 21, 0.6);
+}
+.queued-glyph svg {
+  width: 56px;
+  height: 56px;
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.7;
+  animation: queuedPulse 1.8s ease-in-out infinite;
+}
+@keyframes queuedPulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.85; } }
+
+@media (max-width: 920px) {
+  .gen-dock, .gen-dock[data-count] { grid-template-columns: 1fr; }
+  .gen-dock[data-count] .gen-tile:first-child { grid-column: auto; }
+}
+
+/* Widget bar actions + saved-widgets drawer */
+.widget-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.drawer-hint { color: var(--muted); font-size: 0.86rem; line-height: 1.45; margin: 4px 0 12px; }
+.widget-list { display: grid; gap: 8px; min-height: 0; overflow: auto; }
+.widget-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.widget-row-info { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.widget-row-info strong { font-size: 0.92rem; overflow-wrap: anywhere; }
+.widget-row-info span { color: var(--muted); font-size: 0.8rem; overflow-wrap: anywhere; }
+.widget-row-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+
+/* Adaptive workspace: real scrolling so multiple widgets coexist without overflow */
+.adaptive-workspace { overflow-y: auto; overscroll-behavior: contain; }
+.workspace-card.widget { overflow: visible; }
+.widget-stage { resize: vertical; }
