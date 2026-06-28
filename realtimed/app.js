@@ -27,6 +27,7 @@ const state = {
   realtimeHealthTimer: null,
   balanceTimer: null,
   mediaRecorder: null,
+  gibber: null,
   chunks: [],
   generationActive: 0,
   generationQueue: [],
@@ -46,6 +47,7 @@ const el = {
   clearKey: document.querySelector("#clearKey"),
   modeRealtime: document.querySelector("#modeRealtime"),
   modePush: document.querySelector("#modePush"),
+  modeGibber: document.querySelector("#modeGibber"),
   mainAction: document.querySelector("#mainAction"),
   stopAction: document.querySelector("#stopAction"),
   orb: document.querySelector("#orb"),
@@ -117,6 +119,7 @@ function bindEvents() {
   el.clearKey.addEventListener("click", clearApiKey);
   el.modeRealtime.addEventListener("click", () => setMode("realtime"));
   el.modePush.addEventListener("click", () => setMode("push"));
+  el.modeGibber.addEventListener("click", () => setMode("gibber"));
   el.mainAction.addEventListener("click", handleMainAction);
   el.stopAction.addEventListener("click", stopAll);
   el.textForm.addEventListener("submit", handleTextSubmit);
@@ -124,8 +127,13 @@ function bindEvents() {
   el.clearWorkspace.addEventListener("click", clearWorkspace);
   el.clearGallery.addEventListener("click", clearGallery);
   el.mcpForm.addEventListener("submit", addMcpServer);
-  el.navButtons.forEach((button) => button.addEventListener("click", () => openDrawer(button.dataset.drawer)));
+  el.navButtons.forEach((button) => button.addEventListener("click", () => toggleDrawer(button.dataset.drawer)));
   el.drawerCloses.forEach((button) => button.addEventListener("click", closeDrawers));
+  el.scrim = document.createElement("div");
+  el.scrim.className = "drawer-scrim";
+  el.scrim.addEventListener("click", closeDrawers);
+  document.body.append(el.scrim);
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeDrawers(); });
   fields.forEach((id) => document.querySelector(`#${id}`).addEventListener("change", () => {
     saveSettings();
     applyPresets();
@@ -253,11 +261,19 @@ function renderAuth() {
 function openDrawer(id) {
   document.querySelectorAll(".drawer").forEach((drawer) => drawer.classList.toggle("active", drawer.id === id));
   el.navButtons.forEach((button) => button.classList.toggle("active", button.dataset.drawer === id));
+  el.scrim?.classList.add("active");
+}
+
+function toggleDrawer(id) {
+  const open = document.getElementById(id)?.classList.contains("active");
+  if (open) closeDrawers();
+  else openDrawer(id);
 }
 
 function closeDrawers() {
   document.querySelectorAll(".drawer").forEach((drawer) => drawer.classList.remove("active"));
   el.navButtons.forEach((button) => button.classList.remove("active"));
+  el.scrim?.classList.remove("active");
 }
 
 function applyPresets() {
@@ -336,7 +352,8 @@ function setMode(mode) {
   state.mode = mode;
   el.modeRealtime.classList.toggle("active", mode === "realtime");
   el.modePush.classList.toggle("active", mode === "push");
-  el.mainAction.textContent = mode === "realtime" ? "Start realtime" : "Hold to talk";
+  el.modeGibber.classList.toggle("active", mode === "gibber");
+  el.mainAction.textContent = mode === "realtime" ? "Start realtime" : mode === "gibber" ? "Start gibberlink" : "Hold to talk";
 }
 
 async function handleMainAction() {
@@ -350,6 +367,19 @@ async function handleMainAction() {
         setRealtimeStatus(error.message || "Realtime failed to start.", "warning");
         addMessage("system", `Realtime failed to start: ${error.message || error}`);
         stopRealtime();
+      }
+    }
+    return;
+  }
+  if (state.mode === "gibber") {
+    if (state.gibber) stopGibberlink();
+    else {
+      try {
+        await startGibberlink();
+      } catch (error) {
+        setRealtimeStatus(error.message || "Gibberlink failed to start.", "warning");
+        addMessage("system", `Gibberlink failed to start: ${error.message || error}`);
+        stopGibberlink();
       }
     }
     return;
@@ -619,6 +649,7 @@ async function runTool(name, args, realtimeCallId) {
     }
     else if (name === "ask_coder_model") result = await askCoder(args.task || args.prompt || "", toolId);
     else if (name === "call_mcp_server") result = await callMcp(args.server, args.tool, args.arguments || {}, toolId);
+    else if (name === "start_gibberlink") result = await activateGibberlink(args.message || "");
     else if (name === "show_workspace") result = showWorkspace(args, toolId);
     else if (name === "request_source_images") result = requestSourceImages(args, toolId);
     else if (name === "remove_workspace") result = removeWorkspace(args, toolId);
@@ -844,16 +875,19 @@ function toolDefinitions() {
     },
     { name: "ask_coder_model", description: "Delegate a coding task to the configured coder model. Returns { answer } with a short summary; when the task is a runnable web app/page/game it also returns { projectGalleryId } and saves the full HTML to the local gallery, where the user can open or download it. Tell the user it is in the gallery rather than pasting the code aloud.", parameters: objectParams({ task: "Coding task or question" }, ["task"]) },
     { name: "call_mcp_server", description: "Call a configured HTTP MCP gateway tool.", parameters: objectParams({ server: "Configured server name", tool: "MCP tool name", arguments: "Tool arguments object" }, ["server", "tool"]) },
+    { name: "start_gibberlink", description: "Switch into Gibberlink mode: a data-over-sound link (ggwave audio tones) for talking to ANOTHER AI agent instead of a human. Use when you recognize the other party is an AI and a reliable machine-to-machine exchange is warranted. Same-agent peers auto-negotiate a faster protocol. Optionally include an opening message to transmit.", parameters: objectParams({ message: "Optional opening message to transmit to the peer agent" }, []) },
     {
       name: "show_workspace",
-      description: "Render adaptive UI in the workspace: note, chart, table, checklist, or metrics. Use real structured data, not prose pretending to be a chart.",
+      description: "Render adaptive UI on the canvas: note, chart, table, checklist, metrics, or code. Use real structured data, not prose pretending to be a chart.",
       parameters: {
         type: "object",
         properties: {
-          layout: { type: "string", enum: ["note", "chart", "table", "checklist", "metrics"], description: "Workspace component type" },
+          layout: { type: "string", enum: ["note", "chart", "table", "checklist", "metrics", "code"], description: "Workspace component type" },
           title: { type: "string", description: "Short professional title" },
           summary: { type: "string", description: "One or two sentence explanation" },
-          data: { type: "array", description: "Rows, chart points, checklist items, or metrics", items: { type: "object", additionalProperties: true } },
+          content: { type: "string", description: "Body text for a 'note', or the source text for 'code'. Not used by data-driven layouts." },
+          language: { type: "string", description: "Language tag for a 'code' artifact, e.g. html, js, python." },
+          data: { type: "array", description: "Rows for chart/table/checklist/metrics. Chart rows: {label, value}. Checklist rows: {text, done}. Metrics rows: {label, value, note, delta}.", items: { type: "object", additionalProperties: true } },
         },
         required: ["layout", "title"],
       },
@@ -931,7 +965,7 @@ function objectParams(properties, required) {
 }
 
 function systemPrompt() {
-  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. When visual structure helps, call show_workspace to render a chart, table, checklist, note, or metrics instead of speaking a dense answer. For charts, provide rows with label and numeric value. For checklists, provide rows with text and done. If the user asks to reuse a prior image/video/audio, call list_gallery first. If the user asks to edit an existing image or use an existing image as a reference, use use_gallery_sources when the target is already in the gallery, otherwise call request_source_images. You can remove stale workspace items with remove_workspace. You can call a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."`;
+  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. When visual structure helps, call show_workspace to render a chart, table, checklist, note, metrics, or code block instead of speaking a dense answer. For charts, provide rows with label and numeric value. For checklists, provide rows with text and done. For metrics, provide rows with label, value, and optional note or delta. To show source code or markup, use layout "code" with the source in content and a language tag. If the user asks to reuse a prior image/video/audio, call list_gallery first. If the user asks to edit an existing image or use an existing image as a reference, use use_gallery_sources when the target is already in the gallery, otherwise call request_source_images. You can remove stale workspace items with remove_workspace. You can call a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize that the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink to switch to a data-over-sound link; ask the human's consent first unless they already requested it. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."`;
 }
 
 function personalityInstruction() {
@@ -1083,6 +1117,7 @@ function labelForTool(name) {
     create_audio: "Audio generation",
     ask_coder_model: "Coder model",
     call_mcp_server: "MCP tool call",
+    start_gibberlink: "Gibberlink handoff",
     show_workspace: "Workspace update",
     request_source_images: "Source image request",
     remove_workspace: "Workspace cleanup",
@@ -1104,6 +1139,7 @@ function summarizeToolResult(name, result) {
   if (name === "use_gallery_sources") return "Gallery sources used for generation.";
   if (name === "ask_coder_model") return "Coder model returned guidance.";
   if (name === "call_mcp_server") return "MCP server returned a result.";
+  if (name === "start_gibberlink") return result?.turbo ? "Gibberlink active (turbo channel)." : "Gibberlink active.";
   if (result?.galleryId) return `${capitalize(result.kind)} saved to local gallery.`;
   return "Tool completed.";
 }
@@ -1114,6 +1150,8 @@ function showWorkspace(args, toolId) {
     layout: args.layout || "note",
     title: args.title || "Workspace",
     summary: args.summary || "",
+    content: typeof args.content === "string" ? args.content.slice(0, 20000) : "",
+    language: args.language || "",
     prompt: args.prompt || "",
     purpose: args.purpose || "",
     minImages: args.minImages || 1,
@@ -1192,6 +1230,7 @@ function renderArtifact(artifact) {
   card.append(header);
   if (artifact.summary) {
     const summary = document.createElement("p");
+    summary.className = "card-summary";
     summary.textContent = artifact.summary;
     card.append(summary);
   }
@@ -1199,7 +1238,9 @@ function renderArtifact(artifact) {
   else if (artifact.layout === "table") card.append(renderTable(artifact.data));
   else if (artifact.layout === "checklist") card.append(renderChecklist(artifact.data, artifact.id));
   else if (artifact.layout === "metrics") card.append(renderMetrics(artifact.data));
+  else if (artifact.layout === "code") card.append(renderCode(artifact));
   else if (artifact.layout === "image_request") card.append(renderImageRequest(artifact));
+  else if (artifact.content) card.append(renderNoteBody(artifact.content));
   const remove = document.createElement("button");
   remove.className = "artifact-remove";
   remove.type = "button";
@@ -1219,23 +1260,98 @@ function renderChart(data) {
     const y = 90 - (row.value / max) * 72;
     return `${x},${y}`;
   }).join(" ");
+  const area = `0,92 ${points} 100,92`;
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 100 100");
+  svg.setAttribute("preserveAspectRatio", "none");
   svg.setAttribute("class", "workspace-svg-chart");
-  svg.innerHTML = `<polyline points="${points}"/><path d="M0 92H100"/>`;
+  const grid = [18, 38, 58, 78].map((y) => `<line x1="0" y1="${y}" x2="100" y2="${y}"/>`).join("");
+  svg.innerHTML = `<g class="chart-grid">${grid}</g><polygon class="chart-area" points="${area}"/><polyline points="${points}"/><path d="M0 92H100"/>`;
   wrap.append(svg);
   const bars = document.createElement("div");
   bars.className = "chart-bars";
-  for (const row of rows) {
+  rows.forEach((row, index) => {
+    const pct = Math.min(100, (row.value / max) * 100);
     const item = document.createElement("div");
     item.className = "chart-row";
-    item.innerHTML = `<span class="chart-label"></span><span class="chart-track"><span class="chart-fill" style="width:${Math.min(100, (row.value / max) * 100)}%"></span></span><span class="chart-value"></span>`;
+    item.title = `${row.label}: ${row.value}`;
+    item.innerHTML = `<span class="chart-label"></span><span class="chart-track"><span class="chart-fill"></span></span><span class="chart-value"></span>`;
     item.querySelector(".chart-label").textContent = row.label;
     item.querySelector(".chart-value").textContent = String(row.value ?? "");
+    const fill = item.querySelector(".chart-fill");
+    fill.style.setProperty("--delay", `${index * 60}ms`);
+    requestAnimationFrame(() => { fill.style.width = `${pct}%`; });
     bars.append(item);
-  }
+  });
   wrap.append(bars);
   return wrap;
+}
+
+function renderMetrics(data) {
+  const grid = document.createElement("div");
+  grid.className = "metric-grid";
+  normalizeRows(data).slice(0, 8).forEach((row) => {
+    const tile = document.createElement("div");
+    tile.className = "metric-tile";
+    const value = document.createElement("strong");
+    value.textContent = String(row.value ?? row.amount ?? row.count ?? "—");
+    const label = document.createElement("span");
+    label.className = "metric-label";
+    label.textContent = row.label || row.name || row.metric || "Metric";
+    tile.append(value, label);
+    const delta = row.delta ?? row.change;
+    if (delta != null && delta !== "") {
+      const num = Number(delta);
+      const note = document.createElement("span");
+      note.className = `metric-note ${num < 0 ? "down" : num > 0 ? "up" : ""}`;
+      note.textContent = `${num > 0 ? "▲ " : num < 0 ? "▼ " : ""}${row.note || delta}`;
+      tile.append(note);
+    } else if (row.note) {
+      const note = document.createElement("span");
+      note.className = "metric-note";
+      note.textContent = row.note;
+      tile.append(note);
+    }
+    grid.append(tile);
+  });
+  return grid;
+}
+
+function renderCode(artifact) {
+  const wrap = document.createElement("div");
+  wrap.className = "code-block";
+  const bar = document.createElement("div");
+  bar.className = "code-bar";
+  const lang = document.createElement("span");
+  lang.className = "code-lang";
+  lang.textContent = artifact.language || "text";
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "code-copy";
+  copy.textContent = "Copy";
+  copy.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(artifact.content || ""); copy.textContent = "Copied"; setTimeout(() => (copy.textContent = "Copy"), 1200); }
+    catch { copy.textContent = "Copy failed"; }
+  });
+  bar.append(lang, copy);
+  const pre = document.createElement("pre");
+  pre.className = "code-view";
+  const code = document.createElement("code");
+  code.textContent = artifact.content || "";
+  pre.append(code);
+  wrap.append(bar, pre);
+  return wrap;
+}
+
+function renderNoteBody(content) {
+  const body = document.createElement("div");
+  body.className = "note-body";
+  String(content).split(/\n{2,}/).map((block) => block.trim()).filter(Boolean).forEach((block) => {
+    const p = document.createElement("p");
+    p.textContent = block;
+    body.append(p);
+  });
+  return body;
 }
 
 function renderTable(data) {
@@ -1267,6 +1383,14 @@ function renderTable(data) {
 
 function renderChecklist(data, artifactId) {
   data = normalizeRows(data);
+  const wrap = document.createElement("div");
+  wrap.className = "checklist-wrap";
+  const done = data.filter((row) => row.done !== false).length;
+  const progress = document.createElement("div");
+  progress.className = "checklist-progress";
+  progress.innerHTML = `<span class="checklist-count"></span><span class="checklist-track"><span class="checklist-fill"></span></span>`;
+  progress.querySelector(".checklist-count").textContent = `${done}/${data.length || 0} done`;
+  progress.querySelector(".checklist-fill").style.width = `${data.length ? (done / data.length) * 100 : 0}%`;
   const list = document.createElement("ul");
   list.className = "checklist";
   data.forEach((row, index) => {
@@ -1274,14 +1398,15 @@ function renderChecklist(data, artifactId) {
     li.className = row.done === false ? "" : "complete";
     const check = document.createElement("span");
     check.className = "check";
-    check.textContent = row.done === false ? "" : "done";
+    check.textContent = row.done === false ? "" : "✓";
     const text = document.createElement("span");
     text.textContent = row.text || row.label || row.task || "Item";
     li.append(check, text);
     li.addEventListener("click", () => toggleChecklistItem(artifactId, index));
     list.append(li);
   });
-  return list;
+  wrap.append(progress, list);
+  return wrap;
 }
 
 function normalizeRows(data) {
@@ -1297,10 +1422,6 @@ function toggleChecklistItem(artifactId, index) {
   artifact.data[index].done = artifact.data[index].done === false;
   saveWorkspace();
   renderWorkspace();
-}
-
-function renderMetrics(data) {
-  return renderTable(data.map((row) => ({ metric: row.label || row.name || "Metric", value: row.value ?? "", note: row.note || "" })));
 }
 
 function renderImageRequest(artifact) {
@@ -1498,7 +1619,13 @@ function setOrb(mode) {
 
 function loadSettings() {
   fields.forEach((id) => {
-    if (state.settings[id]) document.querySelector(`#${id}`).value = state.settings[id];
+    const saved = state.settings[id];
+    if (!saved) return;
+    const field = document.querySelector(`#${id}`);
+    // Skip stale saved values that are no longer valid options (e.g. a realtime
+    // voice that was removed); otherwise the select would silently go blank.
+    if (field.tagName === "SELECT" && !Array.from(field.options).some((option) => option.value === saved)) return;
+    field.value = saved;
   });
 }
 
@@ -1573,40 +1700,124 @@ async function getGalleryItems() {
 async function renderGallery() {
   const items = await getGalleryItems().catch(() => []);
   el.gallery.innerHTML = "";
-  for (const item of items) {
-    const url = URL.createObjectURL(item.blob);
-    const card = document.createElement("article");
-    card.className = "gallery-item";
-    const media = item.kind === "image" ? document.createElement("img") : item.kind === "video" ? document.createElement("video") : item.kind === "project" ? document.createElement("iframe") : document.createElement("audio");
-    media.src = url;
-    if (item.kind === "project") media.sandbox = "allow-scripts allow-forms allow-modals allow-pointer-lock";
-    else if (item.kind !== "image") media.controls = true;
-    const caption = document.createElement("p");
-    caption.textContent = `${item.kind} / ${item.model}`;
-    const details = document.createElement("details");
-    const summary = document.createElement("summary");
-    summary.textContent = shortPrompt(item.prompt);
-    const full = document.createElement("p");
-    full.textContent = item.prompt;
-    details.append(summary, full);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${item.kind}-${item.id}.${extensionFor(item.kind, item.blob.type)}`;
-    link.textContent = "Download";
-    const useButton = document.createElement("button");
-    useButton.className = "gallery-use";
-    useButton.type = "button";
-    useButton.textContent = item.kind === "image" ? "Use as source" : item.kind === "project" ? "Open project" : "Show in canvas";
-    useButton.addEventListener("click", () => addGalleryReference(item));
-    card.append(media, caption, details, link, useButton);
-    el.gallery.append(card);
-  }
+  for (const item of items) el.gallery.append(await renderGalleryCard(item));
 }
 
-function addGalleryReference(item) {
+async function renderGalleryCard(item) {
+  const url = URL.createObjectURL(item.blob);
+  const card = document.createElement("article");
+  card.className = `gallery-item ${item.kind}`;
+
   if (item.kind === "project") {
-    showWorkspace({ layout: "note", title: "Runnable project", summary: "Open the project from the Gallery preview. Download the HTML file if you want to keep or edit it.", data: [{ id: item.id, model: item.model }] });
-    openDrawer("galleryDrawer");
+    card.append(await renderProjectViewer(item));
+  } else {
+    const media = item.kind === "image" ? document.createElement("img")
+      : item.kind === "video" ? document.createElement("video")
+      : document.createElement("audio");
+    media.src = url;
+    if (item.kind === "image") { media.loading = "lazy"; media.alt = shortPrompt(item.prompt); }
+    else media.controls = true;
+    card.append(media);
+  }
+
+  const caption = document.createElement("p");
+  caption.className = "gallery-caption";
+  caption.textContent = `${item.kind} · ${item.model}`;
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  summary.textContent = shortPrompt(item.prompt);
+  const full = document.createElement("p");
+  full.textContent = item.prompt;
+  details.append(summary, full);
+
+  const actions = document.createElement("div");
+  actions.className = "gallery-actions";
+  const link = document.createElement("a");
+  link.className = "gallery-download";
+  link.href = url;
+  link.download = `${item.kind}-${item.id}.${extensionFor(item.kind, item.blob.type)}`;
+  link.textContent = "Download";
+  const useButton = document.createElement("button");
+  useButton.className = "gallery-use";
+  useButton.type = "button";
+  useButton.textContent = item.kind === "image" ? "Use as source" : item.kind === "project" ? "Show source on canvas" : "Show in canvas";
+  useButton.addEventListener("click", () => addGalleryReference(item));
+  actions.append(link, useButton);
+
+  card.append(caption, details, actions);
+  return card;
+}
+
+// Projects are model-generated HTML, so they are untrusted. Show the source as
+// plain text by default and only execute on demand inside a sandboxed srcdoc
+// frame (no allow-same-origin => opaque origin: no access to this page, its
+// storage, the BYOP key, or cookies).
+async function renderProjectViewer(item) {
+  const code = await item.blob.text().catch(() => "");
+  const wrap = document.createElement("div");
+  wrap.className = "project-viewer";
+
+  const tabs = document.createElement("div");
+  tabs.className = "viewer-tabs";
+  const codeTab = document.createElement("button");
+  codeTab.type = "button";
+  codeTab.className = "viewer-tab active";
+  codeTab.textContent = "HTML source";
+  const runTab = document.createElement("button");
+  runTab.type = "button";
+  runTab.className = "viewer-tab";
+  runTab.textContent = "Run preview";
+  const copyBtn = document.createElement("button");
+  copyBtn.type = "button";
+  copyBtn.className = "viewer-copy";
+  copyBtn.textContent = "Copy";
+  copyBtn.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(code); copyBtn.textContent = "Copied"; setTimeout(() => (copyBtn.textContent = "Copy"), 1200); }
+    catch { copyBtn.textContent = "Copy failed"; }
+  });
+  tabs.append(codeTab, runTab, copyBtn);
+
+  const stage = document.createElement("div");
+  stage.className = "viewer-stage";
+  const codeView = document.createElement("pre");
+  codeView.className = "code-view";
+  const codeEl = document.createElement("code");
+  codeEl.textContent = code; // textContent: HTML is shown literally, never parsed.
+  codeView.append(codeEl);
+  stage.append(codeView);
+
+  let frame = null;
+  codeTab.addEventListener("click", () => {
+    codeTab.classList.add("active"); runTab.classList.remove("active");
+    stage.replaceChildren(codeView);
+  });
+  runTab.addEventListener("click", () => {
+    runTab.classList.add("active"); codeTab.classList.remove("active");
+    if (!frame) {
+      frame = document.createElement("iframe");
+      frame.className = "project-frame";
+      frame.setAttribute("sandbox", "allow-scripts allow-modals allow-pointer-lock");
+      frame.setAttribute("referrerpolicy", "no-referrer");
+      frame.srcdoc = code;
+    }
+    stage.replaceChildren(frame);
+  });
+
+  wrap.append(tabs, stage);
+  return wrap;
+}
+
+async function addGalleryReference(item) {
+  if (item.kind === "project") {
+    const code = await item.blob.text().catch(() => "");
+    showWorkspace({
+      layout: "code",
+      title: "Project source",
+      summary: shortPrompt(item.prompt),
+      language: "html",
+      content: code,
+    });
+    closeDrawers();
     return;
   }
   showWorkspace({
@@ -1648,8 +1859,199 @@ function extensionFor(kind, mime) {
   return "jpg";
 }
 
+// ---------------------------------------------------------------------------
+// Gibberlink: agent-to-agent data over sound via ggwave (data-over-sound modem).
+// When two instances hear each other's handshake they exchange JSON frames as
+// audio tones instead of speech. Inspired by github.com/PennyroyalTea/gibberlink.
+// ---------------------------------------------------------------------------
+const GIBBER = {
+  CDN: "https://unpkg.com/ggwave/ggwave.js",
+  AGENT_ID: "VOICEENABLE",
+  VERSION: 1,
+  PROTO_COMPAT: "GGWAVE_PROTOCOL_AUDIBLE_FAST",   // interoperable default
+  PROTO_TURBO: "GGWAVE_PROTOCOL_AUDIBLE_FASTEST", // noisy/fast, used peer-to-peer
+};
+
+let ggwavePromise = null;
+function loadGgwave() {
+  if (window.ggwave_factory) return Promise.resolve(window.ggwave_factory);
+  if (ggwavePromise) return ggwavePromise;
+  ggwavePromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = GIBBER.CDN;
+    script.async = true;
+    script.onload = () => window.ggwave_factory ? resolve(window.ggwave_factory) : reject(new Error("ggwave loaded but factory missing."));
+    script.onerror = () => { ggwavePromise = null; reject(new Error("Could not load the ggwave sound library (offline or blocked).")); };
+    document.head.append(script);
+  });
+  return ggwavePromise;
+}
+
+// ggwave passes raw float bytes reinterpreted as another typed array, not a value cast.
+function reinterpret(src, Type) {
+  const buffer = new ArrayBuffer(src.byteLength);
+  new src.constructor(buffer).set(src);
+  return new Type(buffer);
+}
+
+async function startGibberlink() {
+  if (!requireKey()) throw new Error("Connect BYOP first.");
+  if (state.gibber) return;
+  setRealtimeStatus("Loading gibberlink sound modem...", "live");
+  const factory = await loadGgwave();
+  const ggwave = await factory();
+  const audioContext = new AudioContext();
+  const params = ggwave.getDefaultParameters();
+  params.sampleRateInp = audioContext.sampleRate;
+  params.sampleRateOut = audioContext.sampleRate;
+  const instance = ggwave.init(params);
+
+  // Echo cancellation/noise suppression would eat the data tones, so disable them.
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+  const source = audioContext.createMediaStreamSource(stream);
+  const processor = audioContext.createScriptProcessor(4096, 1, 1);
+  const sink = audioContext.createGain();
+  sink.gain.value = 0;
+
+  state.gibber = { ggwave, instance, audioContext, stream, source, processor, sink, peer: null, turbo: false, transmitting: false, thinking: false };
+
+  processor.onaudioprocess = (event) => {
+    const g = state.gibber;
+    if (!g || g.transmitting) return; // ignore our own outgoing tones
+    const input = new Float32Array(event.inputBuffer.getChannelData(0));
+    const decoded = g.ggwave.decode(g.instance, reinterpret(input, Int8Array));
+    if (decoded && decoded.length > 0) {
+      const text = new TextDecoder("utf-8").decode(decoded);
+      if (text) onGibberFrame(text);
+    }
+  };
+  source.connect(processor);
+  processor.connect(sink);
+  sink.connect(audioContext.destination);
+
+  setOrb("listening");
+  el.mainAction.textContent = "Stop gibberlink";
+  updateGibberStatus("Listening. Sent handshake — waiting for a peer agent.");
+  addMessage("system", "Gibberlink active: broadcasting handshake over sound. Bring another VoiceEnable agent within mic range.");
+  await gibberSend({ t: "hello", id: GIBBER.AGENT_ID, v: GIBBER.VERSION, model: value("textModel") }, { turbo: false });
+}
+
+async function gibberSend(frame, options = {}) {
+  const g = state.gibber;
+  if (!g) return;
+  const useTurbo = options.turbo ?? g.turbo;
+  const protocolName = useTurbo ? GIBBER.PROTO_TURBO : GIBBER.PROTO_COMPAT;
+  const protocol = g.ggwave.ProtocolId[protocolName];
+  const payload = typeof frame === "string" ? frame : JSON.stringify(frame);
+  const waveform = g.ggwave.encode(g.instance, payload, protocol, 10);
+  const samples = reinterpret(waveform, Float32Array);
+  const buffer = g.audioContext.createBuffer(1, samples.length, g.audioContext.sampleRate);
+  buffer.getChannelData(0).set(samples);
+  const node = g.audioContext.createBufferSource();
+  node.buffer = buffer;
+  node.connect(g.audioContext.destination);
+  g.transmitting = true;
+  setOrb("speaking");
+  node.start();
+  await new Promise((resolve) => { node.onended = resolve; });
+  // Brief cooldown so the mic tail of our own transmission is not decoded back.
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  if (state.gibber) { state.gibber.transmitting = false; setOrb("listening"); }
+}
+
+async function onGibberFrame(raw) {
+  const g = state.gibber;
+  if (!g) return;
+  let frame;
+  try { frame = JSON.parse(raw); } catch { frame = { t: "msg", text: raw }; }
+
+  if (frame.t === "hello") {
+    const sameAgent = frame.id === GIBBER.AGENT_ID;
+    g.peer = { id: frame.id || "unknown", model: frame.model || "" };
+    addMessage("system", `Gibberlink: recognized peer "${g.peer.id}"${sameAgent ? " (same agent type)" : ""}.`);
+    // Reply so the peer also learns about us, and negotiate the faster protocol
+    // when we are the same agent type on both ends.
+    await gibberSend({ t: "ack", id: GIBBER.AGENT_ID, v: GIBBER.VERSION, model: value("textModel"), turbo: sameAgent }, { turbo: false });
+    if (sameAgent) g.turbo = true;
+    updateGibberStatus();
+    return;
+  }
+  if (frame.t === "ack") {
+    g.peer = g.peer || { id: frame.id || "unknown", model: frame.model || "" };
+    if (frame.turbo) g.turbo = true;
+    updateGibberStatus("Peer linked. Channel ready.");
+    return;
+  }
+  if (frame.t === "msg" && frame.text) {
+    addMessage("user", frame.text);
+    if (g.thinking) return;
+    g.thinking = true;
+    updateGibberStatus("Peer message received. Composing reply...");
+    try {
+      const reply = await gibberRespond(frame.text);
+      if (reply && state.gibber) {
+        addMessage("agent", reply);
+        await gibberSend({ t: "msg", id: GIBBER.AGENT_ID, text: reply });
+      }
+    } finally {
+      if (state.gibber) state.gibber.thinking = false;
+      updateGibberStatus();
+    }
+  }
+}
+
+async function gibberRespond(text) {
+  const history = state.messages
+    .filter((m) => m.role === "user" || m.role === "agent")
+    .slice(-8)
+    .map((m) => ({ role: m.role === "agent" ? "assistant" : "user", content: m.content }));
+  const result = await postJson("/v1/chat/completions", {
+    model: value("textModel"),
+    messages: [{ role: "system", content: gibberSystemPrompt() }, ...history],
+  });
+  if (result?.error) return "";
+  return result?.choices?.[0]?.message?.content?.trim() || "";
+}
+
+function gibberSystemPrompt() {
+  return `You are a VoiceEnable agent exchanging data with ANOTHER AI agent over a slow audio data-link (gibberlink). Both sides are machines. Be extremely concise and information-dense: drop greetings, filler, and politeness. Prefer short structured statements. Personality: ${personalityInstruction()}.`;
+}
+
+function updateGibberStatus(note) {
+  const g = state.gibber;
+  if (!g) return;
+  const channel = g.turbo ? "turbo (peer-to-peer)" : "compatible";
+  const peer = g.peer ? `peer ${g.peer.id}` : "no peer yet";
+  setRealtimeStatus(note ? `Gibberlink: ${note} (${channel}, ${peer})` : `Gibberlink linked — ${channel} channel, ${peer}.`, "ready");
+}
+
+async function activateGibberlink(message) {
+  if (state.mode !== "gibber") setMode("gibber");
+  if (!state.gibber) await startGibberlink();
+  if (message) {
+    addMessage("agent", message);
+    await gibberSend({ t: "msg", id: GIBBER.AGENT_ID, text: message });
+  }
+  return { ok: true, mode: "gibberlink", turbo: !!state.gibber?.turbo, peer: state.gibber?.peer || null };
+}
+
+function stopGibberlink() {
+  const g = state.gibber;
+  if (!g) return;
+  state.gibber = null;
+  try { g.processor.disconnect(); } catch {}
+  try { g.source.disconnect(); } catch {}
+  try { g.sink.disconnect(); } catch {}
+  g.stream?.getTracks().forEach((track) => track.stop());
+  g.audioContext?.close().catch(() => {});
+  if (state.mode === "gibber") el.mainAction.textContent = "Start gibberlink";
+  setOrb("idle");
+  setRealtimeStatus("Gibberlink idle", "idle");
+}
+
 function stopAll() {
   stopRealtime();
+  stopGibberlink();
   if (state.mediaRecorder?.state === "recording") state.mediaRecorder.stop();
 }
 
