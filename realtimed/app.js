@@ -72,6 +72,7 @@ const state = {
   mcps: JSON.parse(localStorage.getItem("mcp_servers") || "[]"),
   flags: JSON.parse(localStorage.getItem("feature_flags") || "{}"),
   camera: null,
+  pendingImages: [],
 };
 
 // Feature toggles surfaced in the Config panel. Defaults chosen so the app works
@@ -90,6 +91,13 @@ function flag(name) {
 function setFlag(name, value) {
   state.flags[name] = !!value;
   localStorage.setItem("feature_flags", JSON.stringify(state.flags));
+}
+
+function wireFlag(id, name) {
+  const box = document.querySelector(`#${id}`);
+  if (!box) return;
+  box.checked = flag(name);
+  box.addEventListener("change", () => setFlag(name, box.checked));
 }
 
 const el = {
@@ -111,6 +119,11 @@ const el = {
   transcript: document.querySelector("#transcript"),
   textForm: document.querySelector("#textForm"),
   textInput: document.querySelector("#textInput"),
+  imageInput: document.querySelector("#imageInput"),
+  attachImage: document.querySelector("#attachImage"),
+  attachStrip: document.querySelector("#attachStrip"),
+  cameraToggle: document.querySelector("#cameraToggle"),
+  cameraPreview: document.querySelector("#cameraPreview"),
   clearConversation: document.querySelector("#clearConversation"),
   clearWorkspace: document.querySelector("#clearWorkspace"),
   adaptiveWorkspace: document.querySelector("#adaptiveWorkspace"),
@@ -311,6 +324,9 @@ function bindEvents() {
   el.mainAction.addEventListener("click", handleMainAction);
   el.stopAction.addEventListener("click", stopAll);
   el.textForm.addEventListener("submit", handleTextSubmit);
+  el.attachImage?.addEventListener("click", () => el.imageInput?.click());
+  el.imageInput?.addEventListener("change", () => handleImageUpload([...el.imageInput.files]).finally(() => { el.imageInput.value = ""; }));
+  el.cameraToggle?.addEventListener("click", toggleCamera);
   el.clearConversation.addEventListener("click", clearConversation);
   el.clearWorkspace.addEventListener("click", clearWorkspace);
   el.clearGallery.addEventListener("click", clearGallery);
@@ -321,6 +337,10 @@ function bindEvents() {
   el.soundVolume.addEventListener("input", () => setSoundVolume(Number(el.soundVolume.value) / 100));
   el.clearMemory.addEventListener("click", () => forgetMemory({ all: true }));
   el.clearWidgets?.addEventListener("click", clearSavedWidgets);
+  wireFlag("flagEndConversation", "endConversation");
+  wireFlag("flagVoiceInterrupt", "voiceInterrupt");
+  wireFlag("flagAutosaveUploads", "autosaveUploads");
+  wireFlag("flagCamera", "camera");
   window.addEventListener("message", handleWidgetMessage);
   el.navButtons.forEach((button) => button.addEventListener("click", () => toggleDrawer(button.dataset.drawer)));
   el.drawerCloses.forEach((button) => button.addEventListener("click", closeDrawers));
@@ -696,7 +716,7 @@ async function startRealtime() {
   source.connect(analyser); // mic drives the orb while listening
   const socket = new WebSocket(`${GEN_BASE.replace("https", "wss")}/v1/realtime?model=${REALTIME_MODEL}&key=${encodeURIComponent(state.apiKey)}`);
 
-  state.realtime = { socket, stream, audioContext, processor, output, mutedMonitor, analyser, nextStart: audioContext.currentTime, gotSession: false, gotAudio: false, retriedWithoutVoice: false };
+  state.realtime = { socket, stream, audioContext, processor, output, mutedMonitor, analyser, nextStart: audioContext.currentTime, gotSession: false, gotAudio: false, retriedWithoutVoice: false, handledCalls: new Set(), scheduled: [] };
   setOrb("listening");
   startOrbViz(analyser);
   el.mainAction.textContent = "Stop realtime";
@@ -744,9 +764,21 @@ function handleRealtimeEvent(event) {
   if (event.type === "response.audio_transcript.done" && event.transcript) addMessage("agent", event.transcript);
   if (event.type === "response.output_audio_transcript.done" && event.transcript) addMessage("agent", event.transcript);
   if (event.type === "conversation.item.input_audio_transcription.completed" && event.transcript) addMessage("user", event.transcript);
-  if (event.type === "input_audio_buffer.speech_started") setRealtimeStatus("Listening...", "live");
+  if (event.type === "input_audio_buffer.speech_started") {
+    setRealtimeStatus("Listening...", "live");
+    // Barge-in: the user started talking over the model — cut its audio short and
+    // cancel the in-flight response so it actually stops instead of talking past.
+    if (flag("voiceInterrupt") && state.realtime?.scheduled?.length) interruptRealtime();
+  }
   if (event.type === "input_audio_buffer.speech_stopped") setRealtimeStatus("Thinking...", "live");
-  if (event.type === "response.function_call_arguments.done") runTool(event.name, JSON.parse(event.arguments || "{}"), event.call_id);
+  if (event.type === "response.function_call_arguments.done") {
+    const rt = state.realtime;
+    // Guard against the same function call being dispatched twice (which caused
+    // the occasional double image/video generation).
+    if (rt && event.call_id && rt.handledCalls.has(event.call_id)) return;
+    if (rt && event.call_id) rt.handledCalls.add(event.call_id);
+    runTool(event.name, JSON.parse(event.arguments || "{}"), event.call_id);
+  }
   if (event.type === "error") {
     const message = event.error?.message || "Realtime returned an error.";
     if (/voice/i.test(message) && /unknown|unsupported|invalid|not (allowed|supported)|param/i.test(message) && state.realtime && !state.realtime.retriedWithoutVoice) {
@@ -780,6 +812,24 @@ function playPcmDelta(base64) {
   rt.nextStart = Math.max(rt.nextStart, rt.audioContext.currentTime);
   source.start(rt.nextStart);
   rt.nextStart += buffer.duration;
+  // Track scheduled chunks so a barge-in can stop them immediately.
+  rt.scheduled.push(source);
+  source.onended = () => {
+    if (state.realtime === rt) rt.scheduled = rt.scheduled.filter((node) => node !== source);
+  };
+}
+
+// Stop the model mid-utterance: kill every scheduled audio chunk, reset the
+// playback clock, and tell the server to cancel the in-flight response.
+function interruptRealtime() {
+  const rt = state.realtime;
+  if (!rt) return;
+  for (const node of rt.scheduled) { try { node.onended = null; node.stop(); node.disconnect(); } catch { /* already ended */ } }
+  rt.scheduled = [];
+  rt.nextStart = rt.audioContext.currentTime;
+  if (rt.socket?.readyState === WebSocket.OPEN) rt.socket.send(JSON.stringify({ type: "response.cancel" }));
+  setOrb("listening");
+  setRealtimeStatus("Interrupted — listening...", "live");
 }
 
 function stopRealtime() {
@@ -812,6 +862,7 @@ function handleRealtimeClose(event) {
 function cleanupRealtime() {
   const rt = state.realtime;
   if (!rt) return;
+  stopCamera(); // camera vision only makes sense during a live session
   clearTimeout(state.realtimeHealthTimer);
   state.realtimeHealthTimer = null;
   rt.processor?.disconnect();
@@ -881,25 +932,151 @@ async function transcribe(blob) {
   return json.text || "";
 }
 
+// Multi-image upload: each picked image is auto-saved to the gallery (so it is
+// reusable as a generation source) and staged to send to the model on next send.
+async function handleImageUpload(files) {
+  const images = files.filter((file) => file.type.startsWith("image/"));
+  if (!images.length) return;
+  for (const file of images) {
+    let url;
+    try { url = await blobToDataUrl(file); }
+    catch { addMessage("system", `Could not read ${file.name || "an image"}.`); continue; }
+    let galleryId = null;
+    if (flag("autosaveUploads")) {
+      // Best-effort: even if the gallery write fails, still attach the image.
+      try {
+        const item = await saveGalleryItem({ kind: "image", prompt: `Uploaded: ${file.name || "image"}`, model: "upload", blob: file });
+        galleryId = item.id;
+      } catch { /* gallery unavailable; attachment still works */ }
+    }
+    state.pendingImages.push({ url, galleryId, name: file.name || "image" });
+  }
+  renderAttachStrip();
+  const where = state.realtime ? "the live agent when you send" : "your next message";
+  addMessage("system", `Attached ${images.length} image${images.length > 1 ? "s" : ""}${flag("autosaveUploads") ? " (saved to gallery)" : ""}. They'll go to ${where}.`);
+}
+
+function renderAttachStrip() {
+  if (!el.attachStrip) return;
+  el.attachStrip.innerHTML = "";
+  el.attachStrip.classList.toggle("active", state.pendingImages.length > 0);
+  state.pendingImages.forEach((image, index) => {
+    const chip = document.createElement("div");
+    chip.className = "attach-chip";
+    const thumb = document.createElement("img");
+    thumb.src = image.url;
+    thumb.alt = image.name || "Attached image";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "attach-remove";
+    remove.textContent = "✕";
+    remove.title = "Remove attachment";
+    remove.addEventListener("click", () => { state.pendingImages.splice(index, 1); renderAttachStrip(); });
+    chip.append(thumb, remove);
+    el.attachStrip.append(chip);
+  });
+}
+
+function clearPendingImages() {
+  state.pendingImages = [];
+  renderAttachStrip();
+}
+
+// Send a user turn (text and/or images) into the live realtime voice session.
+function sendRealtimeUserInput(text, imageUrls) {
+  const rt = state.realtime;
+  if (!rt || rt.socket?.readyState !== WebSocket.OPEN) return;
+  const content = [];
+  if (text) content.push({ type: "input_text", text });
+  for (const url of imageUrls || []) content.push({ type: "input_image", image_url: url });
+  if (!content.length) return;
+  rt.socket.send(JSON.stringify({ type: "conversation.item.create", item: { type: "message", role: "user", content } }));
+  rt.socket.send(JSON.stringify({ type: "response.create" }));
+}
+
+// Live camera sharing (realtime only): periodically push a frame into the session
+// so the model can see what the user is doing without forcing a reply each frame.
+async function toggleCamera() {
+  if (state.camera) return stopCamera();
+  if (!flag("camera")) { addMessage("system", "Turn on camera vision in Config first, then start your camera."); return; }
+  if (!state.realtime) { addMessage("system", "Start a realtime session first, then share your camera with the agent."); return; }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+  } catch {
+    addMessage("system", "Camera unavailable or permission denied.");
+    return;
+  }
+  const video = el.cameraPreview;
+  video.srcObject = stream;
+  video.classList.remove("hidden");
+  await video.play().catch(() => {});
+  state.camera = { stream, video, canvas: document.createElement("canvas"), timer: null };
+  el.cameraToggle?.classList.add("active");
+  if (el.cameraToggle) el.cameraToggle.textContent = "Stop camera";
+  addMessage("system", "Camera on: the agent now sees your camera live. Talk to it about what it sees.");
+  state.camera.timer = setInterval(sendCameraFrame, 2000);
+  sendCameraFrame();
+}
+
+function sendCameraFrame() {
+  const cam = state.camera;
+  const rt = state.realtime;
+  if (!cam || !rt || rt.socket?.readyState !== WebSocket.OPEN) return;
+  const video = cam.video;
+  if (!video.videoWidth) return;
+  cam.canvas.width = video.videoWidth;
+  cam.canvas.height = video.videoHeight;
+  cam.canvas.getContext("2d").drawImage(video, 0, 0);
+  let url;
+  try { url = cam.canvas.toDataURL("image/jpeg", 0.55); } catch { return; }
+  // No response.create: frames just enrich context for the model's next reply.
+  rt.socket.send(JSON.stringify({ type: "conversation.item.create", item: { type: "message", role: "user", content: [{ type: "input_image", image_url: url }] } }));
+}
+
+function stopCamera() {
+  const cam = state.camera;
+  if (!cam) return;
+  clearInterval(cam.timer);
+  cam.stream?.getTracks().forEach((track) => track.stop());
+  if (cam.video) { cam.video.srcObject = null; cam.video.classList.add("hidden"); }
+  state.camera = null;
+  el.cameraToggle?.classList.remove("active");
+  if (el.cameraToggle) el.cameraToggle.textContent = "Camera";
+}
+
 async function handleTextSubmit(event) {
   event.preventDefault();
   if (!requireKey()) return;
   const text = el.textInput.value.trim();
-  if (!text) return;
+  const images = state.pendingImages.slice();
+  if (!text && !images.length) return;
   el.textInput.value = "";
-  addMessage("user", text);
+  clearPendingImages();
+  const label = text || (images.length ? `Sent ${images.length} image${images.length > 1 ? "s" : ""}.` : "");
+  addMessage("user", images.length && text ? `${text}  ·  ${images.length} image${images.length > 1 ? "s" : ""}` : label);
   playSound("messageSend");
-  await chat(text, false);
+  // Images go to whichever model is live: the realtime voice model sees them over
+  // the socket; otherwise the text model gets them as vision content.
+  if (state.realtime) sendRealtimeUserInput(text, images.map((image) => image.url));
+  else await chat(text, false, images.map((image) => image.url));
 }
 
-async function chat(text, speak) {
+async function chat(text, speak, images) {
   const history = state.messages
     .filter((m) => m.role === "user" || m.role === "agent")
     .slice(-12)
     .map((m) => ({ role: m.role === "agent" ? "assistant" : "user", content: m.content }));
-  // The current user turn was already pushed via addMessage(), so it is the last
-  // history entry. Only append `text` as a fallback if it is somehow missing.
-  if (history[history.length - 1]?.content !== text) history.push({ role: "user", content: text });
+  if (images && images.length) {
+    // Replace the latest user turn with multimodal content so the model can see.
+    const content = [{ type: "text", text: text || "Look at the attached image(s)." }, ...images.map((url) => ({ type: "image_url", image_url: { url } }))];
+    if (history.length && history[history.length - 1].role === "user") history[history.length - 1].content = content;
+    else history.push({ role: "user", content });
+  } else if (history[history.length - 1]?.content !== text) {
+    // The current user turn was already pushed via addMessage(), so it is the last
+    // history entry. Only append `text` as a fallback if it is somehow missing.
+    history.push({ role: "user", content: text });
+  }
   const payload = {
     model: value("textModel"),
     messages: [{ role: "system", content: systemPrompt() }, ...history],
@@ -958,7 +1135,43 @@ async function speakText(text) {
   await el.modelAudio.play().catch(() => {});
 }
 
+// Suppress accidental duplicate tool invocations (a realtime/text model that
+// fires the same expensive call twice in quick succession). Keyed by tool name +
+// arguments within a short sliding window.
+const recentToolCalls = new Map();
+const DEDUPE_TOOLS = new Set(["create_image", "create_video", "create_audio", "build_widget", "ask_coder_model", "web_search"]);
+const DEDUPE_WINDOW_MS = 6000;
+
+function stableStringify(obj) {
+  if (!obj || typeof obj !== "object") return JSON.stringify(obj ?? null);
+  return JSON.stringify(Object.keys(obj).sort().reduce((acc, key) => { acc[key] = obj[key]; return acc; }, {}));
+}
+
+function isDuplicateToolCall(name, args) {
+  if (!DEDUPE_TOOLS.has(name)) return false;
+  const now = Date.now();
+  for (const [key, at] of recentToolCalls) if (now - at > DEDUPE_WINDOW_MS) recentToolCalls.delete(key);
+  const dedupeKey = `${name}:${stableStringify(args)}`;
+  const prior = recentToolCalls.get(dedupeKey);
+  recentToolCalls.set(dedupeKey, now);
+  return prior != null && now - prior < DEDUPE_WINDOW_MS;
+}
+
+function sendRealtimeToolOutput(callId, result, triggerResponse = true) {
+  if (!(callId && state.realtime?.socket?.readyState === WebSocket.OPEN)) return;
+  state.realtime.socket.send(JSON.stringify({
+    type: "conversation.item.create",
+    item: { type: "function_call_output", call_id: callId, output: JSON.stringify(result) },
+  }));
+  if (triggerResponse) state.realtime.socket.send(JSON.stringify({ type: "response.create" }));
+}
+
 async function runTool(name, args, realtimeCallId) {
+  if (isDuplicateToolCall(name, args)) {
+    const result = { ok: true, deduped: true, note: "An identical request was just issued; the duplicate was skipped." };
+    sendRealtimeToolOutput(realtimeCallId, result, false);
+    return result;
+  }
   const toolId = addToolEvent(name, args);
   let result;
   try {
@@ -992,14 +1205,7 @@ async function runTool(name, args, realtimeCallId) {
     result = { error: (error && error.message) || String(error) || "Tool failed." };
   }
   updateToolEvent(toolId, result?.error ? "error" : "done", summarizeToolResult(name, result));
-
-  if (realtimeCallId && state.realtime?.socket?.readyState === WebSocket.OPEN) {
-    state.realtime.socket.send(JSON.stringify({
-      type: "conversation.item.create",
-      item: { type: "function_call_output", call_id: realtimeCallId, output: JSON.stringify(result) },
-    }));
-    state.realtime.socket.send(JSON.stringify({ type: "response.create" }));
-  }
+  sendRealtimeToolOutput(realtimeCallId, result);
   return result;
 }
 
@@ -1042,7 +1248,7 @@ function pumpGenerationQueue() {
     Promise.resolve()
       .then(job.task)
       .then(job.resolve)
-      .catch((error) => job.resolve({ error: error.message || String(error) }))
+      .catch((error) => job.resolve({ error: (error && error.message) || String(error) || "Generation failed." }))
       .finally(() => {
         state.generationActive -= 1;
         pumpGenerationQueue();
@@ -2777,11 +2983,12 @@ async function getGalleryItems() {
 
 async function renderGallery() {
   const items = await getGalleryItems().catch(() => []);
+  state.galleryItems = items;
   el.gallery.innerHTML = "";
-  for (const item of items) el.gallery.append(await renderGalleryCard(item));
+  for (let index = 0; index < items.length; index += 1) el.gallery.append(await renderGalleryCard(items[index], index));
 }
 
-async function renderGalleryCard(item) {
+async function renderGalleryCard(item, index) {
   const url = URL.createObjectURL(item.blob);
   const card = document.createElement("article");
   card.className = `gallery-item ${item.kind}`;
@@ -2795,6 +3002,11 @@ async function renderGalleryCard(item) {
     media.src = url;
     if (item.kind === "image") { media.loading = "lazy"; media.alt = shortPrompt(item.prompt); }
     else media.controls = true;
+    // Click image/video to open the full-size lightbox overlay.
+    if (item.kind === "image" || item.kind === "video") {
+      media.classList.add("gallery-openable");
+      media.addEventListener("click", () => openLightbox(index));
+    }
     card.append(media);
   }
 
@@ -2926,6 +3138,107 @@ async function clearGallery() {
   const db = await openDb();
   await txDone(db.transaction("items", "readwrite").objectStore("items").clear());
   renderGallery();
+}
+
+// ---- Gallery lightbox: a full overlay showing one item at size, with prev/next
+// navigation and the same actions (download, use-as-source, delete). ----
+function createGalleryLightbox() {
+  const overlay = document.createElement("div");
+  overlay.className = "lightbox";
+  overlay.innerHTML = `
+    <div class="lightbox-backdrop"></div>
+    <div class="lightbox-panel" role="dialog" aria-modal="true">
+      <button class="lightbox-close" type="button" aria-label="Close">✕</button>
+      <button class="lightbox-nav prev" type="button" aria-label="Previous">‹</button>
+      <div class="lightbox-stage"></div>
+      <button class="lightbox-nav next" type="button" aria-label="Next">›</button>
+      <div class="lightbox-meta">
+        <p class="lightbox-caption"></p>
+        <p class="lightbox-prompt"></p>
+        <div class="lightbox-actions"></div>
+      </div>
+    </div>`;
+  document.body.append(overlay);
+  el.lightbox = {
+    overlay,
+    stage: overlay.querySelector(".lightbox-stage"),
+    caption: overlay.querySelector(".lightbox-caption"),
+    prompt: overlay.querySelector(".lightbox-prompt"),
+    actions: overlay.querySelector(".lightbox-actions"),
+  };
+  overlay.querySelector(".lightbox-backdrop").addEventListener("click", closeLightbox);
+  overlay.querySelector(".lightbox-close").addEventListener("click", closeLightbox);
+  overlay.querySelector(".prev").addEventListener("click", () => stepLightbox(-1));
+  overlay.querySelector(".next").addEventListener("click", () => stepLightbox(1));
+  document.addEventListener("keydown", (event) => {
+    if (!overlay.classList.contains("active")) return;
+    if (event.key === "Escape") closeLightbox();
+    else if (event.key === "ArrowLeft") stepLightbox(-1);
+    else if (event.key === "ArrowRight") stepLightbox(1);
+  });
+}
+
+function openLightbox(index) {
+  if (!el.lightbox) createGalleryLightbox();
+  state.lightboxIndex = index;
+  el.lightbox.overlay.classList.add("active");
+  renderLightbox();
+}
+
+function closeLightbox() {
+  el.lightbox?.overlay.classList.remove("active");
+  if (el.lightbox) el.lightbox.stage.innerHTML = "";
+}
+
+function stepLightbox(direction) {
+  const items = state.galleryItems || [];
+  if (!items.length) return;
+  state.lightboxIndex = (state.lightboxIndex + direction + items.length) % items.length;
+  renderLightbox();
+}
+
+function renderLightbox() {
+  const items = state.galleryItems || [];
+  const item = items[state.lightboxIndex];
+  if (!item) return closeLightbox();
+  const lb = el.lightbox;
+  const url = URL.createObjectURL(item.blob);
+  lb.stage.innerHTML = "";
+  let media;
+  if (item.kind === "image") { media = document.createElement("img"); media.src = url; media.alt = shortPrompt(item.prompt); }
+  else if (item.kind === "video") { media = document.createElement("video"); media.src = url; media.controls = true; media.autoplay = true; }
+  else if (item.kind === "audio") { media = document.createElement("audio"); media.src = url; media.controls = true; }
+  else { media = document.createElement("div"); media.className = "lightbox-text"; media.textContent = "Open this project from the gallery card to run it."; }
+  lb.stage.append(media);
+  lb.caption.textContent = `${item.kind} · ${item.model} · ${state.lightboxIndex + 1}/${items.length}`;
+  lb.prompt.textContent = item.prompt || "";
+
+  lb.actions.innerHTML = "";
+  const download = document.createElement("a");
+  download.className = "button ghost small";
+  download.href = url;
+  download.download = `${item.kind}-${item.id}.${extensionFor(item.kind, item.blob.type)}`;
+  download.textContent = "Download";
+  lb.actions.append(download);
+  if (item.kind === "image") {
+    const useBtn = document.createElement("button");
+    useBtn.type = "button";
+    useBtn.className = "button ghost small";
+    useBtn.textContent = "Use as source";
+    useBtn.addEventListener("click", () => { addGalleryReference(item); closeLightbox(); });
+    lb.actions.append(useBtn);
+  }
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "button ghost small danger-btn";
+  del.textContent = "Delete";
+  del.addEventListener("click", async () => {
+    await deleteGalleryItemById(item.id);
+    await renderGallery();
+    if (!(state.galleryItems || []).length) closeLightbox();
+    else { state.lightboxIndex = Math.min(state.lightboxIndex, state.galleryItems.length - 1); renderLightbox(); }
+  });
+  lb.actions.append(del);
 }
 
 // ---- Persistent conversation memory (durable facts across sessions) ----

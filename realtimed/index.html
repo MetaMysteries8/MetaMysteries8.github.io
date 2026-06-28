@@ -24,7 +24,7 @@
 
       <nav class="app-nav" aria-label="Workspace menus">
         <button class="nav-button" data-drawer="conversationDrawer">Chat</button>
-        <button class="nav-button" data-drawer="settingsDrawer">Models</button>
+        <button class="nav-button" data-drawer="settingsDrawer">Config</button>
         <button class="nav-button" data-drawer="galleryDrawer">Gallery</button>
         <button class="nav-button" data-drawer="widgetsDrawer">Widgets</button>
         <button class="nav-button" data-drawer="mcpDrawer">MCP</button>
@@ -71,18 +71,28 @@
           <button id="modeGibber" class="mode" title="Agent-to-agent data over sound (ggwave)">Gibberlink</button>
         </div>
         <button id="mainAction" class="button talk">Start realtime</button>
+        <button id="cameraToggle" class="button ghost" title="Share camera with the agent (realtime)">Camera</button>
         <button id="stopAction" class="button ghost">Stop</button>
       </div>
+      <video id="cameraPreview" class="camera-preview hidden" muted playsinline></video>
       <p id="realtimeStatus" class="realtime-status">Realtime idle</p>
       <audio id="modelAudio" autoplay playsinline></audio>
     </section>
 
-    <section id="settingsDrawer" class="drawer panel settings" aria-label="Model settings">
+    <section id="settingsDrawer" class="drawer panel settings" aria-label="Configuration">
       <div class="panel-head">
-        <h2>Model Routing</h2>
+        <h2>Configuration</h2>
         <button class="button ghost small drawer-close" type="button">Close</button>
       </div>
         <p id="modelStatus" class="model-status">Loading live model lists...</p>
+        <h3 class="config-section">Features</h3>
+        <div class="toggle-list">
+          <label class="toggle"><input id="flagEndConversation" type="checkbox"><span>Let the agent end the session when you ask it to</span></label>
+          <label class="toggle"><input id="flagVoiceInterrupt" type="checkbox"><span>Voice barge-in — talking interrupts the model in realtime</span></label>
+          <label class="toggle"><input id="flagAutosaveUploads" type="checkbox"><span>Auto-save uploaded images to the gallery</span></label>
+          <label class="toggle"><input id="flagCamera" type="checkbox"><span>Allow live camera vision in realtime</span></label>
+        </div>
+        <h3 class="config-section">Models &amp; routing</h3>
         <label>Interface sound volume
           <input id="soundVolume" type="range" min="0" max="100" value="70">
         </label>
@@ -192,8 +202,11 @@
           </div>
         </div>
         <div id="transcript" class="transcript"></div>
+        <div id="attachStrip" class="attach-strip"></div>
         <form id="textForm" class="composer">
-          <input id="textInput" placeholder="Type a fallback message or request an image/video/music...">
+          <input id="imageInput" type="file" accept="image/*" multiple hidden>
+          <button id="attachImage" class="button ghost" type="button" title="Attach images" aria-label="Attach images">🖼</button>
+          <input id="textInput" placeholder="Type a message, attach images, or request an image/video/music...">
           <button class="button primary" type="submit">Send</button>
         </form>
     </section>
