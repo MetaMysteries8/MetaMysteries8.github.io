@@ -78,6 +78,7 @@ const state = {
   flags: JSON.parse(localStorage.getItem("feature_flags") || "{}"),
   camera: null,
   pendingImages: [],
+  workspaceIndex: 0,
 };
 
 // Feature toggles surfaced in the Config panel. Defaults chosen so the app works
@@ -1200,6 +1201,7 @@ async function runTool(name, args, realtimeCallId) {
     return result;
   }
   const toolId = addToolEvent(name, args);
+  vizBurst(name); // a little morph "pop" so you can see the agent act
   let result;
   try {
     if (name === "create_image") result = await generateMedia("image", args.prompt, value("imageModel"), toolId, args);
@@ -2178,6 +2180,7 @@ function showWorkspace(args, toolId) {
   };
   state.workspace.unshift(artifact);
   state.workspace = state.workspace.slice(0, 8);
+  state.workspaceIndex = 0; // show the freshly added item
   saveWorkspace();
   renderWorkspace();
   updateToolEvent(toolId, "running", `Rendering ${artifact.layout}: ${artifact.title}`);
@@ -2207,6 +2210,7 @@ function requestSourceImages(args, toolId) {
   };
   state.workspace.unshift(artifact);
   state.workspace = state.workspace.slice(0, 8);
+  state.workspaceIndex = 0; // show the freshly added item
   saveWorkspace();
   renderWorkspace();
   playSound("inputReq");
@@ -2222,6 +2226,7 @@ function moveArtifact(id, direction) {
   if (target < 0 || target >= state.workspace.length) return;
   const [item] = state.workspace.splice(index, 1);
   state.workspace.splice(target, 0, item);
+  state.workspaceIndex = target; // keep the moved item in view
   saveWorkspace();
   renderWorkspace();
 }
@@ -2282,19 +2287,73 @@ function saveWorkspace() {
   }
 }
 
+// The canvas is a paged gallery: one artifact at a time, filling the height with
+// its own internal scroll, and prev/next to cycle. This fixes tall widgets being
+// cut off and stacked widgets pushing each other offscreen.
 function renderWorkspace() {
   el.adaptiveWorkspace.innerHTML = "";
-  el.workspaceMode.textContent = state.workspace.length ? "Adaptive canvas active" : "Voice canvas";
-  if (!state.workspace.length) {
+  const items = state.workspace;
+  const count = items.length;
+  el.workspaceMode.textContent = count ? "Adaptive canvas active" : "Voice canvas";
+  el.adaptiveWorkspace.classList.toggle("paged", count > 0);
+  if (!count) {
     const empty = document.createElement("div");
     empty.className = "empty-workspace";
     empty.innerHTML = "<span>Adaptive workspace</span><strong>Ask for a chart, plan, comparison, or generated asset.</strong><p>The agent can reshape this surface while you talk.</p>";
     el.adaptiveWorkspace.append(empty);
     return;
   }
-  for (const artifact of state.workspace) el.adaptiveWorkspace.append(renderArtifact(artifact));
-  // New items unshift to the top; keep them in view instead of pushing others off.
-  el.adaptiveWorkspace.scrollTop = 0;
+  state.workspaceIndex = Math.max(0, Math.min(state.workspaceIndex || 0, count - 1));
+  const current = items[state.workspaceIndex];
+
+  const pager = document.createElement("div");
+  pager.className = "ws-pager";
+  const prev = document.createElement("button");
+  prev.type = "button";
+  prev.className = "ws-page-btn";
+  prev.textContent = "‹";
+  prev.title = "Previous";
+  prev.disabled = count < 2;
+  prev.addEventListener("click", () => pageWorkspace(-1));
+  const next = document.createElement("button");
+  next.type = "button";
+  next.className = "ws-page-btn";
+  next.textContent = "›";
+  next.title = "Next";
+  next.disabled = count < 2;
+  next.addEventListener("click", () => pageWorkspace(1));
+  const info = document.createElement("div");
+  info.className = "ws-page-info";
+  const label = document.createElement("strong");
+  label.textContent = current.title || current.layout;
+  const counter = document.createElement("span");
+  counter.textContent = `${state.workspaceIndex + 1} / ${count}`;
+  info.append(label, counter);
+  const dots = document.createElement("div");
+  dots.className = "ws-dots";
+  items.forEach((item, index) => {
+    const dot = document.createElement("button");
+    dot.type = "button";
+    dot.className = `ws-dot${index === state.workspaceIndex ? " active" : ""}`;
+    dot.title = item.title || item.layout;
+    dot.setAttribute("aria-label", `Go to ${item.title || item.layout}`);
+    dot.addEventListener("click", () => { state.workspaceIndex = index; renderWorkspace(); });
+    dots.append(dot);
+  });
+  pager.append(prev, info, next);
+
+  const viewport = document.createElement("div");
+  viewport.className = "ws-viewport";
+  viewport.append(renderArtifact(current));
+
+  el.adaptiveWorkspace.append(pager, dots, viewport);
+}
+
+function pageWorkspace(direction) {
+  const count = state.workspace.length;
+  if (count < 2) return;
+  state.workspaceIndex = (state.workspaceIndex + direction + count) % count;
+  renderWorkspace();
 }
 
 function renderArtifact(artifact) {
@@ -2934,7 +2993,24 @@ function generationVisualMarkup(kind) {
 // ---------------------------------------------------------------------------
 const VIZ_STATES = ["idle", "listening", "user", "thinking", "speaking"];
 const VIZ_LABELS = { idle: "", listening: "Listening", user: "You", thinking: "Thinking", speaking: "Speaking" };
-const viz = { raf: 0, analyser: null, data: null, level: 0, target: 0, phase: 0, spin: 0, state: "idle" };
+const viz = { raf: 0, analyser: null, data: null, level: 0, target: 0, phase: 0, spin: 0, state: "idle", burst: 0, burstKind: "" };
+
+// A transient "the agent just did something" reaction: the blob spikes and emits a
+// colored ripple, decaying over ~1s. Tinted by tool category for a bit of fun.
+function vizBurst(kind) {
+  viz.burst = 1;
+  viz.burstKind = kind || "tool";
+}
+
+function burstColor() {
+  const k = viz.burstKind;
+  if (/image|video/.test(k)) return "#ff4fd8";
+  if (/audio|music|tts|remember|forget|memory|gallery/.test(k)) return "#7bffaf";
+  if (/widget|coder|terminal/.test(k)) return "#8e6cff";
+  if (/search/.test(k)) return "#4de8ff";
+  if (/gibber/.test(k)) return "#ffd36e";
+  return "#4de8ff";
+}
 
 function setOrb(mode) {
   if (!VIZ_STATES.includes(mode)) mode = "idle";
@@ -2984,6 +3060,7 @@ function startVizLoop() {
     viz.level += (viz.target - viz.level) * 0.18;
     viz.phase += 0.016 + viz.level * 0.05;
     viz.spin += 0.012 + (viz.state === "thinking" ? 0.05 : 0);
+    if (viz.burst > 0.001) viz.burst *= 0.92; else viz.burst = 0;
     renderVizFrame();
   };
   tick();
@@ -2991,15 +3068,18 @@ function startVizLoop() {
 
 function renderVizFrame() {
   const level = viz.level;
+  const burst = viz.burst;
   el.orb.style.setProperty("--level", level.toFixed(3));
-  // Morphing blob — lobe amplitude + base radius vary per state and audio level.
+  el.orb.style.setProperty("--burst", burst.toFixed(3));
+  // Morphing blob — lobe amplitude + base radius vary per state, audio level, and a
+  // transient burst (extra spike + high-frequency ripple) when a tool fires.
   const lobes = viz.state === "thinking" ? 5 : viz.state === "speaking" ? 8 : 6;
   const amp = (viz.state === "speaking" ? 13 : viz.state === "user" || viz.state === "listening" ? 9 : viz.state === "thinking" ? 7 : 4) * (0.35 + level);
-  const base = 44 + level * 9;
+  const base = 44 + level * 9 + burst * 7;
   const pts = [];
   for (let i = 0; i < lobes; i += 1) {
     const a = (i / lobes) * Math.PI * 2;
-    const r = base + Math.sin(a * 3 + viz.phase * 2) * amp * 0.5 + Math.sin(a * 2 - viz.phase) * amp * 0.5;
+    const r = base + Math.sin(a * 3 + viz.phase * 2) * amp * 0.5 + Math.sin(a * 2 - viz.phase) * amp * 0.5 + Math.sin(a * 6 + viz.phase * 4) * burst * 11;
     pts.push([100 + Math.cos(a) * r, 100 + Math.sin(a) * r]);
   }
   el.orbBlob.setAttribute("d", smoothClosedPath(pts));
@@ -3021,19 +3101,24 @@ function renderVizFrame() {
     }
   }
 
-  // Radiating rings (speaking): concentric pulses expanding with the model voice.
+  // Radiating rings (speaking) + a one-shot colored ripple when a tool fires.
   if (el.orbRings) {
     const showRings = viz.state === "speaking";
-    el.orbRings.style.opacity = showRings ? "1" : "0";
+    const burstActive = burst > 0.02;
+    el.orbRings.style.opacity = (showRings || burstActive) ? "1" : "0";
+    let rings = "";
     if (showRings) {
-      let rings = "";
       for (let i = 0; i < 3; i += 1) {
         const t = ((viz.phase * 0.5 + i / 3) % 1);
         const r = 50 + t * (40 + level * 30);
         rings += `<circle cx="100" cy="100" r="${r.toFixed(1)}" opacity="${(1 - t).toFixed(2)}" />`;
       }
-      el.orbRings.innerHTML = rings;
     }
+    if (burstActive) {
+      const r = 48 + (1 - burst) * 52;
+      rings += `<circle cx="100" cy="100" r="${r.toFixed(1)}" stroke="${burstColor()}" stroke-width="3" opacity="${burst.toFixed(2)}" />`;
+    }
+    el.orbRings.innerHTML = rings;
   }
 
   // Orbiting dots (thinking).
@@ -3305,11 +3390,13 @@ async function renderGalleryCard(item, index) {
   link.className = "gallery-download";
   link.href = url;
   link.download = downloadNameFor(item);
-  link.textContent = "Download";
+  link.title = "Download";
+  link.setAttribute("aria-label", "Download");
+  link.textContent = "↓";
   const useButton = document.createElement("button");
   useButton.className = "gallery-use";
   useButton.type = "button";
-  useButton.textContent = item.kind === "image" ? "Use as source" : (item.kind === "project" || item.kind === "code") ? "Show source on canvas" : "Show in canvas";
+  useButton.textContent = item.kind === "image" ? "Use as source" : (item.kind === "project" || item.kind === "code") ? "Show source" : "Show in canvas";
   useButton.addEventListener("click", () => addGalleryReference(item));
   const deleteButton = document.createElement("button");
   deleteButton.className = "gallery-delete";

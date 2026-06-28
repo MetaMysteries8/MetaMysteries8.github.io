@@ -1509,7 +1509,16 @@ input:focus, select:focus, textarea:focus { box-shadow: var(--ring), inset 0 1px
 /* ============================================================
    Morphable SVG visualizer
    ============================================================ */
-.orb-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.orb-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  /* a quick pop when a tool fires (driven by --burst) */
+  transform: scale(calc(1 + var(--burst, 0) * 0.07));
+  transition: transform 70ms linear;
+}
 .orb-blob {
   transition: opacity 300ms ease;
   filter: url(#orbBlur) drop-shadow(0 0 calc(18px + var(--level) * 60px) rgba(142, 108, 255, calc(0.3 + var(--level) * 0.5)));
@@ -1570,3 +1579,128 @@ input:focus, select:focus, textarea:focus { box-shadow: var(--ring), inset 0 1px
   transition: color var(--t-fast), border-color var(--t-fast), background var(--t-fast);
 }
 .order-btn:hover { color: var(--text); border-color: rgba(77, 232, 255, 0.45); background: rgba(77, 232, 255, 0.08); }
+
+/* ============================================================
+   Gallery card actions — fixed, aligned, never out of place.
+   Compact icon Download + Delete flank a flexible primary action.
+   ============================================================ */
+.gallery { grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); }
+.gallery-item { gap: 8px; }
+.gallery-item details { margin: 0; }
+.gallery-actions {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  width: 100%;
+  margin-top: auto;
+}
+.gallery-actions > * { height: 34px; box-sizing: border-box; flex: 0 0 auto; }
+.gallery-download {
+  width: 34px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--cyan);
+  font-size: 1.1rem;
+  line-height: 1;
+  text-decoration: none;
+}
+.gallery-download:hover { border-color: rgba(77, 232, 255, 0.5); background: rgba(77, 232, 255, 0.08); }
+.gallery-use {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  font-size: 0.84rem;
+  font-weight: 600;
+  line-height: 32px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: border-color var(--t-fast), background var(--t-fast);
+}
+.gallery-use:hover { border-color: rgba(77, 232, 255, 0.5); background: rgba(77, 232, 255, 0.1); }
+.gallery-delete {
+  width: 34px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: color var(--t-fast), border-color var(--t-fast), background var(--t-fast);
+}
+.gallery-delete:hover { color: var(--danger); border-color: rgba(255, 108, 136, 0.45); background: rgba(255, 108, 136, 0.1); }
+
+/* ============================================================
+   Canvas as a paged gallery — one artifact at a time, full height,
+   internal scroll, prev/next cycling. Fixes tall/stacked cutoff.
+   ============================================================ */
+.adaptive-workspace.paged {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 10px;
+  align-content: stretch;
+  overflow: hidden;
+}
+.ws-pager { display: flex; align-items: center; gap: 10px; }
+.ws-page-btn {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  font-size: 1.4rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: color var(--t-fast), border-color var(--t-fast), background var(--t-fast);
+}
+.ws-page-btn:hover:not(:disabled) { border-color: rgba(77, 232, 255, 0.45); background: rgba(77, 232, 255, 0.1); }
+.ws-page-btn:disabled { opacity: 0.35; cursor: default; }
+.ws-page-info { flex: 1; min-width: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.ws-page-info strong { font-family: var(--font-display); font-size: 1.02rem; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ws-page-info span { flex: 0 0 auto; color: var(--muted); font-size: 0.82rem; }
+.ws-dots { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+.ws-dot { width: 8px; height: 8px; padding: 0; border: 0; border-radius: 50%; background: rgba(255, 255, 255, 0.22); cursor: pointer; transition: background var(--t-fast), transform var(--t-fast); }
+.ws-dot:hover { background: rgba(255, 255, 255, 0.42); }
+.ws-dot.active { background: var(--cyan); transform: scale(1.35); box-shadow: 0 0 8px rgba(77, 232, 255, 0.6); }
+
+.ws-viewport { min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.ws-viewport .workspace-card { height: 100%; margin: 0; display: flex; flex-direction: column; }
+.ws-viewport .workspace-card > header,
+.ws-viewport .workspace-card > .card-summary,
+.ws-viewport .workspace-card > .artifact-remove { flex: 0 0 auto; }
+.ws-viewport .workspace-card > .artifact-remove { align-self: flex-start; }
+/* The main body region grows to fill and scrolls inside the card. */
+.ws-viewport .widget-view,
+.ws-viewport .project-viewer,
+.ws-viewport .source-form,
+.ws-viewport .note-body,
+.ws-viewport .code-block { flex: 1 1 auto; min-height: 0; }
+.ws-viewport .widget-view,
+.ws-viewport .project-viewer,
+.ws-viewport .code-block { display: flex; flex-direction: column; }
+.ws-viewport .workspace-card.widget .widget-stage,
+.ws-viewport .project-viewer .viewer-stage,
+.ws-viewport .code-block .code-view { flex: 1 1 auto; min-height: 160px; height: auto; max-height: none; resize: none; }
+.ws-viewport .workspace-table { max-height: 100%; }
+
+@media (max-width: 920px) {
+  .ws-viewport .workspace-card.widget .widget-stage { min-height: 320px; }
+}
