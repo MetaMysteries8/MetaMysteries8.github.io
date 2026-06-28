@@ -3,6 +3,22 @@ const MEDIA_BASE = "https://media.pollinations.ai";
 const ENTER_BASE = "https://enter.pollinations.ai";
 const CLIENT_ID = "pk_VIepF2clCLKh5xiX";
 const REALTIME_MODEL = "gpt-realtime-2";
+const CODER_SYSTEM_PROMPT = [
+  "You are a coding assistant embedded in a voice agent. Your reply is parsed by software, so follow this output contract exactly.",
+  "",
+  "RUNNABLE WEB PROJECTS (any app, page, game, tool, demo, or visualization the user could open in a browser):",
+  "1. Return exactly ONE complete, self-contained HTML document.",
+  "2. Wrap the document in a single fenced block that opens with ```html on its own line and closes with ``` on its own line. Use no other ```html blocks.",
+  "3. The document must start with `<!doctype html>` and contain <html>, <head>, and <body>.",
+  "4. Inline ALL CSS in <style> and ALL JavaScript in <script>. No external files, imports, bundlers, build steps, or CDN URLs unless the user explicitly asks.",
+  "5. Put no prose before the code block. After the closing ```, add at most two short sentences describing the result.",
+  "",
+  "OTHER CODING QUESTIONS (snippets, explanations, debugging, non-web code):",
+  "- Answer normally in prose with standard fenced code blocks (```js, ```py, ```ts, etc.).",
+  "- Do NOT use a ```html block for partial snippets — that block is reserved for one full runnable document.",
+  "",
+  "ALWAYS: never invent or hardcode secret API keys or credentials; use clearly named placeholders.",
+].join("\n");
 
 const state = {
   apiKey: localStorage.getItem("pollinations_api_key") || "",
@@ -190,9 +206,12 @@ function videoModelsOnly() {
 }
 
 function isVideoModel(model) {
-  const name = modelName(model) || "";
+  const name = (modelName(model) || "").toLowerCase();
+  // Image-only models can contain video-ish substrings (e.g. wan-image, gptimage,
+  // grok-imagine, nova-canvas); never treat those as video.
+  if (/image|imagine|canvas/.test(name)) return false;
   const text = modelText(model);
-  return /video|veo|wan|seedance|ltx|reel|p-video/.test(`${name} ${text}`);
+  return /video|veo|\bwan\b|wan-|seedance|ltx|reel|p-video/.test(`${name} ${text}`);
 }
 
 function supportsImageInput(modelNameValue) {
@@ -367,14 +386,7 @@ async function startRealtime() {
 
   socket.addEventListener("open", () => {
     setRealtimeStatus("Socket open. Configuring audio session...", "live");
-    socket.send(JSON.stringify({
-      type: "session.update",
-      session: {
-        type: "realtime",
-        instructions: systemPrompt(),
-        tools: realtimeToolDefinitions(),
-      },
-    }));
+    socket.send(JSON.stringify({ type: "session.update", session: realtimeSessionConfig(true) }));
     source.connect(processor);
     processor.connect(mutedMonitor);
     mutedMonitor.connect(audioContext.destination);
@@ -418,12 +430,9 @@ function handleRealtimeEvent(event) {
   if (event.type === "response.function_call_arguments.done") runTool(event.name, JSON.parse(event.arguments || "{}"), event.call_id);
   if (event.type === "error") {
     const message = event.error?.message || "Realtime returned an error.";
-    if (/session\.voice|unknown parameter.*voice/i.test(message) && state.realtime && !state.realtime.retriedWithoutVoice) {
+    if (/voice/i.test(message) && /unknown|unsupported|invalid|not (allowed|supported)|param/i.test(message) && state.realtime && !state.realtime.retriedWithoutVoice) {
       state.realtime.retriedWithoutVoice = true;
-      state.realtime.socket.send(JSON.stringify({
-        type: "session.update",
-        session: { type: "realtime", instructions: systemPrompt(), tools: realtimeToolDefinitions() },
-      }));
+      state.realtime.socket.send(JSON.stringify({ type: "session.update", session: realtimeSessionConfig(false) }));
       setRealtimeStatus("Voice setting unsupported here; continuing with default realtime voice.", "warning");
       return;
     }
@@ -547,13 +556,16 @@ async function handleTextSubmit(event) {
 }
 
 async function chat(text, speak) {
+  const history = state.messages
+    .filter((m) => m.role === "user" || m.role === "agent")
+    .slice(-12)
+    .map((m) => ({ role: m.role === "agent" ? "assistant" : "user", content: m.content }));
+  // The current user turn was already pushed via addMessage(), so it is the last
+  // history entry. Only append `text` as a fallback if it is somehow missing.
+  if (history[history.length - 1]?.content !== text) history.push({ role: "user", content: text });
   const payload = {
     model: value("textModel"),
-    messages: [
-      { role: "system", content: systemPrompt() },
-      ...state.messages.filter((m) => m.role === "user" || m.role === "agent").slice(-12).map((m) => ({ role: m.role === "agent" ? "assistant" : "user", content: m.content })),
-      { role: "user", content: text },
-    ],
+    messages: [{ role: "system", content: systemPrompt() }, ...history],
     tools: toolDefinitions().map((tool) => ({ type: "function", function: tool })),
   };
   const result = await postJson("/v1/chat/completions", payload);
@@ -737,27 +749,41 @@ function cleanTtsPrompt(prompt) {
 }
 
 async function askCoder(task, toolId) {
-  updateToolEvent(toolId, "running", `Asking ${value("coderModel")} to work on the coding task.`);
-  showCoderTerminal([`$ coder-model --model ${value("coderModel")}`, "Booting coding worker...", `Task: ${task.slice(0, 180)}`]);
+  const model = value("coderModel");
+  task = String(task || "").trim();
+  if (!task) {
+    updateToolEvent(toolId, "error", "No coding task was provided.");
+    return { error: "No coding task was provided." };
+  }
+  updateToolEvent(toolId, "running", `Asking ${model} to work on the coding task.`);
+  showCoderTerminal([`$ coder-model --model ${model}`, "Booting coding worker...", `Task: ${task.slice(0, 180)}`]);
   const result = await postJson("/v1/chat/completions", {
-    model: value("coderModel"),
+    model,
     messages: [
-      { role: "system", content: "You are a focused coding model. If asked to build a runnable web project, return one complete HTML document in a fenced html code block. Keep explanations brief after the code." },
+      { role: "system", content: CODER_SYSTEM_PROMPT },
       { role: "user", content: task },
     ],
   });
+  if (result?.error) {
+    showCoderTerminal(["Coder request failed.", result.error], true);
+    hideGeneration("Coder model request failed.");
+    return { error: result.error };
+  }
   const answer = result?.choices?.[0]?.message?.content || "";
   if (!answer) {
     showCoderTerminal(["No response returned from coder model."], true);
+    hideGeneration("Coder model returned no content.");
     return { error: "Coder model returned no content." };
   }
   const html = extractHtmlProject(answer);
   if (html) {
-    const item = await saveGalleryItem({ kind: "project", prompt: task, model: value("coderModel"), blob: new Blob([html], { type: "text/html" }) });
-    showCoderTerminal(["HTML project detected.", `Saved runnable project to gallery: ${item.id}`, "Open Gallery -> project preview to test it."], true);
+    const item = await saveGalleryItem({ kind: "project", prompt: task, model, blob: new Blob([html], { type: "text/html" }) });
+    showCoderTerminal(["HTML project detected.", "Saved a runnable project to your gallery.", "Open the Gallery to run or download it."], true);
+    hideGeneration("Project saved to your local gallery.");
     return { answer: summarizeCoderAnswer(answer), projectGalleryId: item.id };
   }
-  showCoderTerminal(["Coder response received.", "No complete HTML document detected."], true);
+  showCoderTerminal(["Coder response received.", "Returned guidance without a runnable HTML document."], true);
+  hideGeneration("Coder model returned guidance.");
   return { answer };
 }
 
@@ -816,7 +842,7 @@ function toolDefinitions() {
         required: ["prompt"],
       },
     },
-    { name: "ask_coder_model", description: "Delegate coding tasks to the configured coder text model.", parameters: objectParams({ task: "Coding task or question" }, ["task"]) },
+    { name: "ask_coder_model", description: "Delegate a coding task to the configured coder model. Returns { answer } with a short summary; when the task is a runnable web app/page/game it also returns { projectGalleryId } and saves the full HTML to the local gallery, where the user can open or download it. Tell the user it is in the gallery rather than pasting the code aloud.", parameters: objectParams({ task: "Coding task or question" }, ["task"]) },
     { name: "call_mcp_server", description: "Call a configured HTTP MCP gateway tool.", parameters: objectParams({ server: "Configured server name", tool: "MCP tool name", arguments: "Tool arguments object" }, ["server", "tool"]) },
     {
       name: "show_workspace",
@@ -883,6 +909,19 @@ function realtimeToolDefinitions() {
   return toolDefinitions().map((tool) => ({ type: "function", ...tool }));
 }
 
+function realtimeSessionConfig(includeVoice) {
+  const session = {
+    type: "realtime",
+    instructions: systemPrompt(),
+    tools: realtimeToolDefinitions(),
+  };
+  const voice = value("realtimeVoice");
+  // gpt-realtime-2 can emit its own voice; request the selected one when supported.
+  // If the proxy rejects it, handleRealtimeEvent retries with includeVoice=false.
+  if (includeVoice && voice) session.audio = { output: { voice } };
+  return session;
+}
+
 function objectParams(properties, required) {
   return {
     type: "object",
@@ -925,12 +964,24 @@ async function postJson(path, body) {
   return json;
 }
 
+// Parses the coder model's output per CODER_SYSTEM_PROMPT. Tolerates a missing or
+// truncated closing fence, a language tag on the fence line, and stray prose that
+// leaked inside or after the document. Returns "" when there is no full document.
 function extractHtmlProject(text) {
-  const fenced = text.match(/```html\s*([\s\S]*?)```/i) || text.match(/```\s*([\s\S]*?<html[\s\S]*?)```/i);
-  const candidate = fenced ? fenced[1] : text;
+  if (!text) return "";
+  // Prefer the explicit ```html block; closing fence optional in case of truncation.
+  const htmlFence = text.match(/```html\b\s*([\s\S]*?)(?:```|$)/i);
+  // Otherwise accept any fenced block that actually contains a document.
+  const anyFence = text.match(/```[a-z0-9]*\s*([\s\S]*?<html[\s\S]*?)(?:```|$)/i);
+  let candidate = htmlFence ? htmlFence[1] : anyFence ? anyFence[1] : text;
   const start = candidate.search(/<!doctype html|<html[\s>]/i);
   if (start < 0) return "";
-  return candidate.slice(start).trim();
+  candidate = candidate.slice(start);
+  // Trim anything after the final </html> (e.g. the model's trailing note).
+  const closeTag = "</html>";
+  const end = candidate.toLowerCase().lastIndexOf(closeTag);
+  if (end >= 0) candidate = candidate.slice(0, end + closeTag.length);
+  return candidate.trim();
 }
 
 function summarizeCoderAnswer(answer) {
