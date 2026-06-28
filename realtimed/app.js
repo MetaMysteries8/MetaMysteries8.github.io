@@ -728,7 +728,7 @@ async function startRealtime() {
   source.connect(analyser); // mic drives the orb while listening
   const socket = new WebSocket(`${GEN_BASE.replace("https", "wss")}/v1/realtime?model=${REALTIME_MODEL}&key=${encodeURIComponent(state.apiKey)}`);
 
-  state.realtime = { socket, stream, audioContext, processor, output, mutedMonitor, analyser, nextStart: audioContext.currentTime, gotSession: false, gotAudio: false, retriedWithoutVoice: false, handledCalls: new Set(), scheduled: [], responseActive: false };
+  state.realtime = { socket, stream, audioContext, processor, output, mutedMonitor, analyser, nextStart: audioContext.currentTime, gotSession: false, gotAudio: false, retriedWithoutVoice: false, handledCalls: new Set(), scheduled: [], responseActive: false, bargeFrames: 0, audioTailUntil: 0 };
   setOrb("listening");
   startOrbViz(analyser);
   el.mainAction.textContent = "Stop realtime";
@@ -749,7 +749,27 @@ async function startRealtime() {
 
   processor.onaudioprocess = (event) => {
     if (socket.readyState !== WebSocket.OPEN) return;
-    const pcm = floatToPcm16(event.inputBuffer.getChannelData(0));
+    const rt = state.realtime;
+    const input = event.inputBuffer.getChannelData(0);
+    // While the model is speaking, the mic still picks up its voice (imperfect echo
+    // cancellation). Forwarding that makes the server VAD think the user spoke, so
+    // it answers itself — endlessly when left idle. Gate the mic during playback;
+    // only a sustained, loud local sound (a real barge-in) breaks through.
+    const modelSpeaking = rt && (rt.responseActive || rt.scheduled.length > 0 || rt.audioContext.currentTime < (rt.audioTailUntil || 0));
+    if (modelSpeaking) {
+      if (!flag("voiceInterrupt")) { if (rt) rt.bargeFrames = 0; return; }
+      let sum = 0;
+      for (let i = 0; i < input.length; i += 1) sum += input[i] * input[i];
+      const rms = Math.sqrt(sum / input.length);
+      if (rms < 0.085) { rt.bargeFrames = 0; return; } // echo / room tone: ignore
+      rt.bargeFrames = (rt.bargeFrames || 0) + 1;
+      if (rt.bargeFrames < 2) return; // need it sustained to count as a barge-in
+      interruptRealtime();
+      rt.bargeFrames = 0;
+    } else if (rt) {
+      rt.bargeFrames = 0;
+    }
+    const pcm = floatToPcm16(input);
     socket.send(JSON.stringify({ type: "input_audio_buffer.append", audio: arrayBufferToBase64(pcm.buffer) }));
   };
 
@@ -838,7 +858,11 @@ function playPcmDelta(base64) {
   // Track scheduled chunks so a barge-in can stop them immediately.
   rt.scheduled.push(source);
   source.onended = () => {
-    if (state.realtime === rt) rt.scheduled = rt.scheduled.filter((node) => node !== source);
+    if (state.realtime !== rt) return;
+    rt.scheduled = rt.scheduled.filter((node) => node !== source);
+    // Keep gating the mic briefly after the last chunk so the echo tail of the
+    // model's own voice can't slip through and restart the loop.
+    if (!rt.scheduled.length) rt.audioTailUntil = rt.audioContext.currentTime + 0.4;
   };
 }
 
@@ -3355,59 +3379,93 @@ async function renderGalleryCard(item, index) {
   const card = document.createElement("article");
   card.className = `gallery-item ${item.kind}`;
 
-  if (item.kind === "project") {
-    card.append(await renderProjectViewer(item));
-  } else if (item.kind === "code") {
-    card.append(await renderCodeFileViewer(item));
+  // --- Media thumbnail ---
+  const media = document.createElement("div");
+  media.className = "g-media";
+  if (item.kind === "image") {
+    const img = document.createElement("img");
+    img.src = url;
+    img.loading = "lazy";
+    img.alt = shortPrompt(item.prompt);
+    img.className = "g-openable";
+    img.addEventListener("click", () => openLightbox(index));
+    media.append(img);
+  } else if (item.kind === "video") {
+    const video = document.createElement("video");
+    video.src = url;
+    video.muted = true;
+    video.playsInline = true;
+    video.className = "g-openable";
+    video.addEventListener("click", () => openLightbox(index));
+    const play = document.createElement("span");
+    play.className = "g-play";
+    play.textContent = "▶";
+    media.append(video, play);
+  } else if (item.kind === "audio") {
+    media.classList.add("g-audio");
+    const glyph = document.createElement("span");
+    glyph.className = "g-glyph";
+    glyph.textContent = "♪";
+    const audio = document.createElement("audio");
+    audio.src = url;
+    audio.controls = true;
+    media.append(glyph, audio);
   } else {
-    const media = item.kind === "image" ? document.createElement("img")
-      : item.kind === "video" ? document.createElement("video")
-      : document.createElement("audio");
-    media.src = url;
-    if (item.kind === "image") { media.loading = "lazy"; media.alt = shortPrompt(item.prompt); }
-    else media.controls = true;
-    // Click image/video to open the full-size lightbox overlay.
-    if (item.kind === "image" || item.kind === "video") {
-      media.classList.add("gallery-openable");
-      media.addEventListener("click", () => openLightbox(index));
-    }
-    card.append(media);
+    media.classList.add("g-code");
+    media.title = "Open in canvas";
+    const glyph = document.createElement("span");
+    glyph.className = "g-glyph";
+    glyph.textContent = item.kind === "project" ? "</>" : (item.language || "code");
+    media.append(glyph);
+    media.addEventListener("click", () => addGalleryReference(item));
   }
+  card.append(media);
 
-  const caption = document.createElement("p");
-  caption.className = "gallery-caption";
-  caption.textContent = item.kind === "code" ? `${item.filename || item.language || "code"} · ${item.model}` : `${item.kind} · ${item.model}`;
-  const details = document.createElement("details");
-  const summary = document.createElement("summary");
-  summary.textContent = shortPrompt(item.prompt);
-  const full = document.createElement("p");
-  full.textContent = item.prompt;
-  details.append(summary, full);
+  // --- Info ---
+  const info = document.createElement("div");
+  info.className = "g-info";
+  const meta = document.createElement("div");
+  meta.className = "g-meta";
+  const kind = document.createElement("span");
+  kind.className = "g-kind";
+  kind.textContent = item.kind === "code" ? (item.filename || item.language || "code") : item.kind;
+  const model = document.createElement("span");
+  model.className = "g-model";
+  model.textContent = item.model || "";
+  meta.append(kind, model);
+  const prompt = document.createElement("p");
+  prompt.className = "g-prompt";
+  prompt.textContent = item.prompt || "";
+  prompt.title = item.prompt || "";
+  info.append(meta, prompt);
+  card.append(info);
 
+  // --- Uniform icon actions (never overflow) ---
   const actions = document.createElement("div");
-  actions.className = "gallery-actions";
-  const link = document.createElement("a");
-  link.className = "gallery-download";
-  link.href = url;
-  link.download = downloadNameFor(item);
-  link.title = "Download";
-  link.setAttribute("aria-label", "Download");
-  link.textContent = "↓";
-  const useButton = document.createElement("button");
-  useButton.className = "gallery-use";
-  useButton.type = "button";
-  useButton.textContent = item.kind === "image" ? "Use as source" : (item.kind === "project" || item.kind === "code") ? "Show source" : "Show in canvas";
-  useButton.addEventListener("click", () => addGalleryReference(item));
-  const deleteButton = document.createElement("button");
-  deleteButton.className = "gallery-delete";
-  deleteButton.type = "button";
-  deleteButton.title = "Delete from gallery";
-  deleteButton.setAttribute("aria-label", "Delete from gallery");
-  deleteButton.textContent = "✕";
-  deleteButton.addEventListener("click", async () => { await deleteGalleryItemById(item.id); await renderGallery(); });
-  actions.append(link, useButton, deleteButton);
-
-  card.append(caption, details, actions);
+  actions.className = "g-act";
+  const dl = document.createElement("a");
+  dl.className = "g-btn";
+  dl.href = url;
+  dl.download = downloadNameFor(item);
+  dl.title = "Download";
+  dl.setAttribute("aria-label", "Download");
+  dl.textContent = "↓";
+  const use = document.createElement("button");
+  use.type = "button";
+  use.className = "g-btn";
+  use.textContent = item.kind === "image" ? "↗" : "⤢";
+  use.title = item.kind === "image" ? "Use as source" : "Show in canvas";
+  use.setAttribute("aria-label", use.title);
+  use.addEventListener("click", () => addGalleryReference(item));
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "g-btn g-del";
+  del.textContent = "✕";
+  del.title = "Delete";
+  del.setAttribute("aria-label", "Delete from gallery");
+  del.addEventListener("click", async () => { await deleteGalleryItemById(item.id); await renderGallery(); });
+  actions.append(dl, use, del);
+  card.append(actions);
   return card;
 }
 
@@ -3508,15 +3566,16 @@ async function renderProjectViewer(item) {
 }
 
 async function addGalleryReference(item) {
-  if (item.kind === "project" || item.kind === "code") {
+  if (item.kind === "project") {
+    // Run the saved HTML live on the canvas (sandboxed widget), not just source.
     const code = await item.blob.text().catch(() => "");
-    showWorkspace({
-      layout: "code",
-      title: item.kind === "code" ? (item.filename || "Code file") : "Project source",
-      summary: shortPrompt(item.prompt),
-      language: item.kind === "code" ? (item.language || "text") : "html",
-      content: code,
-    });
+    showWorkspace({ layout: "widget", title: "Project", summary: shortPrompt(item.prompt), content: code, spec: item.prompt || "" });
+    closeDrawers();
+    return;
+  }
+  if (item.kind === "code") {
+    const code = await item.blob.text().catch(() => "");
+    showWorkspace({ layout: "code", title: item.filename || "Code file", summary: shortPrompt(item.prompt), language: item.language || "text", content: code });
     closeDrawers();
     return;
   }
