@@ -24,6 +24,11 @@
     </section>
 
     <section class="stage panel">
+      <div class="stage-topbar">
+        <span id="workspaceMode" class="workspace-mode">Voice canvas</span>
+        <button id="clearWorkspace" class="button ghost small">Clear canvas</button>
+      </div>
+
       <div id="mediaDock" class="media-dock hidden">
         <div class="generating-card">
           <div class="shader"></div>
@@ -35,6 +40,14 @@
         <div class="orb-core"></div>
         <div class="orb-ring"></div>
       </div>
+
+      <section id="adaptiveWorkspace" class="adaptive-workspace" aria-live="polite">
+        <div class="empty-workspace">
+          <span>Adaptive workspace</span>
+          <strong>Ask for a chart, plan, comparison, or generated asset.</strong>
+          <p>The agent can reshape this surface while you talk.</p>
+        </div>
+      </section>
 
       <div class="controls">
         <div class="mode-toggle" role="group" aria-label="Conversation mode">

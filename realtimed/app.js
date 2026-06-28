@@ -12,6 +12,7 @@ const state = {
   chunks: [],
   stoppingRealtime: false,
   messages: JSON.parse(localStorage.getItem("conversation") || "[]"),
+  workspace: JSON.parse(localStorage.getItem("workspace") || "[]"),
   mcps: JSON.parse(localStorage.getItem("mcp_servers") || "[]"),
 };
 
@@ -33,6 +34,9 @@ const el = {
   textForm: document.querySelector("#textForm"),
   textInput: document.querySelector("#textInput"),
   clearConversation: document.querySelector("#clearConversation"),
+  clearWorkspace: document.querySelector("#clearWorkspace"),
+  adaptiveWorkspace: document.querySelector("#adaptiveWorkspace"),
+  workspaceMode: document.querySelector("#workspaceMode"),
   clearGallery: document.querySelector("#clearGallery"),
   gallery: document.querySelector("#gallery"),
   mcpForm: document.querySelector("#mcpForm"),
@@ -60,6 +64,7 @@ function init() {
   bindEvents();
   renderAuth();
   renderMessages();
+  renderWorkspace();
   renderMcpServers();
   renderGallery();
   loadLiveModels();
@@ -75,6 +80,7 @@ function bindEvents() {
   el.stopAction.addEventListener("click", stopAll);
   el.textForm.addEventListener("submit", handleTextSubmit);
   el.clearConversation.addEventListener("click", clearConversation);
+  el.clearWorkspace.addEventListener("click", clearWorkspace);
   el.clearGallery.addEventListener("click", clearGallery);
   el.mcpForm.addEventListener("submit", addMcpServer);
   fields.forEach((id) => document.querySelector(`#${id}`).addEventListener("change", saveSettings));
@@ -255,17 +261,6 @@ async function startRealtime() {
       session: {
         type: "realtime",
         instructions: systemPrompt(),
-        modalities: ["text", "audio"],
-        voice: value("realtimeVoice") || "alloy",
-        input_audio_format: "pcm16",
-        output_audio_format: "pcm16",
-        turn_detection: {
-          type: "server_vad",
-          threshold: 0.5,
-          prefix_padding_ms: 300,
-          silence_duration_ms: 650,
-          create_response: true,
-        },
         tools: realtimeToolDefinitions(),
       },
     }));
@@ -484,6 +479,7 @@ async function runTool(name, args, realtimeCallId) {
     else if (name === "create_audio") result = await generateMedia("audio", args.prompt, value("audioModel"), toolId);
     else if (name === "ask_coder_model") result = await askCoder(args.task || args.prompt || "", toolId);
     else if (name === "call_mcp_server") result = await callMcp(args.server, args.tool, args.arguments || {}, toolId);
+    else if (name === "show_workspace") result = showWorkspace(args, toolId);
     else result = { error: `Unknown tool: ${name}` };
   } catch (error) {
     result = { error: error.message || String(error) };
@@ -546,6 +542,20 @@ function toolDefinitions() {
     { name: "create_audio", description: "Generate music, sound, or TTS audio and save it to the local gallery.", parameters: objectParams({ prompt: "Audio, music, or voice prompt" }, ["prompt"]) },
     { name: "ask_coder_model", description: "Delegate coding tasks to the configured coder text model.", parameters: objectParams({ task: "Coding task or question" }, ["task"]) },
     { name: "call_mcp_server", description: "Call a configured HTTP MCP gateway tool.", parameters: objectParams({ server: "Configured server name", tool: "MCP tool name", arguments: "Tool arguments object" }, ["server", "tool"]) },
+    {
+      name: "show_workspace",
+      description: "Render adaptive UI in the workspace: note, chart, table, checklist, or metrics.",
+      parameters: {
+        type: "object",
+        properties: {
+          layout: { type: "string", enum: ["note", "chart", "table", "checklist", "metrics"], description: "Workspace component type" },
+          title: { type: "string", description: "Short professional title" },
+          summary: { type: "string", description: "One or two sentence explanation" },
+          data: { type: "array", description: "Rows, chart points, checklist items, or metrics", items: { type: "object", additionalProperties: true } },
+        },
+        required: ["layout", "title"],
+      },
+    },
   ];
 }
 
@@ -562,7 +572,7 @@ function objectParams(properties, required) {
 }
 
 function systemPrompt() {
-  return `You are a slick voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Be conversational and brief by default. You can call a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."`;
+  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Be conversational and brief by default. When visual structure helps, call show_workspace to render a chart, table, checklist, note, or metrics instead of speaking a dense answer. You can call a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."`;
 }
 
 async function postJson(path, body) {
@@ -667,10 +677,132 @@ function summarizeArgs(args) {
 
 function summarizeToolResult(name, result) {
   if (result?.error) return result.error;
+  if (name === "show_workspace") return "Workspace updated.";
   if (name === "ask_coder_model") return "Coder model returned guidance.";
   if (name === "call_mcp_server") return "MCP server returned a result.";
   if (result?.galleryId) return `${capitalize(result.kind)} saved to local gallery.`;
   return "Tool completed.";
+}
+
+function showWorkspace(args, toolId) {
+  const artifact = {
+    id: crypto.randomUUID(),
+    layout: args.layout || "note",
+    title: args.title || "Workspace",
+    summary: args.summary || "",
+    data: Array.isArray(args.data) ? args.data.slice(0, 12) : [],
+    createdAt: Date.now(),
+  };
+  state.workspace.unshift(artifact);
+  state.workspace = state.workspace.slice(0, 8);
+  localStorage.setItem("workspace", JSON.stringify(state.workspace));
+  renderWorkspace();
+  updateToolEvent(toolId, "running", `Rendering ${artifact.layout}: ${artifact.title}`);
+  return { ok: true, workspaceId: artifact.id, layout: artifact.layout };
+}
+
+function renderWorkspace() {
+  el.adaptiveWorkspace.innerHTML = "";
+  el.workspaceMode.textContent = state.workspace.length ? "Adaptive canvas active" : "Voice canvas";
+  if (!state.workspace.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-workspace";
+    empty.innerHTML = "<span>Adaptive workspace</span><strong>Ask for a chart, plan, comparison, or generated asset.</strong><p>The agent can reshape this surface while you talk.</p>";
+    el.adaptiveWorkspace.append(empty);
+    return;
+  }
+  for (const artifact of state.workspace) el.adaptiveWorkspace.append(renderArtifact(artifact));
+}
+
+function renderArtifact(artifact) {
+  const card = document.createElement("article");
+  card.className = `workspace-card ${artifact.layout}`;
+  const header = document.createElement("header");
+  const title = document.createElement("h3");
+  title.textContent = artifact.title;
+  const meta = document.createElement("span");
+  meta.className = "meta";
+  meta.textContent = artifact.layout;
+  header.append(title, meta);
+  card.append(header);
+  if (artifact.summary) {
+    const summary = document.createElement("p");
+    summary.textContent = artifact.summary;
+    card.append(summary);
+  }
+  if (artifact.layout === "chart") card.append(renderChart(artifact.data));
+  else if (artifact.layout === "table") card.append(renderTable(artifact.data));
+  else if (artifact.layout === "checklist") card.append(renderChecklist(artifact.data));
+  else if (artifact.layout === "metrics") card.append(renderMetrics(artifact.data));
+  return card;
+}
+
+function renderChart(data) {
+  const wrap = document.createElement("div");
+  wrap.className = "chart-bars";
+  const max = Math.max(...data.map((row) => Number(row.value) || 0), 1);
+  for (const row of data) {
+    const value = Number(row.value) || 0;
+    const item = document.createElement("div");
+    item.className = "chart-row";
+    item.innerHTML = `<span class="chart-label"></span><span class="chart-track"><span class="chart-fill" style="width:${Math.min(100, (value / max) * 100)}%"></span></span><span class="chart-value"></span>`;
+    item.querySelector(".chart-label").textContent = row.label || row.name || "Item";
+    item.querySelector(".chart-value").textContent = String(row.value ?? "");
+    wrap.append(item);
+  }
+  return wrap;
+}
+
+function renderTable(data) {
+  const table = document.createElement("table");
+  table.className = "workspace-table";
+  const keys = [...new Set(data.flatMap((row) => Object.keys(row || {})))].slice(0, 5);
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  keys.forEach((key) => {
+    const th = document.createElement("th");
+    th.textContent = key;
+    headRow.append(th);
+  });
+  thead.append(headRow);
+  const tbody = document.createElement("tbody");
+  data.forEach((row) => {
+    const tr = document.createElement("tr");
+    keys.forEach((key) => {
+      const td = document.createElement("td");
+      td.textContent = String(row?.[key] ?? "");
+      tr.append(td);
+    });
+    tbody.append(tr);
+  });
+  table.append(thead, tbody);
+  return table;
+}
+
+function renderChecklist(data) {
+  const list = document.createElement("ul");
+  list.className = "checklist";
+  data.forEach((row) => {
+    const li = document.createElement("li");
+    const check = document.createElement("span");
+    check.className = "check";
+    check.textContent = row.done === false ? "" : "done";
+    const text = document.createElement("span");
+    text.textContent = row.text || row.label || row.task || "Item";
+    li.append(check, text);
+    list.append(li);
+  });
+  return list;
+}
+
+function renderMetrics(data) {
+  return renderTable(data.map((row) => ({ metric: row.label || row.name || "Metric", value: row.value ?? "", note: row.note || "" })));
+}
+
+function clearWorkspace() {
+  state.workspace = [];
+  localStorage.removeItem("workspace");
+  renderWorkspace();
 }
 
 function clearConversation() {
