@@ -1088,6 +1088,26 @@ body[data-layout="compact"] .workspace-card { padding: 12px; }
 .adaptive-workspace > .workspace-card:nth-child(3) { animation-delay: 100ms; }
 .adaptive-workspace > .workspace-card:nth-child(n+4) { animation-delay: 140ms; }
 
+/* Markdown-rendered agent messages */
+.message .md { display: grid; gap: 9px; }
+.md-p { margin: 0; line-height: 1.55; }
+.md-h { margin: 2px 0; font-size: 1.02rem; letter-spacing: -0.01em; }
+.md-list { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
+.md-list li { line-height: 1.5; }
+.md-code { padding: 1px 6px; border-radius: 6px; background: rgba(0, 0, 0, 0.32); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.86em; }
+.md a { color: var(--cyan); text-underline-offset: 2px; }
+.md a:hover { text-decoration: underline; }
+.message .code-block { margin: 2px 0; }
+.message .code-block .code-view { max-height: 280px; }
+
+/* Volume slider in settings */
+input[type="range"] { appearance: none; -webkit-appearance: none; padding: 0; height: 6px; border-radius: 999px; background: rgba(255, 255, 255, 0.14); cursor: pointer; }
+input[type="range"]:hover { background: rgba(255, 255, 255, 0.2); }
+input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 10px rgba(77, 232, 255, 0.5); cursor: pointer; }
+input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; border: 0; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 10px rgba(77, 232, 255, 0.5); cursor: pointer; }
+
+#soundToggle { font-size: 1rem; line-height: 1; padding: 8px 10px; }
+
 @media (max-width: 560px) {
   .viewer-stage { height: 200px; }
   .metric-grid { grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); }

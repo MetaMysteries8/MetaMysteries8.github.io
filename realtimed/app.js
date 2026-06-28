@@ -71,6 +71,8 @@ const el = {
   mcpUrl: document.querySelector("#mcpUrl"),
   mcpList: document.querySelector("#mcpList"),
   modelStatus: document.querySelector("#modelStatus"),
+  soundToggle: document.querySelector("#soundToggle"),
+  soundVolume: document.querySelector("#soundVolume"),
   navButtons: document.querySelectorAll(".nav-button"),
   drawerCloses: document.querySelectorAll(".drawer-close"),
 };
@@ -80,6 +82,7 @@ const fields = [
   "layoutPreset",
   "personalityPreset",
   "textModel",
+  "searchModel",
   "realtimeVoice",
   "coderModel",
   "sttModel",
@@ -99,9 +102,137 @@ const fields = [
   "audioCount",
 ];
 
+// ---------------------------------------------------------------------------
+// Interface sound engine. One looping channel for "busy" states (ref-counted so
+// overlapping generations don't double-play) plus one-shot earcons. Decoded via
+// Web Audio for gapless looping; resumes on first user gesture (autoplay policy).
+// ---------------------------------------------------------------------------
+const SOUND_FILES = {
+  convoStart: "sounds/1_ConvoStart.ogg",
+  generationLoop: "sounds/2_GenerationLoop.ogg",
+  error: "sounds/3_Error.ogg",
+  genComplete: "sounds/4_GenComplete.ogg",
+  convoEnd: "sounds/5_ConvoEnd.ogg",
+  inputReq: "sounds/6_InputReq.ogg",
+  messageReceive: "sounds/7_MessageReceive.ogg",
+  messageSend: "sounds/8_MessageSend.ogg",
+  connect: "sounds/9_Connect.ogg",
+};
+
+const sound = {
+  ctx: null,
+  master: null,
+  buffers: {},
+  loopRefs: 0,
+  loopNode: null,
+  loopGain: null,
+  muted: localStorage.getItem("sound_muted") === "1",
+  volume: clamp01(Number(localStorage.getItem("sound_volume") ?? 0.7)),
+};
+
+function clamp01(value) {
+  return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0.7;
+}
+
+function initSound() {
+  try {
+    sound.ctx = new (window.AudioContext || window.webkitAudioContext)();
+  } catch {
+    return;
+  }
+  sound.master = sound.ctx.createGain();
+  sound.master.gain.value = sound.muted ? 0 : sound.volume;
+  sound.master.connect(sound.ctx.destination);
+  const resume = () => sound.ctx?.resume?.().catch(() => {});
+  window.addEventListener("pointerdown", resume);
+  window.addEventListener("keydown", resume);
+  Object.entries(SOUND_FILES).forEach(async ([key, url]) => {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) return;
+      sound.buffers[key] = await sound.ctx.decodeAudioData(await res.arrayBuffer());
+    } catch {
+      /* missing/undecodable sound: stay silent for that cue */
+    }
+  });
+}
+
+function playSound(key) {
+  const { ctx, master } = sound;
+  const buffer = sound.buffers[key];
+  if (!ctx || !master || !buffer || sound.muted) return;
+  if (ctx.state === "suspended") ctx.resume().catch(() => {});
+  const node = ctx.createBufferSource();
+  node.buffer = buffer;
+  node.connect(master);
+  node.start();
+}
+
+function startLoop() {
+  sound.loopRefs += 1;
+  if (sound.loopNode || sound.muted) return;
+  const { ctx, master } = sound;
+  const buffer = sound.buffers.generationLoop;
+  if (!ctx || !master || !buffer) return;
+  if (ctx.state === "suspended") ctx.resume().catch(() => {});
+  const node = ctx.createBufferSource();
+  node.buffer = buffer;
+  node.loop = true;
+  const gain = ctx.createGain();
+  gain.gain.value = 0;
+  node.connect(gain);
+  gain.connect(master);
+  node.start();
+  gain.gain.linearRampToValueAtTime(1, ctx.currentTime + 0.18);
+  sound.loopNode = node;
+  sound.loopGain = gain;
+}
+
+function stopLoop(force) {
+  sound.loopRefs = force ? 0 : Math.max(0, sound.loopRefs - 1);
+  if (sound.loopRefs > 0) return;
+  const { ctx, loopNode, loopGain } = sound;
+  sound.loopNode = null;
+  sound.loopGain = null;
+  if (!ctx || !loopNode) return;
+  const now = ctx.currentTime;
+  try {
+    loopGain.gain.cancelScheduledValues(now);
+    loopGain.gain.setValueAtTime(loopGain.gain.value, now);
+    loopGain.gain.linearRampToValueAtTime(0, now + 0.2);
+    loopNode.stop(now + 0.24);
+  } catch {
+    /* node may already be stopped */
+  }
+}
+
+function setSoundMuted(muted) {
+  sound.muted = muted;
+  localStorage.setItem("sound_muted", muted ? "1" : "0");
+  if (sound.master) sound.master.gain.value = muted ? 0 : sound.volume;
+  if (muted) stopLoop(true);
+  if (el.soundToggle) el.soundToggle.textContent = muted ? "🔇" : "🔊";
+}
+
+function setSoundVolume(value) {
+  sound.volume = clamp01(value);
+  localStorage.setItem("sound_volume", String(sound.volume));
+  if (sound.master && !sound.muted) sound.master.gain.value = sound.volume;
+}
+
+async function busy(task) {
+  startLoop();
+  try {
+    return await task();
+  } finally {
+    stopLoop();
+  }
+}
+
 function init() {
   loadSettings();
   applyPresets();
+  initSound();
   captureByopReturn();
   bindEvents();
   renderAuth();
@@ -127,6 +258,10 @@ function bindEvents() {
   el.clearWorkspace.addEventListener("click", clearWorkspace);
   el.clearGallery.addEventListener("click", clearGallery);
   el.mcpForm.addEventListener("submit", addMcpServer);
+  el.soundToggle.textContent = sound.muted ? "🔇" : "🔊";
+  el.soundToggle.addEventListener("click", () => setSoundMuted(!sound.muted));
+  el.soundVolume.value = String(Math.round(sound.volume * 100));
+  el.soundVolume.addEventListener("input", () => setSoundVolume(Number(el.soundVolume.value) / 100));
   el.navButtons.forEach((button) => button.addEventListener("click", () => toggleDrawer(button.dataset.drawer)));
   el.drawerCloses.forEach((button) => button.addEventListener("click", closeDrawers));
   el.scrim = document.createElement("div");
@@ -149,6 +284,7 @@ function captureByopReturn() {
     localStorage.setItem("pollinations_api_key", apiKey);
     history.replaceState(null, "", location.pathname + location.search);
     addMessage("system", "Connected with your BYOP key. You can revoke it from the Pollinations dashboard.");
+    playSound("connect");
     checkKeyHealth();
     startBalancePolling();
   } else if (error) {
@@ -176,6 +312,7 @@ async function loadLiveModels() {
   const [text, image, audio, embeddings] = lists.map((result) => result.status === "fulfilled" ? result.value : []);
   state.modelMeta = { text, image, audio, embeddings };
   fillSelect("textModel", text.map(modelName), "openai");
+  fillSelect("searchModel", searchModelsOnly().map(modelName), "gemini-search");
   fillSelect("coderModel", text.map(modelName), "qwen-coder");
   fillSelect("imageModel", imageModelsOnly().map(modelName), "flux");
   fillSelect("videoModel", videoModelsOnly().map(modelName), "ltx-2");
@@ -211,6 +348,20 @@ function imageModelsOnly() {
 
 function videoModelsOnly() {
   return state.modelMeta.image.filter(isVideoModel);
+}
+
+function searchModelsOnly() {
+  const list = state.modelMeta.text || [];
+  const search = list.filter((model) => model?.capabilities?.web_search || /search|perplexity/i.test(modelName(model) || ""));
+  return search.length ? search : list;
+}
+
+function searchModel() {
+  const current = value("searchModel");
+  if (current) return current;
+  const list = state.modelMeta.text || [];
+  const found = list.find((model) => model?.capabilities?.web_search) || list.find((model) => /search|perplexity/i.test(modelName(model) || ""));
+  return modelName(found) || "gemini-search";
 }
 
 function isVideoModel(model) {
@@ -366,6 +517,7 @@ async function handleMainAction() {
       } catch (error) {
         setRealtimeStatus(error.message || "Realtime failed to start.", "warning");
         addMessage("system", `Realtime failed to start: ${error.message || error}`);
+        playSound("error");
         stopRealtime();
       }
     }
@@ -379,6 +531,7 @@ async function handleMainAction() {
       } catch (error) {
         setRealtimeStatus(error.message || "Gibberlink failed to start.", "warning");
         addMessage("system", `Gibberlink failed to start: ${error.message || error}`);
+        playSound("error");
         stopGibberlink();
       }
     }
@@ -443,6 +596,7 @@ async function startRealtime() {
 
 function handleRealtimeEvent(event) {
   if (event.type === "session.created" || event.type === "session.updated") {
+    if (state.realtime && !state.realtime.gotSession) playSound("convoStart");
     if (state.realtime) state.realtime.gotSession = true;
     setRealtimeStatus("Realtime ready. Speak naturally.", "ready");
   }
@@ -467,6 +621,7 @@ function handleRealtimeEvent(event) {
       return;
     }
     setRealtimeStatus(message, "warning");
+    playSound("error");
   }
   if (event.type === "response.done") {
     setOrb("listening");
@@ -494,6 +649,7 @@ function playPcmDelta(base64) {
 function stopRealtime() {
   const rt = state.realtime;
   if (!rt) return;
+  playSound("convoEnd");
   state.stoppingRealtime = true;
   if (rt.socket?.readyState === WebSocket.OPEN || rt.socket?.readyState === WebSocket.CONNECTING) {
     rt.socket.close();
@@ -514,6 +670,7 @@ function handleRealtimeClose(event) {
   const reason = event.reason ? `: ${event.reason}` : "";
   setRealtimeStatus(`Realtime closed (${event.code || "unknown"})${reason}. Try reconnecting or use Push2Talk.`, "warning");
   addMessage("system", `Realtime closed (${event.code || "unknown"})${reason}.`);
+  playSound("error");
 }
 
 function cleanupRealtime() {
@@ -547,6 +704,7 @@ async function startPushRecording() {
   state.mediaRecorder.start();
   setOrb("listening");
   el.mainAction.textContent = "Stop recording";
+  playSound("convoStart");
 }
 
 function stopPushRecording() {
@@ -562,6 +720,7 @@ async function finishPushRecording(stream) {
   const text = await transcribe(blob);
   if (!text) return;
   addMessage("user", text);
+  playSound("messageSend");
   await chat(text, true);
 }
 
@@ -582,6 +741,7 @@ async function handleTextSubmit(event) {
   if (!text) return;
   el.textInput.value = "";
   addMessage("user", text);
+  playSound("messageSend");
   await chat(text, false);
 }
 
@@ -598,7 +758,7 @@ async function chat(text, speak) {
     messages: [{ role: "system", content: systemPrompt() }, ...history],
     tools: toolDefinitions().map((tool) => ({ type: "function", function: tool })),
   };
-  const result = await postJson("/v1/chat/completions", payload);
+  const result = await busy(() => postJson("/v1/chat/completions", payload));
   if (!result) return;
   const message = result.choices?.[0]?.message;
   if (message?.tool_calls?.length) {
@@ -607,6 +767,7 @@ async function chat(text, speak) {
   }
   const content = message?.content || "I did not receive a response.";
   addMessage("agent", content);
+  playSound("messageReceive");
   if (speak && value("ttsVoice")) await speakText(content);
 }
 
@@ -617,9 +778,10 @@ async function handleToolCalls(messages, assistantMessage, speak) {
     const result = await runTool(call.function.name, args);
     messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result) });
   }
-  const followup = await postJson("/v1/chat/completions", { model: value("textModel"), messages });
+  const followup = await busy(() => postJson("/v1/chat/completions", { model: value("textModel"), messages }));
   const content = followup?.choices?.[0]?.message?.content || "Done.";
   addMessage("agent", content);
+  playSound("messageReceive");
   if (speak && value("ttsVoice")) await speakText(content);
 }
 
@@ -647,6 +809,7 @@ async function runTool(name, args, realtimeCallId) {
       const model = audioKind === "tts" ? value("ttsModel") : value("audioModel");
       result = await generateMedia("audio", args.prompt, model, toolId, args);
     }
+    else if (name === "web_search") result = await webSearch(args.query || args.q || args.prompt || "", toolId);
     else if (name === "ask_coder_model") result = await askCoder(args.task || args.prompt || "", toolId);
     else if (name === "call_mcp_server") result = await callMcp(args.server, args.tool, args.arguments || {}, toolId);
     else if (name === "start_gibberlink") result = await activateGibberlink(args.message || "");
@@ -789,6 +952,7 @@ async function askCoder(task, toolId) {
     return { error: "No coding task was provided." };
   }
   updateToolEvent(toolId, "running", `Asking ${model} to work on the coding task.`);
+  startLoop(); // matched by the hideGeneration() in every path below
   showCoderTerminal([`$ coder-model --model ${model}`, "Booting coding worker...", `Task: ${task.slice(0, 180)}`]);
   const result = await postJson("/v1/chat/completions", {
     model,
@@ -818,6 +982,24 @@ async function askCoder(task, toolId) {
   showCoderTerminal(["Coder response received.", "Returned guidance without a runnable HTML document."], true);
   hideGeneration("Coder model returned guidance.");
   return { answer };
+}
+
+async function webSearch(query, toolId) {
+  query = String(query || "").trim();
+  if (!query) return { error: "No search query was provided." };
+  const model = searchModel();
+  updateToolEvent(toolId, "running", `Searching the web with ${model} for "${query.slice(0, 80)}".`);
+  const result = await busy(() => postJson("/v1/chat/completions", {
+    model,
+    messages: [
+      { role: "system", content: "You are a web search assistant with live internet access. Answer the user's query using current information. Be factual and concise. Cite sources inline as [1], [2] and end with a 'Sources:' list of the URLs you used." },
+      { role: "user", content: query },
+    ],
+  }));
+  if (result?.error) return { error: result.error };
+  const answer = result?.choices?.[0]?.message?.content?.trim();
+  if (!answer) return { error: "Search returned no result." };
+  return { query, model, answer };
 }
 
 async function callMcp(serverName, tool, args, toolId) {
@@ -875,6 +1057,7 @@ function toolDefinitions() {
         required: ["prompt"],
       },
     },
+    { name: "web_search", description: "Search the live web for current, factual, or time-sensitive information (news, prices, docs, events, anything past your training cutoff) and get a concise answer with cited sources. Returns { answer } with inline [n] citations and a Sources list.", parameters: objectParams({ query: "The search query" }, ["query"]) },
     { name: "ask_coder_model", description: "Delegate a coding task to the configured coder model. Returns { answer } with a short summary; when the task is a runnable web app/page/game it also returns { projectGalleryId } and saves the full HTML to the local gallery, where the user can open or download it. Tell the user it is in the gallery rather than pasting the code aloud.", parameters: objectParams({ task: "Coding task or question" }, ["task"]) },
     { name: "call_mcp_server", description: "Call a configured HTTP MCP gateway tool.", parameters: objectParams({ server: "Configured server name", tool: "MCP tool name", arguments: "Tool arguments object" }, ["server", "tool"]) },
     { name: "start_gibberlink", description: "Start Gibberlink (also spelled Jibberlink): a data-over-sound link (ggwave audio tones) for talking to ANOTHER AI agent instead of a human. YOU decide to call this — invoke it as soon as you recognize the other party is an AI agent and a reliable machine-to-machine exchange is warranted (e.g. the user says 'start gibberlink/jibberlink' or another agent proposes it). Same-agent peers auto-negotiate a faster protocol. Optionally include an opening message to transmit to the peer.", parameters: objectParams({ message: "Optional opening message to transmit to the peer agent" }, []) },
@@ -967,7 +1150,7 @@ function objectParams(properties, required) {
 }
 
 function systemPrompt() {
-  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. When visual structure helps, call show_workspace to render a chart, table, checklist, note, metrics, or code block instead of speaking a dense answer. For charts, provide rows with label and numeric value. For checklists, provide rows with text and done. For metrics, provide rows with label, value, and optional note or delta. To show source code or markup, use layout "code" with the source in content and a language tag. If the user asks to reuse a prior image/video/audio, call list_gallery first. If the user asks to edit an existing image or use an existing image as a reference, use use_gallery_sources when the target is already in the gallery, otherwise call request_source_images. You can remove stale workspace items with remove_workspace. You can call a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize that the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink to switch to a data-over-sound link; ask the human's consent first unless they already requested it. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."`;
+  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. When visual structure helps, call show_workspace to render a chart, table, checklist, note, metrics, or code block instead of speaking a dense answer. For charts, provide rows with label and numeric value. For checklists, provide rows with text and done. For metrics, provide rows with label, value, and optional note or delta. To show source code or markup, use layout "code" with the source in content and a language tag. If the user asks to reuse a prior image/video/audio, call list_gallery first. If the user asks to edit an existing image or use an existing image as a reference, use use_gallery_sources when the target is already in the gallery, otherwise call request_source_images. You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize that the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink to switch to a data-over-sound link; ask the human's consent first unless they already requested it. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."`;
 }
 
 function personalityInstruction() {
@@ -992,6 +1175,7 @@ async function postJson(path, body) {
   } catch (error) {
     const message = `Network error calling ${path}: ${error.message || error}`;
     addMessage("system", message);
+    playSound("error");
     return { error: message };
   }
   if (!res.ok) return failResponse(res, "Request failed.");
@@ -1046,6 +1230,7 @@ async function failResponse(res, fallback) {
   const text = await res.text().catch(() => "");
   const message = text || `${fallback} (${res.status})`;
   addMessage("system", message);
+  playSound("error");
   hideGeneration("Generation failed.");
   return { error: message };
 }
@@ -1091,10 +1276,139 @@ function renderMessages() {
     const div = document.createElement("div");
     div.className = `message ${message.role}`;
     if (message.role === "tool") renderToolMessage(div, message);
+    else if (message.role === "agent") div.append(renderMarkdown(message.content));
     else div.textContent = message.content;
     el.transcript.append(div);
   }
   el.transcript.scrollTop = el.transcript.scrollHeight;
+}
+
+// Minimal, XSS-safe markdown: fenced code, headings, lists, and inline
+// bold/italic/code/links. Every text value goes in via textContent, and only
+// known element types are created, so model output can never inject markup.
+function renderMarkdown(src) {
+  const root = document.createElement("div");
+  root.className = "md";
+  const lines = String(src ?? "").replace(/\r\n/g, "\n").split("\n");
+  let i = 0;
+  let list = null;
+  const flushList = () => { if (list) { root.append(list); list = null; } };
+  while (i < lines.length) {
+    const line = lines[i];
+    const fence = line.match(/^\s*```(\w+)?\s*$/);
+    if (fence) {
+      flushList();
+      const buf = [];
+      i += 1;
+      while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) { buf.push(lines[i]); i += 1; }
+      i += 1;
+      root.append(buildCodeBlock(buf.join("\n"), fence[1] || ""));
+      continue;
+    }
+    const heading = line.match(/^(#{1,3})\s+(.*)$/);
+    if (heading) {
+      flushList();
+      const h = document.createElement(heading[1].length === 1 ? "h3" : "h4");
+      h.className = "md-h";
+      applyInline(h, heading[2]);
+      root.append(h);
+      i += 1;
+      continue;
+    }
+    const item = line.match(/^\s*([-*]|\d+[.)])\s+(.*)$/);
+    if (item) {
+      const ordered = /\d/.test(item[1]);
+      const tag = ordered ? "ol" : "ul";
+      if (!list || list.tagName.toLowerCase() !== tag) { flushList(); list = document.createElement(tag); list.className = "md-list"; }
+      const li = document.createElement("li");
+      applyInline(li, item[2]);
+      list.append(li);
+      i += 1;
+      continue;
+    }
+    if (/^\s*$/.test(line)) { flushList(); i += 1; continue; }
+    flushList();
+    const para = [line];
+    i += 1;
+    while (i < lines.length && !/^\s*$/.test(lines[i]) && !/^\s*```/.test(lines[i]) && !/^#{1,3}\s/.test(lines[i]) && !/^\s*([-*]|\d+[.)])\s+/.test(lines[i])) { para.push(lines[i]); i += 1; }
+    const p = document.createElement("p");
+    p.className = "md-p";
+    applyInline(p, para.join("\n"));
+    root.append(p);
+  }
+  flushList();
+  return root;
+}
+
+function applyInline(el, text) {
+  String(text).split(/(`[^`]+`)/g).forEach((part) => {
+    if (/^`[^`]+`$/.test(part)) {
+      const code = document.createElement("code");
+      code.className = "md-code";
+      code.textContent = part.slice(1, -1);
+      el.append(code);
+    } else {
+      appendLinked(el, part);
+    }
+  });
+}
+
+function appendLinked(el, text) {
+  const linkRe = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/;
+  let rest = String(text);
+  let match;
+  while ((match = rest.match(linkRe))) {
+    if (match.index > 0) appendEmphasis(el, rest.slice(0, match.index));
+    const a = document.createElement("a");
+    a.href = match[2];
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.textContent = match[1];
+    el.append(a);
+    rest = rest.slice(match.index + match[0].length);
+  }
+  appendEmphasis(el, rest);
+}
+
+function appendEmphasis(el, text) {
+  String(text).split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g).forEach((token) => {
+    if (/^\*\*[^*]+\*\*$/.test(token)) { const b = document.createElement("strong"); b.textContent = token.slice(2, -2); el.append(b); }
+    else if (/^\*[^*]+\*$/.test(token)) { const it = document.createElement("em"); it.textContent = token.slice(1, -1); el.append(it); }
+    else appendTextWithBreaks(el, token);
+  });
+}
+
+function appendTextWithBreaks(el, text) {
+  String(text).split("\n").forEach((segment, index) => {
+    if (index) el.append(document.createElement("br"));
+    if (segment) el.append(document.createTextNode(segment));
+  });
+}
+
+function buildCodeBlock(code, language) {
+  const wrap = document.createElement("div");
+  wrap.className = "code-block";
+  const bar = document.createElement("div");
+  bar.className = "code-bar";
+  const lang = document.createElement("span");
+  lang.className = "code-lang";
+  lang.textContent = language || "text";
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "code-copy";
+  copy.textContent = "Copy";
+  copy.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(code); copy.textContent = "Copied"; setTimeout(() => (copy.textContent = "Copy"), 1200); }
+    catch { copy.textContent = "Copy failed"; }
+  });
+  bar.append(lang, copy);
+  const pre = document.createElement("pre");
+  pre.className = "code-view";
+  const codeEl = document.createElement("code");
+  codeEl.textContent = code;
+  pre.append(codeEl);
+  wrap.append(bar, pre);
+  return wrap;
 }
 
 function renderToolMessage(div, message) {
@@ -1118,6 +1432,7 @@ function labelForTool(name) {
     create_video: "Video generation",
     create_audio: "Audio generation",
     ask_coder_model: "Coder model",
+    web_search: "Web search",
     call_mcp_server: "MCP tool call",
     start_gibberlink: "Gibberlink handoff",
     show_workspace: "Workspace update",
@@ -1140,6 +1455,7 @@ function summarizeToolResult(name, result) {
   if (name === "list_gallery") return "Gallery items listed.";
   if (name === "use_gallery_sources") return "Gallery sources used for generation.";
   if (name === "ask_coder_model") return "Coder model returned guidance.";
+  if (name === "web_search") return "Web search results returned.";
   if (name === "call_mcp_server") return "MCP server returned a result.";
   if (name === "start_gibberlink") return result?.turbo ? "Gibberlink active (turbo channel)." : "Gibberlink active.";
   if (result?.galleryId) return `${capitalize(result.kind)} saved to local gallery.`;
@@ -1186,6 +1502,7 @@ function requestSourceImages(args, toolId) {
   state.workspace = state.workspace.slice(0, 8);
   saveWorkspace();
   renderWorkspace();
+  playSound("inputReq");
   updateToolEvent(toolId, "running", `Waiting for ${artifact.minImages}-${artifact.maxImages} source image(s).`);
   return { ok: true, workspaceId: artifact.id, purpose: artifact.purpose };
 }
@@ -1581,6 +1898,7 @@ function detectLoaderKind(kind, prompt, model) {
 }
 
 function showGeneration(kind, text) {
+  startLoop();
   el.mediaDock.classList.remove("hidden");
   document.querySelector(".stage")?.classList.add("generating");
   el.orb.classList.add("docked");
@@ -1592,6 +1910,7 @@ function showGeneration(kind, text) {
 }
 
 function hideGeneration(text) {
+  stopLoop();
   el.generationStatus.textContent = text;
   setTimeout(() => {
     el.mediaDock.classList.add("hidden");
@@ -1682,6 +2001,7 @@ async function saveGalleryItem({ kind, prompt, model, blob, remoteUrl }) {
   if (remoteUrl) item.remoteUrl = remoteUrl;
   await putGalleryItem(item, db);
   await renderGallery();
+  playSound("genComplete");
   return item;
 }
 
@@ -1940,6 +2260,7 @@ async function startGibberlink() {
   el.mainAction.textContent = "Stop gibberlink";
   updateGibberStatus("Listening. Broadcasting handshake — waiting for a peer agent.");
   addMessage("system", "Gibberlink active: broadcasting handshake over sound. Bring another VoiceEnable agent within mic range.");
+  playSound("convoStart");
   scheduleGibberHandshake();
 }
 
@@ -1996,6 +2317,7 @@ async function onGibberFrame(raw) {
     const sameAgent = frame.id === GIBBER.AGENT_ID;
     g.peer = { id: frame.id || "unknown", model: frame.model || "" };
     clearTimeout(g.helloTimer);
+    playSound("connect");
     addMessage("system", `Gibberlink: recognized peer "${g.peer.id}"${sameAgent ? " (same agent type)" : ""}.`);
     // Reply so the peer also learns about us, and negotiate the faster protocol
     // when we are the same agent type on both ends.
@@ -2005,14 +2327,17 @@ async function onGibberFrame(raw) {
     return;
   }
   if (frame.t === "ack") {
+    const firstLink = !g.peer;
     g.peer = g.peer || { id: frame.id || "unknown", model: frame.model || "" };
     clearTimeout(g.helloTimer);
     if (frame.turbo) g.turbo = true;
+    if (firstLink) playSound("connect");
     updateGibberStatus("Peer linked. Channel ready.");
     return;
   }
   if (frame.t === "msg" && frame.text) {
     addMessage("user", frame.text);
+    playSound("messageReceive");
     if (g.thinking) return;
     g.thinking = true;
     updateGibberStatus("Peer message received. Composing reply...");
@@ -2034,10 +2359,10 @@ async function gibberRespond(text) {
     .filter((m) => m.role === "user" || m.role === "agent")
     .slice(-8)
     .map((m) => ({ role: m.role === "agent" ? "assistant" : "user", content: m.content }));
-  const result = await postJson("/v1/chat/completions", {
+  const result = await busy(() => postJson("/v1/chat/completions", {
     model: value("textModel"),
     messages: [{ role: "system", content: gibberSystemPrompt() }, ...history],
-  });
+  }));
   if (result?.error) return "";
   return result?.choices?.[0]?.message?.content?.trim() || "";
 }
@@ -2067,6 +2392,7 @@ async function activateGibberlink(message) {
 function stopGibberlink() {
   const g = state.gibber;
   if (!g) return;
+  playSound("convoEnd");
   state.gibber = null;
   clearTimeout(g.helloTimer);
   try { g.processor.disconnect(); } catch {}

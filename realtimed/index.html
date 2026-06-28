@@ -32,6 +32,7 @@
       <div class="account-strip">
         <span id="pollenBalance" class="balance-pill">Pollen --</span>
         <span id="authState" class="pill danger">Not connected</span>
+        <button id="soundToggle" class="button ghost small" aria-label="Toggle sound" title="Toggle sound">🔊</button>
         <button id="connectByop" class="button primary">Connect Pollen</button>
         <button id="clearKey" class="button ghost">Forget key</button>
       </div>
@@ -84,6 +85,12 @@
         <button class="button ghost small drawer-close" type="button">Close</button>
       </div>
         <p id="modelStatus" class="model-status">Loading live model lists...</p>
+        <label>Interface sound volume
+          <input id="soundVolume" type="range" min="0" max="100" value="70">
+        </label>
+        <label>Web search model
+          <select id="searchModel"><option>gemini-search</option></select>
+        </label>
         <label>Theme
           <select id="themePreset">
             <option value="aurora">Aurora</option>
