@@ -1316,6 +1316,7 @@ input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; border: 0; bo
 .toggle:hover { border-color: var(--line-strong); }
 .toggle input { width: auto; flex: 0 0 auto; accent-color: var(--cyan); width: 18px; height: 18px; cursor: pointer; }
 .toggle span { flex: 1; line-height: 1.35; }
+.range-hint { margin: -6px 0 12px; color: var(--muted); font-size: 0.78rem; line-height: 1.4; }
 
 /* Composer image attach strip */
 .attach-strip { display: none; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
@@ -1827,3 +1828,107 @@ input:focus, select:focus, textarea:focus { box-shadow: var(--ring), inset 0 1px
 .g-btn:hover { border-color: rgba(77, 232, 255, 0.45); background: rgba(77, 232, 255, 0.1); }
 .g-del { color: var(--muted); }
 .g-del:hover { color: var(--danger); border-color: rgba(255, 108, 136, 0.45); background: rgba(255, 108, 136, 0.1); }
+
+/* ============================================================
+   UI refresh: layout rebalance, poof glow, tidy cards, header.
+   ============================================================ */
+
+/* Rebalance the stage: slim presence column, much wider canvas. */
+.stage.panel { grid-template-columns: minmax(186px, 0.34fr) minmax(440px, 1fr); padding: 52px 24px 84px; }
+.stage.panel.generating { grid-template-columns: minmax(160px, 0.3fr) minmax(420px, 1fr); }
+.orb { width: min(24vw, 248px); }
+.stage.panel.generating .orb { width: min(20vw, 210px); }
+body[data-layout="canvas"] .stage.panel { grid-template-columns: minmax(150px, 0.26fr) minmax(480px, 1.25fr); }
+
+/* Tool-call poof glow */
+.orb-poof { transition: opacity 150ms ease; pointer-events: none; }
+.orb-poof circle { filter: drop-shadow(0 0 5px rgba(255, 255, 255, 0.25)); }
+
+/* Header: remove (✕) in the card controls + collapsible build notes */
+.order-remove:hover { color: var(--danger); border-color: rgba(255, 108, 136, 0.45); background: rgba(255, 108, 136, 0.1); }
+.card-info { margin: -2px 0 12px; }
+.card-info > summary { cursor: pointer; width: fit-content; display: inline-flex; align-items: center; gap: 6px; padding: 4px 11px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 0.78rem; list-style: none; transition: color var(--t-fast), border-color var(--t-fast); }
+.card-info > summary::-webkit-details-marker { display: none; }
+.card-info > summary::before { content: "ⓘ"; opacity: 0.8; }
+.card-info[open] > summary { color: var(--text); border-color: var(--line-strong); }
+.card-info p { margin: 8px 2px 0; color: var(--muted); font-size: 0.85rem; line-height: 1.5; }
+.card-summary { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* Cleaner workspace card chrome */
+.workspace-card { border-radius: 18px; }
+.workspace-card > header { align-items: flex-start; }
+.workspace-card.widget .widget-view,
+.ws-viewport .workspace-card.widget { box-shadow: none; }
+
+/* Pollen pill never overflows the header */
+.balance-pill { max-width: 170px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Premium control bar */
+.controls { gap: 8px; padding: 7px; box-shadow: var(--shadow-2), inset 0 1px 0 rgba(255, 255, 255, 0.06); }
+
+/* ============================================================
+   Switchable UI styles — minimal / refine (default) / classic / bolder
+   ============================================================ */
+
+/* CLASSIC — flatter, calmer, less neon */
+body[data-uistyle="classic"] {
+  --shadow-1: 0 8px 22px rgba(0, 0, 0, 0.3);
+  --shadow-2: 0 14px 38px rgba(0, 0, 0, 0.4);
+}
+body[data-uistyle="classic"] .app-header,
+body[data-uistyle="classic"] .stage.panel,
+body[data-uistyle="classic"] .drawer.panel { background-image: none; }
+body[data-uistyle="classic"] .balance-pill::after,
+body[data-uistyle="classic"] .button.primary::after { display: none; }
+body[data-uistyle="classic"] .workspace-card,
+body[data-uistyle="classic"] .gallery-item,
+body[data-uistyle="classic"] .gen-tile,
+body[data-uistyle="classic"] .metric-tile { box-shadow: none; }
+
+/* MINIMAL — content-first, quiet surfaces, more breathing room */
+body[data-uistyle="minimal"] {
+  --line: rgba(255, 255, 255, 0.07);
+  --panel: rgba(14, 16, 26, 0.6);
+  background: linear-gradient(160deg, #07080f, #0a0c15 60%, #07080f);
+}
+body[data-uistyle="minimal"] .app-header,
+body[data-uistyle="minimal"] .stage.panel,
+body[data-uistyle="minimal"] .drawer.panel { background-image: none; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3); }
+body[data-uistyle="minimal"] .balance-pill::after,
+body[data-uistyle="minimal"] .button.primary::after,
+body[data-uistyle="minimal"] .orb-core::after { display: none; }
+body[data-uistyle="minimal"] .button.primary,
+body[data-uistyle="minimal"] .button.talk { background: rgba(255, 255, 255, 0.1); color: var(--text); box-shadow: none; }
+body[data-uistyle="minimal"] .workspace-card,
+body[data-uistyle="minimal"] .gallery-item,
+body[data-uistyle="minimal"] .gen-tile,
+body[data-uistyle="minimal"] .metric-tile { box-shadow: none; background: rgba(255, 255, 255, 0.025); }
+body[data-uistyle="minimal"] .workspace-card:hover,
+body[data-uistyle="minimal"] .gallery-item:hover { transform: none; box-shadow: none; }
+body[data-uistyle="minimal"] .orb-bars path { stroke-width: 2.4; filter: none; }
+body[data-uistyle="minimal"] .orb-rings circle { filter: none; }
+body[data-uistyle="minimal"] .adaptive-workspace { background: rgba(255, 255, 255, 0.02); }
+body[data-uistyle="minimal"] .stage.panel { padding-top: 60px; }
+
+/* BOLDER — stronger hierarchy, richer depth, bigger focal point */
+body[data-uistyle="bolder"] {
+  --radius-lg: 32px;
+  --line: rgba(255, 255, 255, 0.14);
+  --line-strong: rgba(255, 255, 255, 0.26);
+}
+body[data-uistyle="bolder"] .stage.panel {
+  background:
+    radial-gradient(circle at 22% 44%, rgba(77, 232, 255, 0.26), transparent 22rem),
+    radial-gradient(circle at 78% 26%, rgba(255, 79, 216, 0.22), transparent 22rem),
+    rgba(8, 10, 18, 0.7);
+}
+body[data-uistyle="bolder"] .orb { width: min(28vw, 290px); }
+body[data-uistyle="bolder"] .brand strong { font-size: 1.18rem; }
+body[data-uistyle="bolder"] .workspace-card,
+body[data-uistyle="bolder"] .gallery-item { border-width: 1px; box-shadow: var(--shadow-1), inset 0 1px 0 rgba(255, 255, 255, 0.1); }
+body[data-uistyle="bolder"] .button.primary,
+body[data-uistyle="bolder"] .button.talk { box-shadow: 0 14px 36px rgba(255, 79, 216, 0.4); }
+body[data-uistyle="bolder"] .nav-button.active { box-shadow: inset 0 0 0 1px var(--line-strong), 0 6px 18px rgba(77, 232, 255, 0.2); }
+body[data-uistyle="bolder"] .workspace-mode,
+body[data-uistyle="bolder"] .ws-page-info strong { letter-spacing: -0.01em; }
+body[data-uistyle="bolder"] .orb-blob { filter: url(#orbBlur) drop-shadow(0 0 calc(26px + var(--level) * 80px) rgba(142, 108, 255, calc(0.45 + var(--level) * 0.5))); }

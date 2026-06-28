@@ -79,7 +79,19 @@ const state = {
   camera: null,
   pendingImages: [],
   workspaceIndex: 0,
+  bargeThreshold: clampGate(Number(localStorage.getItem("barge_threshold") ?? 0.085)),
 };
+
+// Mic noise gate for realtime barge-in: the local RMS a sound must exceed (while
+// the model is speaking) to count as the user interrupting. User-tunable.
+function clampGate(value) {
+  return Number.isFinite(value) ? Math.min(0.4, Math.max(0.01, value)) : 0.085;
+}
+
+function setBargeThreshold(value) {
+  state.bargeThreshold = clampGate(value);
+  localStorage.setItem("barge_threshold", String(state.bargeThreshold));
+}
 
 // Feature toggles surfaced in the Config panel. Defaults chosen so the app works
 // out of the box; the user can disable any of them.
@@ -122,6 +134,7 @@ const el = {
   orbBars: document.querySelector(".orb-bars"),
   orbRings: document.querySelector(".orb-rings"),
   orbDots: document.querySelector(".orb-dots"),
+  orbPoof: document.querySelector(".orb-poof"),
   orbLabel: document.querySelector(".orb-label"),
   mediaDock: document.querySelector("#mediaDock"),
   genDock: document.querySelector("#genDock"),
@@ -148,6 +161,7 @@ const el = {
   modelStatus: document.querySelector("#modelStatus"),
   soundToggle: document.querySelector("#soundToggle"),
   soundVolume: document.querySelector("#soundVolume"),
+  bargeGate: document.querySelector("#bargeGate"),
   memoryList: document.querySelector("#memoryList"),
   clearMemory: document.querySelector("#clearMemory"),
   widgetList: document.querySelector("#widgetList"),
@@ -157,6 +171,7 @@ const el = {
 };
 
 const fields = [
+  "uiStyle",
   "themePreset",
   "layoutPreset",
   "personalityPreset",
@@ -347,6 +362,10 @@ function bindEvents() {
   el.soundToggle.addEventListener("click", () => setSoundMuted(!sound.muted));
   el.soundVolume.value = String(Math.round(sound.volume * 100));
   el.soundVolume.addEventListener("input", () => setSoundVolume(Number(el.soundVolume.value) / 100));
+  if (el.bargeGate) {
+    el.bargeGate.value = String(Math.round(state.bargeThreshold * 100));
+    el.bargeGate.addEventListener("input", () => setBargeThreshold(Number(el.bargeGate.value) / 100));
+  }
   el.clearMemory.addEventListener("click", () => forgetMemory({ all: true }));
   el.clearWidgets?.addEventListener("click", clearSavedWidgets);
   wireFlag("flagEndConversation", "endConversation");
@@ -592,6 +611,7 @@ function closeDrawers() {
 }
 
 function applyPresets() {
+  document.body.dataset.uistyle = value("uiStyle") || "refine";
   document.body.dataset.theme = value("themePreset") || "aurora";
   document.body.dataset.layout = value("layoutPreset") || "focus";
   document.body.dataset.personality = value("personalityPreset") || "operator";
@@ -649,7 +669,9 @@ function formatBalance(balance) {
   if (!balance || typeof balance !== "object") return "";
   const amount = balance.balance ?? balance.pollen ?? balance.remaining ?? balance.amount;
   if (amount === undefined || amount === null) return "";
-  return `${amount} pollen`;
+  const num = Number(amount);
+  const shown = Number.isFinite(num) ? (Math.round(num * 100) / 100).toLocaleString() : amount;
+  return `${shown} pollen`;
 }
 
 function setBalanceText(text) {
@@ -761,7 +783,7 @@ async function startRealtime() {
       let sum = 0;
       for (let i = 0; i < input.length; i += 1) sum += input[i] * input[i];
       const rms = Math.sqrt(sum / input.length);
-      if (rms < 0.085) { rt.bargeFrames = 0; return; } // echo / room tone: ignore
+      if (rms < state.bargeThreshold) { rt.bargeFrames = 0; return; } // echo / room tone: ignore
       rt.bargeFrames = (rt.bargeFrames || 0) + 1;
       if (rt.bargeFrames < 2) return; // need it sustained to count as a barge-in
       interruptRealtime();
@@ -2405,17 +2427,38 @@ function renderArtifact(artifact) {
   down.setAttribute("aria-label", "Move down");
   down.textContent = "↓";
   down.addEventListener("click", () => moveArtifact(artifact.id, 1));
-  controls.append(up, down);
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "order-btn order-remove";
+  remove.title = "Remove";
+  remove.setAttribute("aria-label", "Remove from canvas");
+  remove.textContent = "✕";
+  remove.addEventListener("click", () => removeWorkspace({ id: artifact.id }));
+  controls.append(up, down, remove);
   const metaWrap = document.createElement("div");
   metaWrap.className = "card-meta-wrap";
   metaWrap.append(meta, controls);
   header.append(title, metaWrap);
   card.append(header);
   if (artifact.summary) {
-    const summary = document.createElement("p");
-    summary.className = "card-summary";
-    summary.textContent = artifact.summary;
-    card.append(summary);
+    // Widget/project summaries are the build spec — tuck them behind a collapsible
+    // "Build notes" so the canvas leads with the actual tool, not dev text.
+    if (artifact.layout === "widget" || artifact.layout === "project") {
+      const details = document.createElement("details");
+      details.className = "card-info";
+      const sum = document.createElement("summary");
+      sum.textContent = "Build notes";
+      const body = document.createElement("p");
+      body.textContent = artifact.summary;
+      details.append(sum, body);
+      card.append(details);
+    } else {
+      const summary = document.createElement("p");
+      summary.className = "card-summary";
+      summary.textContent = artifact.summary;
+      summary.title = artifact.summary;
+      card.append(summary);
+    }
   }
   if (artifact.layout === "table") card.append(renderTable(artifact.data));
   else if (artifact.layout === "metrics") card.append(renderMetrics(artifact.data));
@@ -2423,12 +2466,6 @@ function renderArtifact(artifact) {
   else if (artifact.layout === "widget") card.append(renderWidget(artifact));
   else if (artifact.layout === "image_request") card.append(renderImageRequest(artifact));
   else if (artifact.content) card.append(renderNoteBody(artifact.content));
-  const remove = document.createElement("button");
-  remove.className = "artifact-remove";
-  remove.type = "button";
-  remove.textContent = "Remove";
-  remove.addEventListener("click", () => removeWorkspace({ id: artifact.id }));
-  card.append(remove);
   return card;
 }
 
@@ -3084,7 +3121,7 @@ function startVizLoop() {
     viz.level += (viz.target - viz.level) * 0.18;
     viz.phase += 0.016 + viz.level * 0.05;
     viz.spin += 0.012 + (viz.state === "thinking" ? 0.05 : 0);
-    if (viz.burst > 0.001) viz.burst *= 0.92; else viz.burst = 0;
+    if (viz.burst > 0.001) viz.burst *= 0.94; else viz.burst = 0;
     renderVizFrame();
   };
   tick();
@@ -3125,24 +3162,45 @@ function renderVizFrame() {
     }
   }
 
-  // Radiating rings (speaking) + a one-shot colored ripple when a tool fires.
+  // Radiating rings (speaking only) — the tool "poof" lives in its own layer.
   if (el.orbRings) {
     const showRings = viz.state === "speaking";
-    const burstActive = burst > 0.02;
-    el.orbRings.style.opacity = (showRings || burstActive) ? "1" : "0";
-    let rings = "";
+    el.orbRings.style.opacity = showRings ? "1" : "0";
     if (showRings) {
+      let rings = "";
       for (let i = 0; i < 3; i += 1) {
         const t = ((viz.phase * 0.5 + i / 3) % 1);
         const r = 50 + t * (40 + level * 30);
         rings += `<circle cx="100" cy="100" r="${r.toFixed(1)}" opacity="${(1 - t).toFixed(2)}" />`;
       }
+      el.orbRings.innerHTML = rings;
     }
-    if (burstActive) {
-      const r = 48 + (1 - burst) * 52;
-      rings += `<circle cx="100" cy="100" r="${r.toFixed(1)}" stroke="${burstColor()}" stroke-width="3" opacity="${burst.toFixed(2)}" />`;
+  }
+
+  // Tool-call "poof": a dedicated outer burst — twin expanding rings + particles
+  // radiating outward — drawn on top and INDEPENDENT of the orb's idle/thinking/
+  // speaking state, so you always see when the agent fires a tool.
+  if (el.orbPoof) {
+    const poofActive = burst > 0.015;
+    el.orbPoof.style.opacity = poofActive ? "1" : "0";
+    if (poofActive) {
+      const color = burstColor();
+      const grow = 1 - burst; // 0 at trigger → 1 as it fades: expands outward
+      let svg = "";
+      for (let i = 0; i < 2; i += 1) {
+        const r = 56 + grow * (46 + i * 16);
+        const w = (3.4 - i * 1.2) * burst;
+        svg += `<circle cx="100" cy="100" r="${r.toFixed(1)}" fill="none" stroke="${color}" stroke-width="${w.toFixed(2)}" opacity="${(burst * (1 - i * 0.3)).toFixed(2)}" />`;
+      }
+      const particles = 9;
+      const pr = 58 + grow * 40;
+      for (let i = 0; i < particles; i += 1) {
+        const a = (i / particles) * Math.PI * 2 + viz.spin * 0.4;
+        const dotR = (1.2 + burst * 2.6).toFixed(2);
+        svg += `<circle cx="${(100 + Math.cos(a) * pr).toFixed(1)}" cy="${(100 + Math.sin(a) * pr).toFixed(1)}" r="${dotR}" fill="${color}" opacity="${burst.toFixed(2)}" />`;
+      }
+      el.orbPoof.innerHTML = svg;
     }
-    el.orbRings.innerHTML = rings;
   }
 
   // Orbiting dots (thinking).

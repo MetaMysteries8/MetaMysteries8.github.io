@@ -68,6 +68,7 @@
           <path class="orb-blob" fill="url(#orbGrad)" filter="url(#orbBlur)"/>
           <g class="orb-bars"></g>
           <g class="orb-dots"></g>
+          <g class="orb-poof"></g>
         </svg>
         <span class="orb-label" aria-hidden="true"></span>
       </div>
@@ -108,6 +109,10 @@
           <label class="toggle"><input id="flagAutosaveUploads" type="checkbox"><span>Auto-save uploaded images to the gallery</span></label>
           <label class="toggle"><input id="flagCamera" type="checkbox"><span>Allow live camera vision in realtime</span></label>
         </div>
+        <label>Mic noise gate (barge-in sensitivity)
+          <input id="bargeGate" type="range" min="1" max="35" value="9">
+        </label>
+        <p class="range-hint">Lower it if the agent can’t hear you interrupt it; raise it if it keeps interrupting itself on background noise.</p>
         <h3 class="config-section">Models &amp; routing</h3>
         <label>Interface sound volume
           <input id="soundVolume" type="range" min="0" max="100" value="70">
@@ -122,6 +127,14 @@
           </div>
           <div id="memoryList" class="memory-list"></div>
         </div>
+        <label>UI style
+          <select id="uiStyle">
+            <option value="refine">Refined</option>
+            <option value="classic">Classic</option>
+            <option value="minimal">Minimal</option>
+            <option value="bolder">Bolder</option>
+          </select>
+        </label>
         <label>Theme
           <select id="themePreset">
             <option value="aurora">Aurora</option>
