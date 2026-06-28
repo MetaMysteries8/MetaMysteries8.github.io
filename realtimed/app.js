@@ -402,8 +402,9 @@ async function fetchModels(path) {
 }
 
 function modelName(row) {
+  if (!row) return "";
   if (typeof row === "string") return row;
-  return row.id || row.name || row.model || row.alias;
+  return row.id || row.name || row.model || row.alias || "";
 }
 
 function modelText(row) {
@@ -988,7 +989,7 @@ async function runTool(name, args, realtimeCallId) {
     else if (/[gj]ibber.?link|[gj]ibber/i.test(name)) result = await activateGibberlink(args.message || args.text || "");
     else result = { error: `Unknown tool: ${name}` };
   } catch (error) {
-    result = { error: error.message || String(error) };
+    result = { error: (error && error.message) || String(error) || "Tool failed." };
   }
   updateToolEvent(toolId, result?.error ? "error" : "done", summarizeToolResult(name, result));
 
@@ -2605,7 +2606,8 @@ function saveSettings() {
 }
 
 function value(id) {
-  return document.querySelector(`#${id}`).value.trim();
+  const node = document.querySelector(`#${id}`);
+  return node ? String(node.value || "").trim() : "";
 }
 
 function addMcpServer(event) {
