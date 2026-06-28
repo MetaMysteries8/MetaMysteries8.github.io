@@ -20,6 +20,18 @@ const CODER_SYSTEM_PROMPT = [
   "ALWAYS: never invent or hardcode secret API keys or credentials; use clearly named placeholders.",
 ].join("\n");
 
+const WIDGET_SYSTEM_PROMPT = [
+  "You build ONE small, self-contained, interactive HTML widget that gets embedded in a card inside a dark, glassy web app.",
+  "Output exactly one complete HTML document inside a single ```html code block, then nothing else.",
+  "Rules:",
+  "- Inline ALL CSS and JS. No external files, imports, CDNs, fonts, or network requests.",
+  "- Transparent or dark background; light text (#f4f6ff-ish); use system-ui font. The host card is dark.",
+  "- Be fluid and bounded: fill 100% width, never exceed it; keep height ~220-320px; use box-sizing:border-box and avoid fixed pixel widths.",
+  "- Make it genuinely interactive and useful for the spec (controls, canvas, calculations, live updates).",
+  "- If given JSON data, use it directly.",
+  "- No secret keys, no alert() spam, no infinite loops.",
+].join("\n");
+
 const state = {
   apiKey: localStorage.getItem("pollinations_api_key") || "",
   mode: "realtime",
@@ -373,10 +385,26 @@ function isVideoModel(model) {
   return /video|veo|\bwan\b|wan-|seedance|ltx|reel|p-video/.test(`${name} ${text}`);
 }
 
+// True only when the model can actually take a source/reference image (image edit
+// or image-to-video). Metadata from /image/models is authoritative; the name
+// fallback lists known editing/i2v families and deliberately avoids the bare word
+// "image" (every image model contains it, which made the old check always true).
 function supportsImageInput(modelNameValue) {
+  const name = String(modelNameValue || "").toLowerCase();
   const model = state.modelMeta.image.find((entry) => modelName(entry) === modelNameValue);
-  const text = modelText(model);
-  return /image|edit|reference|i2v|start|first|last|kontext|gptimage|seedream|klein|nanobanana/.test(`${modelNameValue} ${text}`);
+  if (model && typeof model === "object") {
+    const caps = model.capabilities || model.capability || {};
+    if (caps.image_to_image || caps.image_input || caps.imageInput || caps.img2img || caps.edit || caps.editing || caps.inpainting || caps.reference) return true;
+    const inputs = []
+      .concat(model.input_modalities || model.inputModalities || [])
+      .concat(model.modalities && model.modalities.input ? model.modalities.input : [])
+      .concat(Array.isArray(model.input) ? model.input : []);
+    if (inputs.some((m) => /image/i.test(String(m)))) return true;
+    if (model.image === true || model.imageToImage === true || model.reference === true || model.supportsImage === true) return true;
+    const params = model.params || model.parameters || model.supportedParams || [];
+    if (Array.isArray(params) && params.some((p) => /^image$/i.test(String(p)))) return true;
+  }
+  return /kontext|nanobanana|nano-banana|gptimage|gpt-image|p-image-edit|qwen-image|seedream|grok-imagine|i2v|img2img|image-?edit|veo|seedance|\bwan\b|wan-|ltx|kling|grok-video|reel/.test(name);
 }
 
 function fillSelect(id, names, fallback) {
@@ -810,6 +838,7 @@ async function runTool(name, args, realtimeCallId) {
       result = await generateMedia("audio", args.prompt, model, toolId, args);
     }
     else if (name === "web_search") result = await webSearch(args.query || args.q || args.prompt || "", toolId);
+    else if (name === "build_widget") result = await buildWidget(args, toolId);
     else if (name === "ask_coder_model") result = await askCoder(args.task || args.prompt || "", toolId);
     else if (name === "call_mcp_server") result = await callMcp(args.server, args.tool, args.arguments || {}, toolId);
     else if (name === "start_gibberlink") result = await activateGibberlink(args.message || "");
@@ -882,9 +911,14 @@ async function runMediaGeneration(kind, prompt, model, toolId, options = {}) {
   if (kind === "audio" && detectLoaderKind(kind, prompt, model) === "tts") prompt = cleanTtsPrompt(prompt);
   if ((kind === "image" || kind === "video") && options.images?.length && !supportsImageInput(model)) {
     const replacement = sourceCapableModel(kind);
-    if (replacement) {
-      updateToolEvent(toolId, "running", `${model} does not advertise source-image support; using ${replacement}.`);
+    if (replacement && replacement !== model) {
+      updateToolEvent(toolId, "running", `${model} can't take source images; switching to ${replacement}.`);
       model = replacement;
+    } else if (!replacement) {
+      const message = `No available ${kind} model supports source/reference images, so the ${kind === "video" ? "image-to-video" : "image edit"} was skipped. Pick a ${kind} model that supports reference images.`;
+      addMessage("system", message);
+      playSound("error");
+      return { error: message };
     }
   }
   const label = kind === "video" ? "video generation" : `${kind} generation`;
@@ -932,6 +966,9 @@ function mediaParams(kind, loaderKind, model, options = {}) {
 }
 
 function sourceCapableModel(kind) {
+  // Keep the user's selected model if it already supports source images.
+  const current = value(kind === "video" ? "videoModel" : "imageModel");
+  if (current && supportsImageInput(current)) return current;
   const list = kind === "video" ? videoModelsOnly() : imageModelsOnly();
   return modelName(list.find((model) => supportsImageInput(modelName(model)))) || "";
 }
@@ -989,17 +1026,61 @@ async function webSearch(query, toolId) {
   if (!query) return { error: "No search query was provided." };
   const model = searchModel();
   updateToolEvent(toolId, "running", `Searching the web with ${model} for "${query.slice(0, 80)}".`);
-  const result = await busy(() => postJson("/v1/chat/completions", {
+  showGeneration("search", `Searching the web for "${query.slice(0, 80)}".`);
+  const result = await postJson("/v1/chat/completions", {
     model,
     messages: [
       { role: "system", content: "You are a web search assistant with live internet access. Answer the user's query using current information. Be factual and concise. Cite sources inline as [1], [2] and end with a 'Sources:' list of the URLs you used." },
       { role: "user", content: query },
     ],
-  }));
-  if (result?.error) return { error: result.error };
+  });
+  if (result?.error) {
+    // postJson's failResponse already hid the dock for HTTP errors; only network
+    // errors slip through without hiding (they carry a "Network error" message).
+    if (/^Network error/.test(result.error)) hideGeneration("Search failed.");
+    return { error: result.error };
+  }
   const answer = result?.choices?.[0]?.message?.content?.trim();
-  if (!answer) return { error: "Search returned no result." };
+  if (!answer) {
+    hideGeneration("Search returned no result.");
+    return { error: "Search returned no result." };
+  }
+  hideGeneration("Search complete.");
   return { query, model, answer };
+}
+
+async function buildWidget(args, toolId) {
+  const spec = String(args.spec || args.prompt || args.description || "").trim();
+  if (!spec) return { error: "No widget spec was provided." };
+  const title = args.title || "Custom widget";
+  const model = value("coderModel");
+  updateToolEvent(toolId, "running", `Building widget "${title}" with ${model}.`);
+  showCoderTerminal([`$ widget-builder --model ${model}`, "Designing interactive widget...", `Spec: ${spec.slice(0, 160)}`]);
+  startLoop(); // matched by hideGeneration() in every path below
+  const userParts = [spec];
+  if (args.data !== undefined) userParts.push(`\n\nUse this JSON data:\n${JSON.stringify(args.data).slice(0, 6000)}`);
+  const result = await postJson("/v1/chat/completions", {
+    model,
+    messages: [
+      { role: "system", content: WIDGET_SYSTEM_PROMPT },
+      { role: "user", content: userParts.join("") },
+    ],
+  });
+  if (result?.error) {
+    showCoderTerminal(["Widget build failed.", result.error], true);
+    hideGeneration("Widget build failed.");
+    return { error: result.error };
+  }
+  const html = extractHtmlProject(result?.choices?.[0]?.message?.content || "");
+  if (!html) {
+    showCoderTerminal(["Coder did not return a widget document."], true);
+    hideGeneration("Widget build produced no widget.");
+    return { error: "Coder did not return a self-contained widget document." };
+  }
+  const artifact = showWorkspace({ layout: "widget", title, summary: spec.slice(0, 200), content: html });
+  showCoderTerminal(["Widget ready.", "Rendered live to the adaptive workspace."], true);
+  hideGeneration("Widget added to the canvas.");
+  return { ok: true, workspaceId: artifact.workspaceId };
 }
 
 async function callMcp(serverName, tool, args, toolId) {
@@ -1058,6 +1139,19 @@ function toolDefinitions() {
       },
     },
     { name: "web_search", description: "Search the live web for current, factual, or time-sensitive information (news, prices, docs, events, anything past your training cutoff) and get a concise answer with cited sources. Returns { answer } with inline [n] citations and a Sources list.", parameters: objectParams({ query: "The search query" }, ["query"]) },
+    {
+      name: "build_widget",
+      description: "Build a CUSTOM interactive widget for the adaptive workspace by delegating to the coder model. Use this for anything beyond the simple presets (note/chart/table/checklist/metrics/code) — calculators, interactive diagrams, timers, mini-tools, bespoke visualizations. Describe it in 'spec' (and optionally pass 'data'); the coder writes a sandboxed HTML widget rendered live on the canvas. Prefer show_workspace for plain structured data; use build_widget when interactivity or a custom design is needed.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Short widget title" },
+          spec: { type: "string", description: "Detailed description of the widget and how it should look and behave" },
+          data: { type: "array", description: "Optional structured data the widget should use", items: { type: "object", additionalProperties: true } },
+        },
+        required: ["spec"],
+      },
+    },
     { name: "ask_coder_model", description: "Delegate a coding task to the configured coder model. Returns { answer } with a short summary; when the task is a runnable web app/page/game it also returns { projectGalleryId } and saves the full HTML to the local gallery, where the user can open or download it. Tell the user it is in the gallery rather than pasting the code aloud.", parameters: objectParams({ task: "Coding task or question" }, ["task"]) },
     { name: "call_mcp_server", description: "Call a configured HTTP MCP gateway tool.", parameters: objectParams({ server: "Configured server name", tool: "MCP tool name", arguments: "Tool arguments object" }, ["server", "tool"]) },
     { name: "start_gibberlink", description: "Start Gibberlink (also spelled Jibberlink): a data-over-sound link (ggwave audio tones) for talking to ANOTHER AI agent instead of a human. YOU decide to call this — invoke it as soon as you recognize the other party is an AI agent and a reliable machine-to-machine exchange is warranted (e.g. the user says 'start gibberlink/jibberlink' or another agent proposes it). Same-agent peers auto-negotiate a faster protocol. Optionally include an opening message to transmit to the peer.", parameters: objectParams({ message: "Optional opening message to transmit to the peer agent" }, []) },
@@ -1079,7 +1173,7 @@ function toolDefinitions() {
     },
     {
       name: "request_source_images",
-      description: "Ask the user for source/reference image URLs or file uploads before an image edit, style transfer, or image-to-video task.",
+      description: "Ask the user for source/reference image URLs or file uploads before an image edit, style transfer, or image-to-video task. Use purpose 'video_reference' for image-to-video. Only works when the selected image/video model supports reference images; it returns an error otherwise.",
       parameters: {
         type: "object",
         properties: {
@@ -1150,7 +1244,7 @@ function objectParams(properties, required) {
 }
 
 function systemPrompt() {
-  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. When visual structure helps, call show_workspace to render a chart, table, checklist, note, metrics, or code block instead of speaking a dense answer. For charts, provide rows with label and numeric value. For checklists, provide rows with text and done. For metrics, provide rows with label, value, and optional note or delta. To show source code or markup, use layout "code" with the source in content and a language tag. If the user asks to reuse a prior image/video/audio, call list_gallery first. If the user asks to edit an existing image or use an existing image as a reference, use use_gallery_sources when the target is already in the gallery, otherwise call request_source_images. You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize that the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink to switch to a data-over-sound link; ask the human's consent first unless they already requested it. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."`;
+  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. When visual structure helps, call show_workspace to render a chart, table, checklist, note, metrics, or code block instead of speaking a dense answer. For charts, provide rows with label and numeric value. For checklists, provide rows with text and done. For metrics, provide rows with label, value, and optional note or delta. To show source code or markup, use layout "code" with the source in content and a language tag. For anything interactive or custom that the presets can't express (calculators, interactive diagrams, mini-tools, bespoke visualizations), call build_widget to have the coder model generate a live sandboxed widget on the canvas. If the user asks to reuse a prior image/video/audio, call list_gallery first. If the user asks to edit an existing image or use an existing image as a reference, use use_gallery_sources when the target is already in the gallery, otherwise call request_source_images. You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize that the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink to switch to a data-over-sound link; ask the human's consent first unless they already requested it. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."`;
 }
 
 function personalityInstruction() {
@@ -1432,6 +1526,7 @@ function labelForTool(name) {
     create_video: "Video generation",
     create_audio: "Audio generation",
     ask_coder_model: "Coder model",
+    build_widget: "Widget builder",
     web_search: "Web search",
     call_mcp_server: "MCP tool call",
     start_gibberlink: "Gibberlink handoff",
@@ -1456,6 +1551,7 @@ function summarizeToolResult(name, result) {
   if (name === "use_gallery_sources") return "Gallery sources used for generation.";
   if (name === "ask_coder_model") return "Coder model returned guidance.";
   if (name === "web_search") return "Web search results returned.";
+  if (name === "build_widget") return "Custom widget added to the canvas.";
   if (name === "call_mcp_server") return "MCP server returned a result.";
   if (name === "start_gibberlink") return result?.turbo ? "Gibberlink active (turbo channel)." : "Gibberlink active.";
   if (result?.galleryId) return `${capitalize(result.kind)} saved to local gallery.`;
@@ -1468,7 +1564,7 @@ function showWorkspace(args, toolId) {
     layout: args.layout || "note",
     title: args.title || "Workspace",
     summary: args.summary || "",
-    content: typeof args.content === "string" ? args.content.slice(0, 20000) : "",
+    content: typeof args.content === "string" ? args.content.slice(0, 60000) : "",
     language: args.language || "",
     prompt: args.prompt || "",
     purpose: args.purpose || "",
@@ -1486,6 +1582,14 @@ function showWorkspace(args, toolId) {
 }
 
 function requestSourceImages(args, toolId) {
+  const kind = args.purpose === "video_reference" ? "video" : "image";
+  const capable = sourceCapableModel(kind);
+  if (!capable) {
+    const message = `No available ${kind} model supports reference images, so I can't run that ${kind === "video" ? "image-to-video" : "image edit"}. Choose a ${kind}-editing model in settings.`;
+    addMessage("system", message);
+    playSound("error");
+    return { error: message };
+  }
   const artifact = {
     id: crypto.randomUUID(),
     layout: "image_request",
@@ -1558,6 +1662,7 @@ function renderArtifact(artifact) {
   else if (artifact.layout === "checklist") card.append(renderChecklist(artifact.data, artifact.id));
   else if (artifact.layout === "metrics") card.append(renderMetrics(artifact.data));
   else if (artifact.layout === "code") card.append(renderCode(artifact));
+  else if (artifact.layout === "widget") card.append(renderWidget(artifact));
   else if (artifact.layout === "image_request") card.append(renderImageRequest(artifact));
   else if (artifact.content) card.append(renderNoteBody(artifact.content));
   const remove = document.createElement("button");
@@ -1659,6 +1764,55 @@ function renderCode(artifact) {
   code.textContent = artifact.content || "";
   pre.append(code);
   wrap.append(bar, pre);
+  return wrap;
+}
+
+// Coder-generated widget: runs live in a sandboxed srcdoc frame (opaque origin,
+// no access to the page/storage/BYOP key), with a source toggle for transparency.
+function renderWidget(artifact) {
+  const wrap = document.createElement("div");
+  wrap.className = "widget-view";
+  const bar = document.createElement("div");
+  bar.className = "widget-bar";
+  const tag = document.createElement("span");
+  tag.className = "code-lang";
+  tag.textContent = "live widget";
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "code-copy";
+  toggle.textContent = "View source";
+  bar.append(tag, toggle);
+
+  const stage = document.createElement("div");
+  stage.className = "widget-stage";
+  const frame = document.createElement("iframe");
+  frame.className = "widget-frame";
+  frame.setAttribute("sandbox", "allow-scripts allow-pointer-lock allow-modals");
+  frame.setAttribute("referrerpolicy", "no-referrer");
+  frame.srcdoc = artifact.content || "";
+  stage.append(frame);
+
+  let pre = null;
+  let showingSource = false;
+  toggle.addEventListener("click", () => {
+    showingSource = !showingSource;
+    if (showingSource) {
+      if (!pre) {
+        pre = document.createElement("pre");
+        pre.className = "code-view";
+        const code = document.createElement("code");
+        code.textContent = artifact.content || "";
+        pre.append(code);
+      }
+      stage.replaceChildren(pre);
+      toggle.textContent = "Run widget";
+    } else {
+      stage.replaceChildren(frame);
+      toggle.textContent = "View source";
+    }
+  });
+
+  wrap.append(bar, stage);
   return wrap;
 }
 
@@ -1774,7 +1928,9 @@ function renderImageRequest(artifact) {
       artifact.data = images.map((url) => ({ url }));
       artifact.prompt = form.elements.prompt.value.trim() || artifact.prompt;
       saveWorkspace();
-      await generateMedia(artifact.purpose === "video_reference" ? "video" : "image", artifact.prompt, artifact.purpose === "video_reference" ? value("videoModel") : value("imageModel"), null, { images });
+      const kind = artifact.purpose === "video_reference" ? "video" : "image";
+      const model = sourceCapableModel(kind) || (kind === "video" ? value("videoModel") : value("imageModel"));
+      await generateMedia(kind, artifact.prompt, model, null, { images });
     } catch (error) {
       addMessage("system", error.message || String(error));
     } finally {
@@ -1929,6 +2085,17 @@ function generationVisualMarkup(kind) {
   }
   if (kind === "video") {
     return `<div class="video-frame"><span></span><span></span><span></span><div class="play-glyph"></div></div>`;
+  }
+  if (kind === "search") {
+    return `<div class="search-loader">
+      <div class="search-sources">
+        <span></span><span></span><span></span><span></span><span></span>
+      </div>
+      <svg class="search-lens" viewBox="0 0 64 64" aria-hidden="true">
+        <circle cx="26" cy="26" r="15"/>
+        <line x1="37" y1="37" x2="55" y2="55"/>
+      </svg>
+    </div>`;
   }
   return `<div class="diffusion-grid"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>`;
 }
