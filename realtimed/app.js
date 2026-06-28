@@ -561,6 +561,8 @@ async function runTool(name, args, realtimeCallId) {
     else if (name === "show_workspace") result = showWorkspace(args, toolId);
     else if (name === "request_source_images") result = requestSourceImages(args, toolId);
     else if (name === "remove_workspace") result = removeWorkspace(args, toolId);
+    else if (name === "list_gallery") result = await listGalleryForAgent();
+    else if (name === "use_gallery_sources") result = await useGallerySources(args, toolId);
     else result = { error: `Unknown tool: ${name}` };
   } catch (error) {
     result = { error: error.message || String(error) };
@@ -590,7 +592,7 @@ async function generateMedia(kind, prompt, model, toolId, options = {}) {
   if (!res.ok) return failResponse(res, `${kind} generation failed.`);
   const blob = await res.blob();
   refreshBalance();
-  const item = await saveGalleryItem({ kind, prompt, model, blob });
+  const item = await saveGalleryItem({ kind, prompt, model, blob, remoteUrl: res.url });
   hideGeneration(`${capitalize(kind)} complete and saved to your local gallery.`);
   return { ok: true, galleryId: item.id, kind, prompt, model };
 }
@@ -694,6 +696,24 @@ function toolDefinitions() {
         },
       },
     },
+    {
+      name: "list_gallery",
+      description: "List locally saved gallery items so you can reference or reuse them.",
+      parameters: { type: "object", properties: {} },
+    },
+    {
+      name: "use_gallery_sources",
+      description: "Use selected gallery images as source/reference images for image editing or image-to-video generation.",
+      parameters: {
+        type: "object",
+        properties: {
+          ids: { type: "array", items: { type: "string" }, description: "Gallery item ids to use as source images" },
+          prompt: { type: "string", description: "Edit or video prompt" },
+          purpose: { type: "string", enum: ["image_edit", "video_reference"], description: "How to use the gallery sources" },
+        },
+        required: ["ids", "prompt", "purpose"],
+      },
+    },
   ];
 }
 
@@ -710,7 +730,7 @@ function objectParams(properties, required) {
 }
 
 function systemPrompt() {
-  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. When visual structure helps, call show_workspace to render a chart, table, checklist, note, or metrics instead of speaking a dense answer. For charts, provide rows with label and numeric value. For checklists, provide rows with text and done. If the user asks to edit an image, add something to an image, use a source image, or create image-to-video from a starting frame, call request_source_images instead of guessing. You can remove stale workspace items with remove_workspace. You can call a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."`;
+  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. When visual structure helps, call show_workspace to render a chart, table, checklist, note, or metrics instead of speaking a dense answer. For charts, provide rows with label and numeric value. For checklists, provide rows with text and done. If the user asks to reuse a prior image/video/audio, call list_gallery first. If the user asks to edit an existing image or use an existing image as a reference, use use_gallery_sources when the target is already in the gallery, otherwise call request_source_images. You can remove stale workspace items with remove_workspace. You can call a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."`;
 }
 
 function personalityInstruction() {
@@ -834,6 +854,8 @@ function summarizeToolResult(name, result) {
   if (name === "show_workspace") return "Workspace updated.";
   if (name === "request_source_images") return "Source image request added to workspace.";
   if (name === "remove_workspace") return "Workspace cleaned up.";
+  if (name === "list_gallery") return "Gallery items listed.";
+  if (name === "use_gallery_sources") return "Gallery sources used for generation.";
   if (name === "ask_coder_model") return "Coder model returned guidance.";
   if (name === "call_mcp_server") return "MCP server returned a result.";
   if (result?.galleryId) return `${capitalize(result.kind)} saved to local gallery.`;
@@ -846,6 +868,10 @@ function showWorkspace(args, toolId) {
     layout: args.layout || "note",
     title: args.title || "Workspace",
     summary: args.summary || "",
+    prompt: args.prompt || "",
+    purpose: args.purpose || "",
+    minImages: args.minImages || 1,
+    maxImages: args.maxImages || 4,
     data: Array.isArray(args.data) ? args.data.slice(0, 12) : [],
     createdAt: Date.now(),
   };
@@ -1047,7 +1073,8 @@ function renderImageRequest(artifact) {
     try {
       const urls = parseSourceUrls(form.elements.urls.value);
       const uploads = await uploadSourceFiles([...form.elements.files.files]);
-      const images = [...urls, ...uploads].slice(0, artifact.maxImages || 4);
+      const galleryUrls = await resolveArtifactGalleryUrls(artifact);
+      const images = [...galleryUrls, ...urls, ...uploads].slice(0, artifact.maxImages || 4);
       if (images.length < (artifact.minImages || 1)) throw new Error(`Add at least ${artifact.minImages || 1} source image.`);
       artifact.data = images.map((url) => ({ url }));
       artifact.prompt = form.elements.prompt.value.trim() || artifact.prompt;
@@ -1075,6 +1102,18 @@ function renderImageRequest(artifact) {
   return form;
 }
 
+async function resolveArtifactGalleryUrls(artifact) {
+  const ids = (artifact.data || []).map((item) => item.galleryId).filter(Boolean);
+  if (!ids.length) return [];
+  const items = await getGalleryItems().catch(() => []);
+  const urls = [];
+  for (const id of ids) {
+    const item = items.find((entry) => entry.id === id);
+    if (item) urls.push(await ensureGalleryRemoteUrl(item));
+  }
+  return urls;
+}
+
 function parseSourceUrls(text) {
   return text.split(/[\n,]/).map((url) => url.trim()).filter(Boolean);
 }
@@ -1090,6 +1129,56 @@ async function uploadSourceFiles(files) {
     urls.push(json.url || `${MEDIA_BASE}/${json.id}`);
   }
   return urls;
+}
+
+async function listGalleryForAgent() {
+  const items = await getGalleryItems().catch(() => []);
+  const summary = items.slice(0, 24).map((item) => ({
+    id: item.id,
+    kind: item.kind,
+    model: item.model,
+    prompt: shortPrompt(item.prompt),
+    createdAt: item.createdAt,
+  }));
+  showWorkspace({
+    layout: "table",
+    title: "Gallery items",
+    summary: "Saved local media available for reuse. Use item ids when referencing sources.",
+    data: summary,
+  });
+  return { items: summary };
+}
+
+async function useGallerySources(args, toolId) {
+  const items = await getGalleryItems().catch(() => []);
+  const selected = items.filter((item) => (args.ids || []).includes(item.id));
+  if (!selected.length) return { error: "No matching gallery items found." };
+  const imageItems = selected.filter((item) => item.kind === "image");
+  if (!imageItems.length) return { error: "Only image gallery items can be used as source images right now." };
+  updateToolEvent(toolId, "running", "Preparing gallery images as sources.");
+  const images = [];
+  for (const item of imageItems) images.push(await ensureGalleryRemoteUrl(item));
+  showWorkspace({
+    layout: "table",
+    title: "Using gallery sources",
+    summary: args.prompt || "Gallery images selected as generation sources.",
+    data: imageItems.map((item) => ({ id: item.id, model: item.model, prompt: shortPrompt(item.prompt) })),
+  });
+  const kind = args.purpose === "video_reference" ? "video" : "image";
+  const model = kind === "video" ? value("videoModel") : value("imageModel");
+  return generateMedia(kind, args.prompt || "Use the selected source image as reference", model, toolId, { images });
+}
+
+async function ensureGalleryRemoteUrl(item) {
+  if (item.remoteUrl) return item.remoteUrl;
+  const form = new FormData();
+  form.append("file", item.blob, `${item.kind}-${item.id}.${extensionFor(item.kind, item.blob.type)}`);
+  const res = await fetch(`${MEDIA_BASE}/upload`, { method: "POST", headers: authHeaders(), body: form });
+  if (!res.ok) throw new Error(`Could not upload gallery item ${item.id}.`);
+  const json = await res.json();
+  item.remoteUrl = json.url || `${MEDIA_BASE}/${json.id}`;
+  await putGalleryItem(item);
+  return item.remoteUrl;
 }
 
 function clearWorkspace() {
@@ -1203,12 +1292,18 @@ function openDb() {
   });
 }
 
-async function saveGalleryItem({ kind, prompt, model, blob }) {
+async function saveGalleryItem({ kind, prompt, model, blob, remoteUrl }) {
   const db = await openDb();
   const item = { id: crypto.randomUUID(), kind, prompt, model, blob, createdAt: Date.now() };
-  await txDone(db.transaction("items", "readwrite").objectStore("items").put(item));
+  if (remoteUrl) item.remoteUrl = remoteUrl;
+  await putGalleryItem(item, db);
   await renderGallery();
   return item;
+}
+
+async function putGalleryItem(item, db) {
+  const database = db || await openDb();
+  await txDone(database.transaction("items", "readwrite").objectStore("items").put(item));
 }
 
 async function getGalleryItems() {
@@ -1242,9 +1337,27 @@ async function renderGallery() {
     link.href = url;
     link.download = `${item.kind}-${item.id}.${extensionFor(item.kind, item.blob.type)}`;
     link.textContent = "Download";
-    card.append(media, caption, details, link);
+    const useButton = document.createElement("button");
+    useButton.className = "gallery-use";
+    useButton.type = "button";
+    useButton.textContent = item.kind === "image" ? "Use as source" : "Show in canvas";
+    useButton.addEventListener("click", () => addGalleryReference(item));
+    card.append(media, caption, details, link, useButton);
     el.gallery.append(card);
   }
+}
+
+function addGalleryReference(item) {
+  showWorkspace({
+    layout: item.kind === "image" ? "image_request" : "note",
+    title: item.kind === "image" ? "Gallery source ready" : "Gallery item",
+    summary: item.kind === "image" ? "Use this saved image as a source for an edit or reference generation." : `${item.kind} generated with ${item.model}.`,
+    prompt: item.prompt,
+    purpose: "image_edit",
+    minImages: 1,
+    maxImages: 4,
+    data: item.kind === "image" ? [{ url: URL.createObjectURL(item.blob), galleryId: item.id }] : [{ kind: item.kind, model: item.model, prompt: shortPrompt(item.prompt) }],
+  });
 }
 
 function shortPrompt(prompt) {

@@ -612,6 +612,18 @@ input:focus, select:focus, textarea:focus { border-color: rgba(77, 232, 255, 0.7
 .gallery-item a { color: var(--cyan); text-decoration: none; }
 .gallery-item details { color: var(--muted); font-size: 0.82rem; margin-bottom: 8px; }
 .gallery-item summary { cursor: pointer; color: var(--text); }
+.gallery-use {
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+}
+
+.gallery-use:hover { border-color: rgba(77, 232, 255, 0.5); }
 
 .mcp-list { display: grid; gap: 10px; }
 .mcp-entry { padding: 10px; border: 1px solid var(--line); border-radius: 14px; color: var(--muted); }
