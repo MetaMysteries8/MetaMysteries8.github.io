@@ -1,4 +1,5 @@
 const GEN_BASE = "https://gen.pollinations.ai";
+const MEDIA_BASE = "https://media.pollinations.ai";
 const ENTER_BASE = "https://enter.pollinations.ai";
 const CLIENT_ID = "pk_VIepF2clCLKh5xiX";
 const REALTIME_MODEL = "gpt-realtime-2";
@@ -29,6 +30,8 @@ const el = {
   stopAction: document.querySelector("#stopAction"),
   orb: document.querySelector("#orb"),
   mediaDock: document.querySelector("#mediaDock"),
+  generationCard: document.querySelector("#generationCard"),
+  generationVisual: document.querySelector("#generationVisual"),
   generationStatus: document.querySelector("#generationStatus"),
   realtimeStatus: document.querySelector("#realtimeStatus"),
   modelAudio: document.querySelector("#modelAudio"),
@@ -51,6 +54,9 @@ const el = {
 };
 
 const fields = [
+  "themePreset",
+  "layoutPreset",
+  "personalityPreset",
   "textModel",
   "realtimeVoice",
   "coderModel",
@@ -60,10 +66,16 @@ const fields = [
   "imageModel",
   "videoModel",
   "audioModel",
+  "imageSize",
+  "videoAspect",
+  "videoDuration",
+  "videoAudio",
+  "musicDuration",
 ];
 
 function init() {
   loadSettings();
+  applyPresets();
   captureByopReturn();
   bindEvents();
   renderAuth();
@@ -90,7 +102,10 @@ function bindEvents() {
   el.mcpForm.addEventListener("submit", addMcpServer);
   el.navButtons.forEach((button) => button.addEventListener("click", () => openDrawer(button.dataset.drawer)));
   el.drawerCloses.forEach((button) => button.addEventListener("click", closeDrawers));
-  fields.forEach((id) => document.querySelector(`#${id}`).addEventListener("change", saveSettings));
+  fields.forEach((id) => document.querySelector(`#${id}`).addEventListener("change", () => {
+    saveSettings();
+    applyPresets();
+  }));
 }
 
 function captureByopReturn() {
@@ -127,14 +142,17 @@ async function loadLiveModels() {
     fetchModelNames("/embeddings/models"),
   ]);
   const [text, image, audio, embeddings] = lists.map((result) => result.status === "fulfilled" ? result.value : []);
-  fillDatalist("textModels", text);
-  fillDatalist("imageModels", image);
-  fillDatalist("audioModels", audio);
-  fillDatalist("embeddingModels", embeddings);
+  fillSelect("textModel", text, "openai");
+  fillSelect("coderModel", text, "qwen-coder");
+  fillSelect("imageModel", image, "flux");
+  fillSelect("videoModel", image, "ltx-2");
+  fillSelect("audioModel", audio, "elevenmusic");
+  fillSelect("sttModel", audio, "whisper");
+  fillSelect("embeddingModel", embeddings, "openai-3-small");
   const loaded = [text, image, audio, embeddings].filter((items) => items.length).length;
   el.modelStatus.textContent = loaded
-    ? `Loaded live model suggestions from ${loaded}/4 Pollinations model endpoints.`
-    : "Could not load live model suggestions. You can still type model names manually.";
+    ? `Loaded live model dropdowns from ${loaded}/4 Pollinations model endpoints.`
+    : "Could not load live model dropdowns. Defaults are still available.";
 }
 
 async function fetchModelNames(path) {
@@ -150,14 +168,18 @@ function modelName(row) {
   return row.id || row.name || row.model || row.alias;
 }
 
-function fillDatalist(id, names) {
-  const list = document.querySelector(`#${id}`);
-  list.innerHTML = "";
-  for (const name of names) {
+function fillSelect(id, names, fallback) {
+  const select = document.querySelector(`#${id}`);
+  const current = select.value || fallback;
+  const options = [...new Set([current, fallback, ...names].filter(Boolean))];
+  select.innerHTML = "";
+  for (const name of options) {
     const option = document.createElement("option");
     option.value = name;
-    list.append(option);
+    option.textContent = name;
+    select.append(option);
   }
+  select.value = options.includes(current) ? current : fallback;
 }
 
 function clearApiKey() {
@@ -184,6 +206,12 @@ function openDrawer(id) {
 function closeDrawers() {
   document.querySelectorAll(".drawer").forEach((drawer) => drawer.classList.remove("active"));
   el.navButtons.forEach((button) => button.classList.remove("active"));
+}
+
+function applyPresets() {
+  document.body.dataset.theme = value("themePreset") || "aurora";
+  document.body.dataset.layout = value("layoutPreset") || "focus";
+  document.body.dataset.personality = value("personalityPreset") || "operator";
 }
 
 async function checkKeyHealth() {
@@ -531,6 +559,8 @@ async function runTool(name, args, realtimeCallId) {
     else if (name === "ask_coder_model") result = await askCoder(args.task || args.prompt || "", toolId);
     else if (name === "call_mcp_server") result = await callMcp(args.server, args.tool, args.arguments || {}, toolId);
     else if (name === "show_workspace") result = showWorkspace(args, toolId);
+    else if (name === "request_source_images") result = requestSourceImages(args, toolId);
+    else if (name === "remove_workspace") result = removeWorkspace(args, toolId);
     else result = { error: `Unknown tool: ${name}` };
   } catch (error) {
     result = { error: error.message || String(error) };
@@ -547,12 +577,15 @@ async function runTool(name, args, realtimeCallId) {
   return result;
 }
 
-async function generateMedia(kind, prompt, model, toolId) {
+async function generateMedia(kind, prompt, model, toolId, options = {}) {
   const label = kind === "video" ? "video generation" : `${kind} generation`;
-  showGeneration(`Getting started on your ${label} now. When complete, it will be added to your local gallery.`);
+  const loaderKind = detectLoaderKind(kind, prompt, model);
+  showGeneration(loaderKind, `Getting started on your ${label} now. When complete, it will be added to your local gallery.`);
   updateToolEvent(toolId, "running", `Generating ${kind} with ${model}.`);
   const path = kind === "image" ? `/image/${encodeURIComponent(prompt)}` : kind === "video" ? `/video/${encodeURIComponent(prompt)}` : `/audio/${encodeURIComponent(prompt)}`;
-  const url = `${GEN_BASE}${path}?model=${encodeURIComponent(model)}&key=${encodeURIComponent(state.apiKey)}`;
+  const params = mediaParams(kind, loaderKind, model, options);
+  params.set("key", state.apiKey);
+  const url = `${GEN_BASE}${path}?${params}`;
   const res = await fetch(url, { headers: authHeaders() });
   if (!res.ok) return failResponse(res, `${kind} generation failed.`);
   const blob = await res.blob();
@@ -560,6 +593,33 @@ async function generateMedia(kind, prompt, model, toolId) {
   const item = await saveGalleryItem({ kind, prompt, model, blob });
   hideGeneration(`${capitalize(kind)} complete and saved to your local gallery.`);
   return { ok: true, galleryId: item.id, kind, prompt, model };
+}
+
+function mediaParams(kind, loaderKind, model, options = {}) {
+  const params = new URLSearchParams({ model });
+  if (kind === "image") {
+    const [width, height] = value("imageSize").split("x");
+    params.set("width", width || "1024");
+    params.set("height", height || "1024");
+    params.set("quality", "medium");
+    if (options.images?.length) params.set("image", options.images.join("|"));
+  }
+  if (kind === "video") {
+    const aspect = value("videoAspect") || "16:9";
+    const [width, height] = aspect === "9:16" ? ["720", "1280"] : ["1280", "720"];
+    params.set("width", width);
+    params.set("height", height);
+    params.set("aspectRatio", aspect);
+    params.set("duration", value("videoDuration") || "6");
+    params.set("audio", value("videoAudio") || "false");
+    if (options.images?.length) params.set("image", options.images.join("|"));
+  }
+  if (kind === "audio") {
+    params.set("response_format", "mp3");
+    if (loaderKind === "tts") params.set("voice", value("ttsVoice") || "nova");
+    else params.set("duration", value("musicDuration") || "30");
+  }
+  return params;
 }
 
 async function askCoder(task, toolId) {
@@ -596,7 +656,7 @@ function toolDefinitions() {
     { name: "call_mcp_server", description: "Call a configured HTTP MCP gateway tool.", parameters: objectParams({ server: "Configured server name", tool: "MCP tool name", arguments: "Tool arguments object" }, ["server", "tool"]) },
     {
       name: "show_workspace",
-      description: "Render adaptive UI in the workspace: note, chart, table, checklist, or metrics.",
+      description: "Render adaptive UI in the workspace: note, chart, table, checklist, or metrics. Use real structured data, not prose pretending to be a chart.",
       parameters: {
         type: "object",
         properties: {
@@ -606,6 +666,32 @@ function toolDefinitions() {
           data: { type: "array", description: "Rows, chart points, checklist items, or metrics", items: { type: "object", additionalProperties: true } },
         },
         required: ["layout", "title"],
+      },
+    },
+    {
+      name: "request_source_images",
+      description: "Ask the user for source/reference image URLs or file uploads before an image edit, style transfer, or image-to-video task.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Short title for the request" },
+          prompt: { type: "string", description: "The intended edit/generation prompt to run after sources are provided" },
+          purpose: { type: "string", enum: ["image_edit", "style_reference", "video_reference"], description: "How source images will be used" },
+          minImages: { type: "integer", description: "Minimum requested images" },
+          maxImages: { type: "integer", description: "Maximum requested images" },
+        },
+        required: ["title", "prompt", "purpose"],
+      },
+    },
+    {
+      name: "remove_workspace",
+      description: "Remove a workspace artifact by id, or clear the whole adaptive workspace.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Workspace artifact id to remove" },
+          clearAll: { type: "boolean", description: "Clear the entire workspace" },
+        },
       },
     },
   ];
@@ -624,7 +710,18 @@ function objectParams(properties, required) {
 }
 
 function systemPrompt() {
-  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Be conversational and brief by default. When visual structure helps, call show_workspace to render a chart, table, checklist, note, or metrics instead of speaking a dense answer. You can call a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."`;
+  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. When visual structure helps, call show_workspace to render a chart, table, checklist, note, or metrics instead of speaking a dense answer. For charts, provide rows with label and numeric value. For checklists, provide rows with text and done. If the user asks to edit an image, add something to an image, use a source image, or create image-to-video from a starting frame, call request_source_images instead of guessing. You can remove stale workspace items with remove_workspace. You can call a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."`;
+}
+
+function personalityInstruction() {
+  const options = {
+    operator: "calm, efficient, precise, and proactive",
+    coach: "imaginative, encouraging, visual, and idea-forward",
+    engineer: "technical, exact, implementation-focused, and skeptical of vague claims",
+    producer: "media-savvy, cinematic, tasteful, and focused on concrete creative direction",
+    concierge: "warm, polished, anticipatory, and premium-feeling",
+  };
+  return options[value("personalityPreset")] || options.operator;
 }
 
 async function postJson(path, body) {
@@ -720,18 +817,23 @@ function labelForTool(name) {
     create_audio: "Audio generation",
     ask_coder_model: "Coder model",
     call_mcp_server: "MCP tool call",
+    show_workspace: "Workspace update",
+    request_source_images: "Source image request",
+    remove_workspace: "Workspace cleanup",
   };
   return labels[name] || name;
 }
 
 function summarizeArgs(args) {
   if (!args || typeof args !== "object") return "Preparing tool call.";
-  return args.prompt || args.task || [args.server, args.tool].filter(Boolean).join(" / ") || "Preparing tool call.";
+  return args.prompt || args.title || args.task || [args.server, args.tool].filter(Boolean).join(" / ") || "Preparing tool call.";
 }
 
 function summarizeToolResult(name, result) {
   if (result?.error) return result.error;
   if (name === "show_workspace") return "Workspace updated.";
+  if (name === "request_source_images") return "Source image request added to workspace.";
+  if (name === "remove_workspace") return "Workspace cleaned up.";
   if (name === "ask_coder_model") return "Coder model returned guidance.";
   if (name === "call_mcp_server") return "MCP server returned a result.";
   if (result?.galleryId) return `${capitalize(result.kind)} saved to local gallery.`;
@@ -753,6 +855,43 @@ function showWorkspace(args, toolId) {
   renderWorkspace();
   updateToolEvent(toolId, "running", `Rendering ${artifact.layout}: ${artifact.title}`);
   return { ok: true, workspaceId: artifact.id, layout: artifact.layout };
+}
+
+function requestSourceImages(args, toolId) {
+  const artifact = {
+    id: crypto.randomUUID(),
+    layout: "image_request",
+    title: args.title || "Source images needed",
+    summary: args.purpose === "video_reference" ? "Add source frames or reference images before video generation." : "Add image URLs or upload local files before the edit runs.",
+    prompt: args.prompt || "",
+    purpose: args.purpose || "image_edit",
+    minImages: Math.max(1, Number(args.minImages) || 1),
+    maxImages: Math.max(1, Number(args.maxImages) || 4),
+    data: [],
+    createdAt: Date.now(),
+  };
+  state.workspace.unshift(artifact);
+  state.workspace = state.workspace.slice(0, 8);
+  saveWorkspace();
+  renderWorkspace();
+  updateToolEvent(toolId, "running", `Waiting for ${artifact.minImages}-${artifact.maxImages} source image(s).`);
+  return { ok: true, workspaceId: artifact.id, purpose: artifact.purpose };
+}
+
+function removeWorkspace(args) {
+  if (args.clearAll) {
+    clearWorkspace();
+    return { ok: true, cleared: true };
+  }
+  const before = state.workspace.length;
+  state.workspace = state.workspace.filter((artifact) => artifact.id !== args.id);
+  saveWorkspace();
+  renderWorkspace();
+  return { ok: state.workspace.length !== before, removed: args.id || null };
+}
+
+function saveWorkspace() {
+  localStorage.setItem("workspace", JSON.stringify(state.workspace));
 }
 
 function renderWorkspace() {
@@ -786,24 +925,44 @@ function renderArtifact(artifact) {
   }
   if (artifact.layout === "chart") card.append(renderChart(artifact.data));
   else if (artifact.layout === "table") card.append(renderTable(artifact.data));
-  else if (artifact.layout === "checklist") card.append(renderChecklist(artifact.data));
+  else if (artifact.layout === "checklist") card.append(renderChecklist(artifact.data, artifact.id));
   else if (artifact.layout === "metrics") card.append(renderMetrics(artifact.data));
+  else if (artifact.layout === "image_request") card.append(renderImageRequest(artifact));
+  const remove = document.createElement("button");
+  remove.className = "artifact-remove";
+  remove.type = "button";
+  remove.textContent = "Remove";
+  remove.addEventListener("click", () => removeWorkspace({ id: artifact.id }));
+  card.append(remove);
   return card;
 }
 
 function renderChart(data) {
   const wrap = document.createElement("div");
-  wrap.className = "chart-bars";
-  const max = Math.max(...data.map((row) => Number(row.value) || 0), 1);
-  for (const row of data) {
-    const value = Number(row.value) || 0;
+  wrap.className = "chart-wrap";
+  const rows = data.map((row) => ({ label: row.label || row.name || "Item", value: Number(row.value) || 0 })).slice(0, 8);
+  const max = Math.max(...rows.map((row) => row.value), 1);
+  const points = rows.map((row, index) => {
+    const x = rows.length === 1 ? 50 : (index / (rows.length - 1)) * 100;
+    const y = 90 - (row.value / max) * 72;
+    return `${x},${y}`;
+  }).join(" ");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 100 100");
+  svg.setAttribute("class", "workspace-svg-chart");
+  svg.innerHTML = `<polyline points="${points}"/><path d="M0 92H100"/>`;
+  wrap.append(svg);
+  const bars = document.createElement("div");
+  bars.className = "chart-bars";
+  for (const row of rows) {
     const item = document.createElement("div");
     item.className = "chart-row";
-    item.innerHTML = `<span class="chart-label"></span><span class="chart-track"><span class="chart-fill" style="width:${Math.min(100, (value / max) * 100)}%"></span></span><span class="chart-value"></span>`;
-    item.querySelector(".chart-label").textContent = row.label || row.name || "Item";
+    item.innerHTML = `<span class="chart-label"></span><span class="chart-track"><span class="chart-fill" style="width:${Math.min(100, (row.value / max) * 100)}%"></span></span><span class="chart-value"></span>`;
+    item.querySelector(".chart-label").textContent = row.label;
     item.querySelector(".chart-value").textContent = String(row.value ?? "");
-    wrap.append(item);
+    bars.append(item);
   }
+  wrap.append(bars);
   return wrap;
 }
 
@@ -833,24 +992,104 @@ function renderTable(data) {
   return table;
 }
 
-function renderChecklist(data) {
+function renderChecklist(data, artifactId) {
   const list = document.createElement("ul");
   list.className = "checklist";
-  data.forEach((row) => {
+  data.forEach((row, index) => {
     const li = document.createElement("li");
+    li.className = row.done === false ? "" : "complete";
     const check = document.createElement("span");
     check.className = "check";
     check.textContent = row.done === false ? "" : "done";
     const text = document.createElement("span");
     text.textContent = row.text || row.label || row.task || "Item";
     li.append(check, text);
+    li.addEventListener("click", () => toggleChecklistItem(artifactId, index));
     list.append(li);
   });
   return list;
 }
 
+function toggleChecklistItem(artifactId, index) {
+  const artifact = state.workspace.find((item) => item.id === artifactId);
+  if (!artifact?.data?.[index]) return;
+  artifact.data[index].done = artifact.data[index].done === false;
+  saveWorkspace();
+  renderWorkspace();
+}
+
 function renderMetrics(data) {
   return renderTable(data.map((row) => ({ metric: row.label || row.name || "Metric", value: row.value ?? "", note: row.note || "" })));
+}
+
+function renderImageRequest(artifact) {
+  const form = document.createElement("form");
+  form.className = "source-form";
+  form.innerHTML = `
+    <label>Source image URLs
+      <textarea name="urls" placeholder="One URL per line, or separate with commas"></textarea>
+    </label>
+    <label>Upload source images
+      <input name="files" type="file" accept="image/*" multiple>
+    </label>
+    <label>Edit prompt
+      <textarea name="prompt"></textarea>
+    </label>
+    <button class="button primary" type="submit">Run with sources</button>
+  `;
+  form.querySelector('[name="prompt"]').value = artifact.prompt || "";
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!requireKey()) return;
+    const button = form.querySelector("button");
+    button.disabled = true;
+    button.textContent = "Preparing sources...";
+    try {
+      const urls = parseSourceUrls(form.elements.urls.value);
+      const uploads = await uploadSourceFiles([...form.elements.files.files]);
+      const images = [...urls, ...uploads].slice(0, artifact.maxImages || 4);
+      if (images.length < (artifact.minImages || 1)) throw new Error(`Add at least ${artifact.minImages || 1} source image.`);
+      artifact.data = images.map((url) => ({ url }));
+      artifact.prompt = form.elements.prompt.value.trim() || artifact.prompt;
+      saveWorkspace();
+      await generateMedia(artifact.purpose === "video_reference" ? "video" : "image", artifact.prompt, artifact.purpose === "video_reference" ? value("videoModel") : value("imageModel"), null, { images });
+    } catch (error) {
+      addMessage("system", error.message || String(error));
+    } finally {
+      button.disabled = false;
+      button.textContent = "Run with sources";
+      renderWorkspace();
+    }
+  });
+  if (artifact.data?.length) {
+    const preview = document.createElement("div");
+    preview.className = "source-preview";
+    artifact.data.forEach((item) => {
+      const img = document.createElement("img");
+      img.src = item.url;
+      img.alt = "Source image";
+      preview.append(img);
+    });
+    form.prepend(preview);
+  }
+  return form;
+}
+
+function parseSourceUrls(text) {
+  return text.split(/[\n,]/).map((url) => url.trim()).filter(Boolean);
+}
+
+async function uploadSourceFiles(files) {
+  const urls = [];
+  for (const file of files) {
+    const form = new FormData();
+    form.append("file", file);
+    const res = await fetch(`${MEDIA_BASE}/upload`, { method: "POST", headers: authHeaders(), body: form });
+    if (!res.ok) throw new Error(`Upload failed for ${file.name}`);
+    const json = await res.json();
+    urls.push(json.url || `${MEDIA_BASE}/${json.id}`);
+  }
+  return urls;
 }
 
 function clearWorkspace() {
@@ -865,9 +1104,22 @@ function clearConversation() {
   renderMessages();
 }
 
-function showGeneration(text) {
+function detectLoaderKind(kind, prompt, model) {
+  const lower = `${prompt || ""} ${model || ""}`.toLowerCase();
+  if (kind === "video") return "video";
+  if (kind === "image") return "image";
+  if (kind === "audio" && /tts|voice|speech|say|narrat|read/.test(lower)) return "tts";
+  if (kind === "audio") return "music";
+  return kind;
+}
+
+function showGeneration(kind, text) {
   el.mediaDock.classList.remove("hidden");
+  document.querySelector(".stage")?.classList.add("generating");
   el.orb.classList.add("docked");
+  el.generationCard.className = `generating-card ${kind}-loader`;
+  el.generationVisual.className = `generation-visual ${kind}-visual`;
+  el.generationVisual.innerHTML = generationVisualMarkup(kind);
   el.generationStatus.textContent = text;
   addMessage("agent", text);
 }
@@ -876,8 +1128,23 @@ function hideGeneration(text) {
   el.generationStatus.textContent = text;
   setTimeout(() => {
     el.mediaDock.classList.add("hidden");
+    document.querySelector(".stage")?.classList.remove("generating");
     el.orb.classList.remove("docked");
+    el.generationVisual.innerHTML = "";
   }, 1400);
+}
+
+function generationVisualMarkup(kind) {
+  if (kind === "music") {
+    return `<svg viewBox="0 0 220 160" role="img" aria-label="Music generation loading"><path class="note note-a" d="M92 32v76a22 22 0 1 1-10-18V48l74-16v64a22 22 0 1 1-10-18V48L92 60z"/><path class="wave wave-a" d="M28 104c24-18 48-18 72 0s48 18 72 0"/><path class="wave wave-b" d="M38 124c18-12 36-12 54 0s36 12 54 0"/></svg>`;
+  }
+  if (kind === "tts") {
+    return `<div class="tts-loader"><div class="typing-line"><span>composing voice</span><i></i></div><div class="word-cloud"><span>clarity</span><span>tone</span><span>tempo</span><span>presence</span></div><div class="morph-loader"></div></div>`;
+  }
+  if (kind === "video") {
+    return `<div class="video-frame"><span></span><span></span><span></span><div class="play-glyph"></div></div>`;
+  }
+  return `<div class="diffusion-grid"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>`;
 }
 
 function setOrb(mode) {
@@ -964,14 +1231,25 @@ async function renderGallery() {
     media.src = url;
     if (item.kind !== "image") media.controls = true;
     const caption = document.createElement("p");
-    caption.textContent = `${item.kind} / ${item.model}: ${item.prompt}`;
+    caption.textContent = `${item.kind} / ${item.model}`;
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = shortPrompt(item.prompt);
+    const full = document.createElement("p");
+    full.textContent = item.prompt;
+    details.append(summary, full);
     const link = document.createElement("a");
     link.href = url;
     link.download = `${item.kind}-${item.id}.${extensionFor(item.kind, item.blob.type)}`;
     link.textContent = "Download";
-    card.append(media, caption, link);
+    card.append(media, caption, details, link);
     el.gallery.append(card);
   }
+}
+
+function shortPrompt(prompt) {
+  if (!prompt) return "Prompt";
+  return prompt.length > 72 ? `${prompt.slice(0, 69)}...` : prompt;
 }
 
 async function clearGallery() {

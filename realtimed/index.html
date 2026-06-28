@@ -41,8 +41,8 @@
       </div>
 
       <div id="mediaDock" class="media-dock hidden">
-        <div class="generating-card">
-          <div class="shader"></div>
+        <div id="generationCard" class="generating-card image-loader">
+          <div id="generationVisual" class="generation-visual image-visual" aria-hidden="true"></div>
           <p id="generationStatus">Preparing generation...</p>
         </div>
       </div>
@@ -78,40 +78,79 @@
         <button class="button ghost small drawer-close" type="button">Close</button>
       </div>
         <p id="modelStatus" class="model-status">Loading live model lists...</p>
+        <label>Theme
+          <select id="themePreset">
+            <option value="aurora">Aurora</option>
+            <option value="paper">Paper</option>
+            <option value="obsidian">Obsidian</option>
+            <option value="studio">Studio</option>
+          </select>
+        </label>
+        <label>Layout
+          <select id="layoutPreset">
+            <option value="focus">Focus</option>
+            <option value="canvas">Canvas first</option>
+            <option value="compact">Compact</option>
+          </select>
+        </label>
+        <label>Personality
+          <select id="personalityPreset">
+            <option value="operator">Operator</option>
+            <option value="coach">Creative coach</option>
+            <option value="engineer">Engineer</option>
+            <option value="producer">Media producer</option>
+            <option value="concierge">Concierge</option>
+          </select>
+        </label>
         <label>Realtime model
           <input id="realtimeModel" value="gpt-realtime-2" disabled>
         </label>
         <label>Realtime voice
-          <input id="realtimeVoice" value="alloy">
+          <select id="realtimeVoice">
+            <option>alloy</option><option>echo</option><option>fable</option><option>onyx</option><option>nova</option><option>shimmer</option>
+          </select>
         </label>
         <label>Push2Talk text model
-          <input id="textModel" value="openai" list="textModels">
+          <select id="textModel"><option>openai</option></select>
         </label>
         <label>Coder model callable by agent
-          <input id="coderModel" value="qwen-coder" list="textModels">
+          <select id="coderModel"><option>qwen-coder</option></select>
         </label>
         <label>Speech-to-text model
-          <input id="sttModel" value="whisper" list="audioModels">
+          <select id="sttModel"><option>whisper</option></select>
         </label>
         <label>Optional TTS voice
-          <input id="ttsVoice" value="nova">
+          <select id="ttsVoice">
+            <option value="">Off</option><option selected>nova</option><option>alloy</option><option>echo</option><option>fable</option><option>onyx</option><option>shimmer</option><option>sage</option><option>verse</option>
+          </select>
         </label>
         <label>Embedding model
-          <input id="embeddingModel" value="openai-3-small" list="embeddingModels">
+          <select id="embeddingModel"><option>openai-3-small</option></select>
         </label>
         <label>Image model
-          <input id="imageModel" value="flux" list="imageModels">
+          <select id="imageModel"><option>flux</option></select>
         </label>
         <label>Video model
-          <input id="videoModel" value="veo" list="imageModels">
+          <select id="videoModel"><option>ltx-2</option></select>
         </label>
         <label>Music/audio model
-          <input id="audioModel" value="elevenmusic" list="audioModels">
+          <select id="audioModel"><option>elevenmusic</option></select>
         </label>
-        <datalist id="textModels"></datalist>
-        <datalist id="imageModels"></datalist>
-        <datalist id="audioModels"></datalist>
-        <datalist id="embeddingModels"></datalist>
+        <label>Image size
+          <select id="imageSize"><option>1024x1024</option><option>768x1024</option><option>1024x768</option><option>1536x1024</option></select>
+        </label>
+        <label>Video shape
+          <select id="videoAspect"><option value="16:9">16:9</option><option value="9:16">9:16</option></select>
+        </label>
+        <label>Video duration
+          <select id="videoDuration"><option>4</option><option selected>6</option><option>8</option><option>10</option><option>15</option></select>
+        </label>
+        <label>Video audio
+          <select id="videoAudio"><option value="false">Off</option><option value="true">On</option></select>
+        </label>
+        <label>Music duration
+          <select id="musicDuration"><option>15</option><option selected>30</option><option>60</option><option>120</option></select>
+        </label>
     </section>
 
     <section id="conversationDrawer" class="drawer panel transcript-panel" aria-label="Conversation">
