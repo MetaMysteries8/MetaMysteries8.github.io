@@ -119,7 +119,10 @@
         <label>Speech-to-text model
           <select id="sttModel"><option>whisper</option></select>
         </label>
-        <label>Optional TTS voice
+        <label>Push2Talk TTS model
+          <select id="ttsModel"><option>openai-audio</option></select>
+        </label>
+        <label>Push2Talk TTS voice
           <select id="ttsVoice">
             <option value="">Off</option><option selected>nova</option><option>alloy</option><option>echo</option><option>fable</option><option>onyx</option><option>shimmer</option><option>sage</option><option>verse</option>
           </select>
@@ -133,11 +136,14 @@
         <label>Video model
           <select id="videoModel"><option>ltx-2</option></select>
         </label>
-        <label>Music/audio model
+        <label>Music/audio generation model
           <select id="audioModel"><option>elevenmusic</option></select>
         </label>
         <label>Image size
           <select id="imageSize"><option>1024x1024</option><option>768x1024</option><option>1024x768</option><option>1536x1024</option></select>
+        </label>
+        <label>Image batch count
+          <select id="imageCount"><option>1</option><option>2</option><option>3</option><option>4</option></select>
         </label>
         <label>Video shape
           <select id="videoAspect"><option value="16:9">16:9</option><option value="9:16">9:16</option></select>
@@ -145,11 +151,17 @@
         <label>Video duration
           <select id="videoDuration"><option>4</option><option selected>6</option><option>8</option><option>10</option><option>15</option></select>
         </label>
+        <label>Video batch count
+          <select id="videoCount"><option>1</option><option>2</option></select>
+        </label>
         <label>Video audio
           <select id="videoAudio"><option value="false">Off</option><option value="true">On</option></select>
         </label>
         <label>Music duration
           <select id="musicDuration"><option>15</option><option selected>30</option><option>60</option><option>120</option></select>
+        </label>
+        <label>Audio batch count
+          <select id="audioCount"><option>1</option><option>2</option><option>3</option></select>
         </label>
     </section>
 

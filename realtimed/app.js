@@ -12,9 +12,13 @@ const state = {
   balanceTimer: null,
   mediaRecorder: null,
   chunks: [],
+  generationActive: 0,
+  generationQueue: [],
+  modelMeta: { text: [], image: [], audio: [], embeddings: [] },
   stoppingRealtime: false,
   messages: JSON.parse(localStorage.getItem("conversation") || "[]"),
   workspace: JSON.parse(localStorage.getItem("workspace") || "[]"),
+  settings: JSON.parse(localStorage.getItem("settings") || "{}"),
   mcps: JSON.parse(localStorage.getItem("mcp_servers") || "[]"),
 };
 
@@ -61,16 +65,20 @@ const fields = [
   "realtimeVoice",
   "coderModel",
   "sttModel",
+  "ttsModel",
   "ttsVoice",
   "embeddingModel",
   "imageModel",
   "videoModel",
   "audioModel",
   "imageSize",
+  "imageCount",
   "videoAspect",
   "videoDuration",
+  "videoCount",
   "videoAudio",
   "musicDuration",
+  "audioCount",
 ];
 
 function init() {
@@ -136,31 +144,32 @@ function connectByop() {
 
 async function loadLiveModels() {
   const lists = await Promise.allSettled([
-    fetchModelNames("/text/models"),
-    fetchModelNames("/image/models"),
-    fetchModelNames("/audio/models"),
-    fetchModelNames("/embeddings/models"),
+    fetchModels("/text/models"),
+    fetchModels("/image/models"),
+    fetchModels("/audio/models"),
+    fetchModels("/embeddings/models"),
   ]);
   const [text, image, audio, embeddings] = lists.map((result) => result.status === "fulfilled" ? result.value : []);
-  fillSelect("textModel", text, "openai");
-  fillSelect("coderModel", text, "qwen-coder");
-  fillSelect("imageModel", image, "flux");
-  fillSelect("videoModel", image, "ltx-2");
-  fillSelect("audioModel", audio, "elevenmusic");
-  fillSelect("sttModel", audio, "whisper");
-  fillSelect("embeddingModel", embeddings, "openai-3-small");
+  state.modelMeta = { text, image, audio, embeddings };
+  fillSelect("textModel", text.map(modelName), "openai");
+  fillSelect("coderModel", text.map(modelName), "qwen-coder");
+  fillSelect("imageModel", imageModelsOnly().map(modelName), "flux");
+  fillSelect("videoModel", videoModelsOnly().map(modelName), "ltx-2");
+  fillSelect("audioModel", audio.map(modelName), "elevenmusic");
+  fillSelect("ttsModel", audio.map(modelName), "openai-audio");
+  fillSelect("sttModel", audio.map(modelName), "whisper");
+  fillSelect("embeddingModel", embeddings.map(modelName), "openai-3-small");
   const loaded = [text, image, audio, embeddings].filter((items) => items.length).length;
   el.modelStatus.textContent = loaded
     ? `Loaded live model dropdowns from ${loaded}/4 Pollinations model endpoints.`
     : "Could not load live model dropdowns. Defaults are still available.";
 }
 
-async function fetchModelNames(path) {
+async function fetchModels(path) {
   const res = await fetch(`${GEN_BASE}${path}`);
   if (!res.ok) throw new Error(`${path} returned ${res.status}`);
   const json = await res.json();
-  const rows = Array.isArray(json) ? json : Array.isArray(json.data) ? json.data : Array.isArray(json.models) ? json.models : [];
-  return [...new Set(rows.map(modelName).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  return Array.isArray(json) ? json : Array.isArray(json.data) ? json.data : Array.isArray(json.models) ? json.models : [];
 }
 
 function modelName(row) {
@@ -168,9 +177,33 @@ function modelName(row) {
   return row.id || row.name || row.model || row.alias;
 }
 
+function modelText(row) {
+  return JSON.stringify(row || {}).toLowerCase();
+}
+
+function imageModelsOnly() {
+  return state.modelMeta.image.filter((model) => !isVideoModel(model));
+}
+
+function videoModelsOnly() {
+  return state.modelMeta.image.filter(isVideoModel);
+}
+
+function isVideoModel(model) {
+  const name = modelName(model) || "";
+  const text = modelText(model);
+  return /video|veo|wan|seedance|ltx|reel|p-video/.test(`${name} ${text}`);
+}
+
+function supportsImageInput(modelNameValue) {
+  const model = state.modelMeta.image.find((entry) => modelName(entry) === modelNameValue);
+  const text = modelText(model);
+  return /image|edit|reference|i2v|start|first|last|kontext|gptimage|seedream|klein|nanobanana/.test(`${modelNameValue} ${text}`);
+}
+
 function fillSelect(id, names, fallback) {
   const select = document.querySelector(`#${id}`);
-  const current = select.value || fallback;
+  const current = state.settings[id] || select.value || fallback;
   const options = [...new Set([current, fallback, ...names].filter(Boolean))];
   select.innerHTML = "";
   for (const name of options) {
@@ -327,7 +360,7 @@ async function startRealtime() {
   mutedMonitor.gain.value = 0;
   const socket = new WebSocket(`${GEN_BASE.replace("https", "wss")}/v1/realtime?model=${REALTIME_MODEL}&key=${encodeURIComponent(state.apiKey)}`);
 
-  state.realtime = { socket, stream, audioContext, processor, output, mutedMonitor, nextStart: audioContext.currentTime, gotSession: false, gotAudio: false };
+  state.realtime = { socket, stream, audioContext, processor, output, mutedMonitor, nextStart: audioContext.currentTime, gotSession: false, gotAudio: false, retriedWithoutVoice: false };
   setOrb("listening");
   el.mainAction.textContent = "Stop realtime";
   setRealtimeStatus("Opening realtime socket...", "live");
@@ -383,7 +416,19 @@ function handleRealtimeEvent(event) {
   if (event.type === "input_audio_buffer.speech_started") setRealtimeStatus("Listening...", "live");
   if (event.type === "input_audio_buffer.speech_stopped") setRealtimeStatus("Thinking...", "live");
   if (event.type === "response.function_call_arguments.done") runTool(event.name, JSON.parse(event.arguments || "{}"), event.call_id);
-  if (event.type === "error") setRealtimeStatus(event.error?.message || "Realtime returned an error.", "warning");
+  if (event.type === "error") {
+    const message = event.error?.message || "Realtime returned an error.";
+    if (/session\.voice|unknown parameter.*voice/i.test(message) && state.realtime && !state.realtime.retriedWithoutVoice) {
+      state.realtime.retriedWithoutVoice = true;
+      state.realtime.socket.send(JSON.stringify({
+        type: "session.update",
+        session: { type: "realtime", instructions: systemPrompt(), tools: realtimeToolDefinitions() },
+      }));
+      setRealtimeStatus("Voice setting unsupported here; continuing with default realtime voice.", "warning");
+      return;
+    }
+    setRealtimeStatus(message, "warning");
+  }
   if (event.type === "response.done") {
     setOrb("listening");
     setRealtimeStatus("Realtime ready. Speak naturally.", "ready");
@@ -540,7 +585,7 @@ async function speakText(text) {
   const res = await fetch(`${GEN_BASE}/v1/audio/speech`, {
     method: "POST",
     headers: { ...authHeaders(), "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "openai-audio", voice: value("ttsVoice"), input: text }),
+    body: JSON.stringify({ model: value("ttsModel") || "openai-audio", voice: value("ttsVoice") || "nova", input: text }),
   });
   if (!res.ok) return;
   const blob = await res.blob();
@@ -553,9 +598,13 @@ async function runTool(name, args, realtimeCallId) {
   const toolId = addToolEvent(name, args);
   let result;
   try {
-    if (name === "create_image") result = await generateMedia("image", args.prompt, value("imageModel"), toolId);
-    else if (name === "create_video") result = await generateMedia("video", args.prompt, value("videoModel"), toolId);
-    else if (name === "create_audio") result = await generateMedia("audio", args.prompt, value("audioModel"), toolId);
+    if (name === "create_image") result = await generateMedia("image", args.prompt, value("imageModel"), toolId, args);
+    else if (name === "create_video") result = await generateMedia("video", args.prompt, value("videoModel"), toolId, args);
+    else if (name === "create_audio") {
+      const audioKind = detectLoaderKind("audio", args.prompt, "");
+      const model = audioKind === "tts" ? value("ttsModel") : value("audioModel");
+      result = await generateMedia("audio", args.prompt, model, toolId, args);
+    }
     else if (name === "ask_coder_model") result = await askCoder(args.task || args.prompt || "", toolId);
     else if (name === "call_mcp_server") result = await callMcp(args.server, args.tool, args.arguments || {}, toolId);
     else if (name === "show_workspace") result = showWorkspace(args, toolId);
@@ -580,6 +629,56 @@ async function runTool(name, args, realtimeCallId) {
 }
 
 async function generateMedia(kind, prompt, model, toolId, options = {}) {
+  const count = generationCount(kind, options);
+  const jobs = [];
+  for (let index = 0; index < count; index += 1) {
+    const position = state.generationQueue.length + Math.max(0, state.generationActive - 1);
+    if (state.generationActive >= 2) updateToolEvent(toolId, "queued", `Queued behind ${position} generation${position === 1 ? "" : "s"}.`);
+    jobs.push(enqueueGeneration(() => runMediaGeneration(kind, prompt, model, toolId, { ...options, batchIndex: index, batchCount: count })));
+  }
+  const results = await Promise.all(jobs);
+  if (count === 1) return results[0];
+  return { ok: results.every((item) => !item?.error), count, results, galleryIds: results.map((item) => item.galleryId).filter(Boolean) };
+}
+
+function generationCount(kind, options) {
+  const requested = Number(options.count || options.variations);
+  const fallback = Number(value(kind === "image" ? "imageCount" : kind === "video" ? "videoCount" : "audioCount")) || 1;
+  const max = kind === "image" ? 4 : kind === "video" ? 2 : 3;
+  return Math.max(1, Math.min(max, requested || fallback));
+}
+
+function enqueueGeneration(task) {
+  return new Promise((resolve) => {
+    state.generationQueue.push({ task, resolve });
+    pumpGenerationQueue();
+  });
+}
+
+function pumpGenerationQueue() {
+  while (state.generationActive < 2 && state.generationQueue.length) {
+    const job = state.generationQueue.shift();
+    state.generationActive += 1;
+    Promise.resolve()
+      .then(job.task)
+      .then(job.resolve)
+      .catch((error) => job.resolve({ error: error.message || String(error) }))
+      .finally(() => {
+        state.generationActive -= 1;
+        pumpGenerationQueue();
+      });
+  }
+}
+
+async function runMediaGeneration(kind, prompt, model, toolId, options = {}) {
+  if (kind === "audio" && detectLoaderKind(kind, prompt, model) === "tts") prompt = cleanTtsPrompt(prompt);
+  if ((kind === "image" || kind === "video") && options.images?.length && !supportsImageInput(model)) {
+    const replacement = sourceCapableModel(kind);
+    if (replacement) {
+      updateToolEvent(toolId, "running", `${model} does not advertise source-image support; using ${replacement}.`);
+      model = replacement;
+    }
+  }
   const label = kind === "video" ? "video generation" : `${kind} generation`;
   const loaderKind = detectLoaderKind(kind, prompt, model);
   showGeneration(loaderKind, `Getting started on your ${label} now. When complete, it will be added to your local gallery.`);
@@ -607,33 +706,59 @@ function mediaParams(kind, loaderKind, model, options = {}) {
     if (options.images?.length) params.set("image", options.images.join("|"));
   }
   if (kind === "video") {
-    const aspect = value("videoAspect") || "16:9";
+    const aspect = options.aspectRatio || value("videoAspect") || "16:9";
     const [width, height] = aspect === "9:16" ? ["720", "1280"] : ["1280", "720"];
     params.set("width", width);
     params.set("height", height);
     params.set("aspectRatio", aspect);
-    params.set("duration", value("videoDuration") || "6");
-    params.set("audio", value("videoAudio") || "false");
+    params.set("duration", String(options.duration || value("videoDuration") || "6"));
+    params.set("audio", String(options.withAudio ?? value("videoAudio") ?? "false"));
     if (options.images?.length) params.set("image", options.images.join("|"));
   }
   if (kind === "audio") {
     params.set("response_format", "mp3");
     if (loaderKind === "tts") params.set("voice", value("ttsVoice") || "nova");
-    else params.set("duration", value("musicDuration") || "30");
+    else params.set("duration", String(options.duration || value("musicDuration") || "30"));
   }
   return params;
 }
 
+function sourceCapableModel(kind) {
+  const list = kind === "video" ? videoModelsOnly() : imageModelsOnly();
+  return modelName(list.find((model) => supportsImageInput(modelName(model)))) || "";
+}
+
+function cleanTtsPrompt(prompt) {
+  return String(prompt || "")
+    .replace(/^\s*(a\s+)?(clear|friendly|warm|professional|calm)?\s*voice\s+says\s*[:\-]\s*/i, "")
+    .replace(/^\s*(say|speak|read|narrate)\s*[:\-]?\s*/i, "")
+    .replace(/^\s*["']|["']\s*$/g, "")
+    .trim();
+}
+
 async function askCoder(task, toolId) {
   updateToolEvent(toolId, "running", `Asking ${value("coderModel")} to work on the coding task.`);
+  showCoderTerminal([`$ coder-model --model ${value("coderModel")}`, "Booting coding worker...", `Task: ${task.slice(0, 180)}`]);
   const result = await postJson("/v1/chat/completions", {
     model: value("coderModel"),
     messages: [
-      { role: "system", content: "You are a focused coding model. Return concise, actionable implementation help." },
+      { role: "system", content: "You are a focused coding model. If asked to build a runnable web project, return one complete HTML document in a fenced html code block. Keep explanations brief after the code." },
       { role: "user", content: task },
     ],
   });
-  return { answer: result?.choices?.[0]?.message?.content || "" };
+  const answer = result?.choices?.[0]?.message?.content || "";
+  if (!answer) {
+    showCoderTerminal(["No response returned from coder model."], true);
+    return { error: "Coder model returned no content." };
+  }
+  const html = extractHtmlProject(answer);
+  if (html) {
+    const item = await saveGalleryItem({ kind: "project", prompt: task, model: value("coderModel"), blob: new Blob([html], { type: "text/html" }) });
+    showCoderTerminal(["HTML project detected.", `Saved runnable project to gallery: ${item.id}`, "Open Gallery -> project preview to test it."], true);
+    return { answer: summarizeCoderAnswer(answer), projectGalleryId: item.id };
+  }
+  showCoderTerminal(["Coder response received.", "No complete HTML document detected."], true);
+  return { answer };
 }
 
 async function callMcp(serverName, tool, args, toolId) {
@@ -651,9 +776,46 @@ async function callMcp(serverName, tool, args, toolId) {
 
 function toolDefinitions() {
   return [
-    { name: "create_image", description: "Generate an image and save it to the local gallery.", parameters: objectParams({ prompt: "Detailed image prompt" }, ["prompt"]) },
-    { name: "create_video", description: "Generate a video and save it to the local gallery.", parameters: objectParams({ prompt: "Detailed video prompt" }, ["prompt"]) },
-    { name: "create_audio", description: "Generate music, sound, or TTS audio and save it to the local gallery.", parameters: objectParams({ prompt: "Audio, music, or voice prompt" }, ["prompt"]) },
+    {
+      name: "create_image",
+      description: "Generate one or more image variations and save them to the local gallery. Use count for multi-image generation.",
+      parameters: {
+        type: "object",
+        properties: {
+          prompt: { type: "string", description: "Detailed image prompt" },
+          count: { type: "integer", minimum: 1, maximum: 4, description: "Number of variations/images" },
+        },
+        required: ["prompt"],
+      },
+    },
+    {
+      name: "create_video",
+      description: "Generate one or two videos and save them to the local gallery. Use duration and aspectRatio when the user specifies length or format.",
+      parameters: {
+        type: "object",
+        properties: {
+          prompt: { type: "string", description: "Detailed video prompt" },
+          count: { type: "integer", minimum: 1, maximum: 2, description: "Number of videos" },
+          duration: { type: "integer", minimum: 1, maximum: 120, description: "Duration in seconds, model-dependent" },
+          aspectRatio: { type: "string", enum: ["16:9", "9:16"], description: "Video aspect ratio" },
+          withAudio: { type: "boolean", description: "Whether to request video audio when the model supports it" },
+        },
+        required: ["prompt"],
+      },
+    },
+    {
+      name: "create_audio",
+      description: "Generate music/sound or clean TTS. For TTS, prompt must be only the words to speak, not 'a clear voice says...'. Use duration for music/sound length.",
+      parameters: {
+        type: "object",
+        properties: {
+          prompt: { type: "string", description: "For TTS: exact text to speak. For music/sound: music or sound prompt." },
+          count: { type: "integer", minimum: 1, maximum: 3, description: "Number of audio variations" },
+          duration: { type: "integer", minimum: 1, maximum: 300, description: "Music/sound duration in seconds" },
+        },
+        required: ["prompt"],
+      },
+    },
     { name: "ask_coder_model", description: "Delegate coding tasks to the configured coder text model.", parameters: objectParams({ task: "Coding task or question" }, ["task"]) },
     { name: "call_mcp_server", description: "Call a configured HTTP MCP gateway tool.", parameters: objectParams({ server: "Configured server name", tool: "MCP tool name", arguments: "Tool arguments object" }, ["server", "tool"]) },
     {
@@ -745,15 +907,48 @@ function personalityInstruction() {
 }
 
 async function postJson(path, body) {
-  const res = await fetch(`${GEN_BASE}${path}`, {
-    method: "POST",
-    headers: { ...authHeaders(), "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  let res;
+  try {
+    res = await fetch(`${GEN_BASE}${path}`, {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    const message = `Network error calling ${path}: ${error.message || error}`;
+    addMessage("system", message);
+    return { error: message };
+  }
   if (!res.ok) return failResponse(res, "Request failed.");
   const json = await res.json();
   refreshBalance();
   return json;
+}
+
+function extractHtmlProject(text) {
+  const fenced = text.match(/```html\s*([\s\S]*?)```/i) || text.match(/```\s*([\s\S]*?<html[\s\S]*?)```/i);
+  const candidate = fenced ? fenced[1] : text;
+  const start = candidate.search(/<!doctype html|<html[\s>]/i);
+  if (start < 0) return "";
+  return candidate.slice(start).trim();
+}
+
+function summarizeCoderAnswer(answer) {
+  return answer.replace(/```[\s\S]*?```/g, "[code saved to gallery]").trim().slice(0, 1200);
+}
+
+function showCoderTerminal(lines, done = false) {
+  el.mediaDock.classList.remove("hidden");
+  document.querySelector(".stage")?.classList.add("generating");
+  el.orb.classList.add("docked");
+  el.generationCard.className = "generating-card terminal-loader";
+  el.generationVisual.className = "generation-visual terminal-visual";
+  el.generationVisual.innerHTML = `<div class="terminal-output">${lines.map((line) => `<p>${escapeHtml(line)}</p>`).join("")}${done ? "" : "<span class=\"terminal-cursor\"></span>"}</div>`;
+  el.generationStatus.textContent = done ? "Coder job complete." : "Coder model working...";
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
 }
 
 function authHeaders() {
@@ -966,7 +1161,7 @@ function renderArtifact(artifact) {
 function renderChart(data) {
   const wrap = document.createElement("div");
   wrap.className = "chart-wrap";
-  const rows = data.map((row) => ({ label: row.label || row.name || "Item", value: Number(row.value) || 0 })).slice(0, 8);
+  const rows = normalizeRows(data).map((row) => ({ label: row.label || row.name || row.metric || "Item", value: Number(row.value ?? row.count ?? row.amount) || 0 })).slice(0, 8);
   const max = Math.max(...rows.map((row) => row.value), 1);
   const points = rows.map((row, index) => {
     const x = rows.length === 1 ? 50 : (index / (rows.length - 1)) * 100;
@@ -993,6 +1188,7 @@ function renderChart(data) {
 }
 
 function renderTable(data) {
+  data = normalizeRows(data);
   const table = document.createElement("table");
   table.className = "workspace-table";
   const keys = [...new Set(data.flatMap((row) => Object.keys(row || {})))].slice(0, 5);
@@ -1019,6 +1215,7 @@ function renderTable(data) {
 }
 
 function renderChecklist(data, artifactId) {
+  data = normalizeRows(data);
   const list = document.createElement("ul");
   list.className = "checklist";
   data.forEach((row, index) => {
@@ -1034,6 +1231,13 @@ function renderChecklist(data, artifactId) {
     list.append(li);
   });
   return list;
+}
+
+function normalizeRows(data) {
+  if (Array.isArray(data)) return data.map((item) => typeof item === "string" ? { text: item, label: item } : item || {});
+  if (typeof data === "string") return data.split(/\n|,/).map((text) => text.trim()).filter(Boolean).map((text) => ({ text, label: text, value: Number(text.match(/\d+(\.\d+)?/)?.[0]) || 1 }));
+  if (data && typeof data === "object") return Object.entries(data).map(([label, value]) => ({ label, value }));
+  return [];
 }
 
 function toggleChecklistItem(artifactId, index) {
@@ -1242,14 +1446,14 @@ function setOrb(mode) {
 }
 
 function loadSettings() {
-  const settings = JSON.parse(localStorage.getItem("settings") || "{}");
   fields.forEach((id) => {
-    if (settings[id]) document.querySelector(`#${id}`).value = settings[id];
+    if (state.settings[id]) document.querySelector(`#${id}`).value = state.settings[id];
   });
 }
 
 function saveSettings() {
-  localStorage.setItem("settings", JSON.stringify(Object.fromEntries(fields.map((id) => [id, value(id)]))));
+  state.settings = Object.fromEntries(fields.map((id) => [id, value(id)]));
+  localStorage.setItem("settings", JSON.stringify(state.settings));
 }
 
 function value(id) {
@@ -1322,9 +1526,10 @@ async function renderGallery() {
     const url = URL.createObjectURL(item.blob);
     const card = document.createElement("article");
     card.className = "gallery-item";
-    const media = item.kind === "image" ? document.createElement("img") : item.kind === "video" ? document.createElement("video") : document.createElement("audio");
+    const media = item.kind === "image" ? document.createElement("img") : item.kind === "video" ? document.createElement("video") : item.kind === "project" ? document.createElement("iframe") : document.createElement("audio");
     media.src = url;
-    if (item.kind !== "image") media.controls = true;
+    if (item.kind === "project") media.sandbox = "allow-scripts allow-forms allow-modals allow-pointer-lock";
+    else if (item.kind !== "image") media.controls = true;
     const caption = document.createElement("p");
     caption.textContent = `${item.kind} / ${item.model}`;
     const details = document.createElement("details");
@@ -1340,7 +1545,7 @@ async function renderGallery() {
     const useButton = document.createElement("button");
     useButton.className = "gallery-use";
     useButton.type = "button";
-    useButton.textContent = item.kind === "image" ? "Use as source" : "Show in canvas";
+    useButton.textContent = item.kind === "image" ? "Use as source" : item.kind === "project" ? "Open project" : "Show in canvas";
     useButton.addEventListener("click", () => addGalleryReference(item));
     card.append(media, caption, details, link, useButton);
     el.gallery.append(card);
@@ -1348,6 +1553,11 @@ async function renderGallery() {
 }
 
 function addGalleryReference(item) {
+  if (item.kind === "project") {
+    showWorkspace({ layout: "note", title: "Runnable project", summary: "Open the project from the Gallery preview. Download the HTML file if you want to keep or edit it.", data: [{ id: item.id, model: item.model }] });
+    openDrawer("galleryDrawer");
+    return;
+  }
   showWorkspace({
     layout: item.kind === "image" ? "image_request" : "note",
     title: item.kind === "image" ? "Gallery source ready" : "Gallery item",
@@ -1379,6 +1589,7 @@ function txDone(request) {
 }
 
 function extensionFor(kind, mime) {
+  if (kind === "project" || mime.includes("html")) return "html";
   if (mime.includes("png")) return "png";
   if (mime.includes("webp")) return "webp";
   if (kind === "video") return "mp4";

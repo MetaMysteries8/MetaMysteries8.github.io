@@ -582,6 +582,7 @@ input:focus, select:focus, textarea:focus { border-color: rgba(77, 232, 255, 0.7
 }
 
 .tool-status { color: var(--cyan); font-size: 0.82rem; }
+.tool-status.queued { color: var(--muted); }
 .tool-status.done { color: var(--green); }
 .tool-status.error { color: var(--danger); }
 .tool-detail { color: var(--muted); font-size: 0.92rem; }
@@ -607,7 +608,9 @@ input:focus, select:focus, textarea:focus { border-color: rgba(77, 232, 255, 0.7
 
 .gallery-item img,
 .gallery-item video,
+.gallery-item iframe,
 .gallery-item audio { width: 100%; border-radius: 12px; }
+.gallery-item iframe { height: 220px; border: 1px solid var(--line); background: white; }
 .gallery-item p { margin: 8px 0; color: var(--muted); font-size: 0.88rem; }
 .gallery-item a { color: var(--cyan); text-decoration: none; }
 .gallery-item details { color: var(--muted); font-size: 0.82rem; margin-bottom: 8px; }
@@ -624,6 +627,17 @@ input:focus, select:focus, textarea:focus { border-color: rgba(77, 232, 255, 0.7
 }
 
 .gallery-use:hover { border-color: rgba(77, 232, 255, 0.5); }
+
+.terminal-visual {
+  background: #05070d;
+  color: #b8ffd2;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  padding: 16px;
+}
+
+.terminal-output { display: grid; align-content: start; gap: 6px; min-height: 100%; }
+.terminal-output p { margin: 0; color: #b8ffd2; font-size: 0.86rem; line-height: 1.45; }
+.terminal-cursor { width: 9px; height: 18px; background: var(--green); animation: blink 0.8s steps(1) infinite; }
 
 .mcp-list { display: grid; gap: 10px; }
 .mcp-entry { padding: 10px; border: 1px solid var(--line); border-radius: 14px; color: var(--muted); }
