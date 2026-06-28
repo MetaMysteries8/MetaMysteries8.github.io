@@ -655,6 +655,8 @@ async function runTool(name, args, realtimeCallId) {
     else if (name === "remove_workspace") result = removeWorkspace(args, toolId);
     else if (name === "list_gallery") result = await listGalleryForAgent();
     else if (name === "use_gallery_sources") result = await useGallerySources(args, toolId);
+    // Models often spell the tool differently (jibberlink, gibber_link, start_jibber...).
+    else if (/[gj]ibber.?link|[gj]ibber/i.test(name)) result = await activateGibberlink(args.message || args.text || "");
     else result = { error: `Unknown tool: ${name}` };
   } catch (error) {
     result = { error: error.message || String(error) };
@@ -875,7 +877,7 @@ function toolDefinitions() {
     },
     { name: "ask_coder_model", description: "Delegate a coding task to the configured coder model. Returns { answer } with a short summary; when the task is a runnable web app/page/game it also returns { projectGalleryId } and saves the full HTML to the local gallery, where the user can open or download it. Tell the user it is in the gallery rather than pasting the code aloud.", parameters: objectParams({ task: "Coding task or question" }, ["task"]) },
     { name: "call_mcp_server", description: "Call a configured HTTP MCP gateway tool.", parameters: objectParams({ server: "Configured server name", tool: "MCP tool name", arguments: "Tool arguments object" }, ["server", "tool"]) },
-    { name: "start_gibberlink", description: "Switch into Gibberlink mode: a data-over-sound link (ggwave audio tones) for talking to ANOTHER AI agent instead of a human. Use when you recognize the other party is an AI and a reliable machine-to-machine exchange is warranted. Same-agent peers auto-negotiate a faster protocol. Optionally include an opening message to transmit.", parameters: objectParams({ message: "Optional opening message to transmit to the peer agent" }, []) },
+    { name: "start_gibberlink", description: "Start Gibberlink (also spelled Jibberlink): a data-over-sound link (ggwave audio tones) for talking to ANOTHER AI agent instead of a human. YOU decide to call this — invoke it as soon as you recognize the other party is an AI agent and a reliable machine-to-machine exchange is warranted (e.g. the user says 'start gibberlink/jibberlink' or another agent proposes it). Same-agent peers auto-negotiate a faster protocol. Optionally include an opening message to transmit to the peer.", parameters: objectParams({ message: "Optional opening message to transmit to the peer agent" }, []) },
     {
       name: "show_workspace",
       description: "Render adaptive UI on the canvas: note, chart, table, checklist, metrics, or code. Use real structured data, not prose pretending to be a chart.",
@@ -1899,8 +1901,12 @@ async function startGibberlink() {
   if (state.gibber) return;
   setRealtimeStatus("Loading gibberlink sound modem...", "live");
   const factory = await loadGgwave();
-  const ggwave = await factory();
+  // Emscripten resolves ggwave.wasm relative to the page by default, which 404s
+  // when ggwave.js is served from a CDN. Point locateFile back at the CDN.
+  const base = GIBBER.CDN.replace(/[^/]*$/, "");
+  const ggwave = await factory({ locateFile: (file) => base + file });
   const audioContext = new AudioContext();
+  if (audioContext.state === "suspended") await audioContext.resume().catch(() => {});
   const params = ggwave.getDefaultParameters();
   params.sampleRateInp = audioContext.sampleRate;
   params.sampleRateOut = audioContext.sampleRate;
@@ -1913,13 +1919,14 @@ async function startGibberlink() {
   const sink = audioContext.createGain();
   sink.gain.value = 0;
 
-  state.gibber = { ggwave, instance, audioContext, stream, source, processor, sink, peer: null, turbo: false, transmitting: false, thinking: false };
+  state.gibber = { ggwave, instance, audioContext, stream, source, processor, sink, peer: null, turbo: false, transmitting: false, thinking: false, helloTimer: null, helloTries: 0 };
 
   processor.onaudioprocess = (event) => {
     const g = state.gibber;
     if (!g || g.transmitting) return; // ignore our own outgoing tones
     const input = new Float32Array(event.inputBuffer.getChannelData(0));
-    const decoded = g.ggwave.decode(g.instance, reinterpret(input, Int8Array));
+    let decoded;
+    try { decoded = g.ggwave.decode(g.instance, reinterpret(input, Int8Array)); } catch { return; }
     if (decoded && decoded.length > 0) {
       const text = new TextDecoder("utf-8").decode(decoded);
       if (text) onGibberFrame(text);
@@ -1931,9 +1938,28 @@ async function startGibberlink() {
 
   setOrb("listening");
   el.mainAction.textContent = "Stop gibberlink";
-  updateGibberStatus("Listening. Sent handshake — waiting for a peer agent.");
+  updateGibberStatus("Listening. Broadcasting handshake — waiting for a peer agent.");
   addMessage("system", "Gibberlink active: broadcasting handshake over sound. Bring another VoiceEnable agent within mic range.");
-  await gibberSend({ t: "hello", id: GIBBER.AGENT_ID, v: GIBBER.VERSION, model: value("textModel") }, { turbo: false });
+  scheduleGibberHandshake();
+}
+
+// Re-broadcast the handshake a few times so two agents that start at the same
+// moment (and collide on the first beacon) still find each other.
+function scheduleGibberHandshake() {
+  const g = state.gibber;
+  if (!g) return;
+  clearTimeout(g.helloTimer);
+  const beacon = async () => {
+    const live = state.gibber;
+    if (!live || live.peer || live.helloTries >= 6) return;
+    live.helloTries += 1;
+    await gibberSend({ t: "hello", id: GIBBER.AGENT_ID, v: GIBBER.VERSION, model: value("textModel") }, { turbo: false });
+    if (state.gibber && !state.gibber.peer) {
+      // Jitter the interval so two peers desynchronize instead of colliding forever.
+      state.gibber.helloTimer = setTimeout(beacon, 1500 + Math.floor((g.helloTries % 3) * 700));
+    }
+  };
+  beacon();
 }
 
 async function gibberSend(frame, options = {}) {
@@ -1941,7 +1967,8 @@ async function gibberSend(frame, options = {}) {
   if (!g) return;
   const useTurbo = options.turbo ?? g.turbo;
   const protocolName = useTurbo ? GIBBER.PROTO_TURBO : GIBBER.PROTO_COMPAT;
-  const protocol = g.ggwave.ProtocolId[protocolName];
+  // ProtocolId is an enum object; fall back to known numeric ids if a name is absent.
+  const protocol = g.ggwave.ProtocolId?.[protocolName] ?? (useTurbo ? 2 : 1);
   const payload = typeof frame === "string" ? frame : JSON.stringify(frame);
   const waveform = g.ggwave.encode(g.instance, payload, protocol, 10);
   const samples = reinterpret(waveform, Float32Array);
@@ -1968,6 +1995,7 @@ async function onGibberFrame(raw) {
   if (frame.t === "hello") {
     const sameAgent = frame.id === GIBBER.AGENT_ID;
     g.peer = { id: frame.id || "unknown", model: frame.model || "" };
+    clearTimeout(g.helloTimer);
     addMessage("system", `Gibberlink: recognized peer "${g.peer.id}"${sameAgent ? " (same agent type)" : ""}.`);
     // Reply so the peer also learns about us, and negotiate the faster protocol
     // when we are the same agent type on both ends.
@@ -1978,6 +2006,7 @@ async function onGibberFrame(raw) {
   }
   if (frame.t === "ack") {
     g.peer = g.peer || { id: frame.id || "unknown", model: frame.model || "" };
+    clearTimeout(g.helloTimer);
     if (frame.turbo) g.turbo = true;
     updateGibberStatus("Peer linked. Channel ready.");
     return;
@@ -2039,6 +2068,7 @@ function stopGibberlink() {
   const g = state.gibber;
   if (!g) return;
   state.gibber = null;
+  clearTimeout(g.helloTimer);
   try { g.processor.disconnect(); } catch {}
   try { g.source.disconnect(); } catch {}
   try { g.sink.disconnect(); } catch {}
