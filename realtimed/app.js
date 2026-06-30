@@ -121,6 +121,10 @@ const NATIVE = (() => {
   const invoke = t && ((t.core && t.core.invoke) || t.invoke);
   return invoke ? { invoke: (cmd, args) => invoke(cmd, args) } : null;
 })();
+// Where the web build points users to download the desktop app. Defaults to a file
+// served next to the static site (drop VoiceEnable.exe in the deploy); change it to a
+// GitHub Releases URL if you publish builds there.
+const DESKTOP_DOWNLOAD_URL = "./VoiceEnable.exe";
 function nativeAvailable() { return !!NATIVE; }
 async function nativeInvoke(cmd, args) {
   if (!NATIVE) throw new Error("Native bridge unavailable (this is the web build).");
@@ -131,10 +135,12 @@ async function nativeInvoke(cmd, args) {
 async function renderDesktopStatus() {
   if (!el.desktopStatus) return;
   if (!nativeAvailable()) {
-    el.desktopStatus.textContent = "Web mode — download the desktop app for local files, a real coding agent, and shell access.";
+    el.desktopStatus.textContent = "Web mode — download the desktop app for local files, a real coding agent (it writes files and runs commands), and shell access.";
     el.desktopControls?.classList.add("hidden");
+    if (el.desktopDownload) { el.desktopDownload.href = DESKTOP_DOWNLOAD_URL; el.desktopDownload.classList.remove("hidden"); }
     return;
   }
+  el.desktopDownload?.classList.add("hidden");
   el.desktopControls?.classList.remove("hidden");
   let root = "";
   try { root = await nativeInvoke("workspace_root"); } catch { /* not chosen yet */ }
@@ -203,6 +209,7 @@ const el = {
   chatToggle: document.querySelector("#chatToggle"),
   desktopStatus: document.querySelector("#desktopStatus"),
   desktopControls: document.querySelector("#desktopControls"),
+  desktopDownload: document.querySelector("#desktopDownload"),
   pickWorkspace: document.querySelector("#pickWorkspace"),
   cameraToggle: document.querySelector("#cameraToggle"),
   cameraPreview: document.querySelector("#cameraPreview"),
@@ -1635,6 +1642,16 @@ async function askCoder(task, toolId) {
     updateToolEvent(toolId, "error", "No coding task was provided.");
     return { error: "No coding task was provided." };
   }
+  // Desktop: the coder runs as an autonomous engineer that writes real files and
+  // CHAINS shell commands (install → build → test → run), iterating on errors. The
+  // main agent delegates the whole job; the coder owns the command sequence.
+  if (nativeAvailable()) return runCoderAgent(task, model, toolId);
+  return askCoderSingleShot(task, model, toolId);
+}
+
+// Web (and the no-tool fallback): one-shot — return code/HTML to the gallery.
+async function askCoderSingleShot(task, model, toolId) {
+  task = String(task || "").trim();
   updateToolEvent(toolId, "running", `Asking ${model} to work on the coding task.`);
   const jobId = genJobStart({ kind: "terminal", title: "Coder", status: "active" });
   genJobTerminal(jobId, [`$ coder-model --model ${model}`, "Booting coding worker...", `Task: ${task.slice(0, 180)}`], false);
@@ -1676,6 +1693,117 @@ async function askCoder(task, toolId) {
   genJobTerminal(jobId, ["Coder response received.", "Returned guidance / inline snippets."], true);
   genJobEnd(jobId, "Coder returned guidance.");
   return { answer };
+}
+
+// The coder's own agent loop (desktop only). It is handed the filesystem + shell
+// tools and chains them itself: scaffolds files, installs deps, builds/tests/runs,
+// reads errors, and fixes — so the MAIN agent never drives the command sequence.
+const CODER_AGENT_PROMPT = [
+  "You are an autonomous coding engineer running on the user's desktop with REAL filesystem and shell access inside a sandboxed workspace folder.",
+  "You OWN the build: scaffold the project with write_file, inspect with read_file/list_dir, and CHAIN run_command to install dependencies, build, test, and run it. After each command, read stdout/stderr and fix problems, then continue — keep going until the task actually works or you are truly blocked.",
+  "Rules:",
+  "- Use workspace-relative paths (e.g. src/main.py). No absolute paths, no '..'.",
+  "- Prefer small, verifiable steps: write files, then run the command that proves they work.",
+  "- run_command runs in the workspace and is time-limited; the user approves each command, so explain risky ones in the command itself is not needed — just run normal dev commands (npm/pip/cargo/git/python/node/etc).",
+  "- You may call create_image / create_audio / create_video to generate media assets for the project; they are saved into the workspace media/ folder — reference them by relative path.",
+  "- Do NOT attempt destructive system commands; they are refused.",
+  "- When done, STOP calling tools and reply with a short plain-text summary of what you built, how to run it, and the key files.",
+].join("\n");
+
+function coderToolDefinitions() {
+  return [
+    { name: "write_file", description: "Write a UTF-8 text file in the workspace (parent dirs created). Workspace-relative path.", parameters: objectParams({ path: "Relative path, e.g. src/app.py", content: "Full file contents" }, ["path", "content"]) },
+    { name: "read_file", description: "Read a UTF-8 text file from the workspace.", parameters: objectParams({ path: "Relative path" }, ["path"]) },
+    { name: "list_dir", description: "List files/folders under a workspace-relative path (omit for root).", parameters: objectParams({ path: "Relative folder path (optional)" }, []) },
+    { name: "run_command", description: "Run a shell command in the workspace (install/build/test/run/git). Returns { code, stdout, stderr }. Chain these to build and verify the project.", parameters: objectParams({ command: "Command line, e.g. 'npm install' or 'python main.py'" }, ["command"]) },
+    { name: "open_path", description: "Open/reveal a workspace file or folder in the OS (omit path for the workspace root).", parameters: objectParams({ path: "Relative path (optional)" }, []) },
+    { name: "create_image", description: "Generate an image asset (saved to the workspace media/ folder). Reference it by relative path.", parameters: objectParams({ prompt: "Image prompt" }, ["prompt"]) },
+    { name: "create_audio", description: "Generate a music/sound or TTS asset into the workspace media/ folder.", parameters: objectParams({ prompt: "Audio prompt or TTS text" }, ["prompt"]) },
+  ];
+}
+
+// Dispatch a coder sub-call. Filesystem/shell go straight to the native handlers
+// (kept off the main transcript — they stream into the coder terminal tile). Media
+// reuses the normal generation pipeline so it shows a tile and lands in the gallery.
+async function coderDispatch(name, args) {
+  if (name === "write_file") return nativeWriteFile(args);
+  if (name === "read_file") return nativeReadFile(args);
+  if (name === "list_dir") return nativeListDir(args);
+  if (name === "run_command") return nativeRunCommand(args);
+  if (name === "open_path") return nativeOpenPath(args);
+  if (name === "create_image") return generateMedia("image", args.prompt, value("imageModel"), null, args);
+  if (name === "create_audio") {
+    const audioKind = detectLoaderKind("audio", args.prompt, "");
+    return generateMedia("audio", args.prompt, audioKind === "tts" ? ttsModelName() : value("audioModel"), null, args);
+  }
+  if (name === "create_video") return generateMedia("video", args.prompt, value("videoModel"), null, args);
+  return { error: `The coder can't call ${name}.` };
+}
+
+function describeCoderCall(name, args) {
+  if (name === "run_command") return args.command || "run_command";
+  if (name === "write_file") return `write ${args.path || "file"}`;
+  if (name === "read_file") return `read ${args.path || "file"}`;
+  if (name === "list_dir") return `ls ${args.path || "."}`;
+  if (name === "open_path") return `open ${args.path || "."}`;
+  if (name && name.startsWith("create_")) return `${name} "${String(args.prompt || "").slice(0, 40)}"`;
+  return name;
+}
+
+function coderResultLine(name, result) {
+  if (result?.error) return `! ${String(result.error).slice(0, 160)}`;
+  if (name === "run_command") return `exit ${result.code}${result.stderr ? " (stderr)" : ""}`;
+  if (name === "list_dir") return `${(result.entries || []).length} entries`;
+  if (result?.path) return result.path;
+  if (result?.galleryId) return `saved ${result.kind}`;
+  return "ok";
+}
+
+async function runCoderAgent(task, model, toolId) {
+  updateToolEvent(toolId, "running", `Coder (${model}) is building it on disk.`);
+  const jobId = genJobStart({ kind: "terminal", title: "Coder", status: "active" });
+  const log = [`$ coder --model ${model}`, `task: ${task.slice(0, 120)}`];
+  genJobTerminal(jobId, log.slice(-7), false);
+  const tools = coderToolDefinitions().map((tool) => ({ type: "function", function: tool }));
+  const messages = [
+    { role: "system", content: CODER_AGENT_PROMPT },
+    { role: "user", content: task },
+  ];
+  let summary = "";
+  let toolRounds = 0;
+  try {
+    for (let round = 0; round < 18; round += 1) {
+      const res = await postJson("/v1/chat/completions", { model, messages, tools });
+      if (res?.error) { summary = res.error; break; }
+      const msg = res?.choices?.[0]?.message;
+      if (!msg) { summary = "Coder returned no response."; break; }
+      messages.push(msg);
+      if (!msg.tool_calls || !msg.tool_calls.length) { summary = msg.content || "Done."; break; }
+      for (const call of msg.tool_calls) {
+        toolRounds += 1;
+        let args = {};
+        try { args = JSON.parse(call.function.arguments || "{}"); } catch { /* tolerate */ }
+        log.push(`$ ${describeCoderCall(call.function.name, args)}`);
+        genJobTerminal(jobId, log.slice(-7), false);
+        const result = await coderDispatch(call.function.name, args);
+        log.push(coderResultLine(call.function.name, result));
+        genJobTerminal(jobId, log.slice(-7), false);
+        messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result).slice(0, 8000) });
+      }
+    }
+  } catch (error) {
+    summary = `Coder agent error: ${(error && error.message) || error}`;
+  }
+  if (!toolRounds) {
+    // The coder model didn't (or couldn't) call tools — fall back to single-shot so
+    // the user still gets a deliverable instead of nothing.
+    genJobTerminal(jobId, [...log.slice(-4), "No tool calls — falling back to single-shot."], true);
+    genJobEnd(jobId, "Coder produced no actions.");
+    return askCoderSingleShot(task, model, toolId);
+  }
+  genJobTerminal(jobId, [...log.slice(-6), "Coder finished."], true);
+  genJobEnd(jobId, "Coder finished on disk.");
+  return { ok: true, summary: summary.slice(0, 1500), steps: toolRounds };
 }
 
 // File-extension per fenced-code language tag (for saving coder output as files).
@@ -1998,7 +2126,7 @@ function toolDefinitions() {
         },
       },
     },
-    { name: "ask_coder_model", description: "Delegate a coding task to the configured coder model. Returns { answer } with a short summary. A runnable web app/page/game is saved as HTML to the gallery and returns { projectGalleryId }. A standalone file in any other language (Python, JS, CSS, SQL, etc.) is saved to the gallery as a downloadable file with the correct extension and returns { codeGalleryId, filename, language }. Tell the user it is in the gallery rather than reading code aloud.", parameters: objectParams({ task: "Coding task or question" }, ["task"]) },
+    { name: "ask_coder_model", description: "Delegate a coding task to the coder model. On the DESKTOP app the coder is autonomous: it writes real files to the workspace and CHAINS shell commands itself (install, build, test, run), iterating on errors until it works, then returns a { summary }. Use this for ANY task that needs commands run or a real project built — you do not run the commands yourself. On the web build it returns code/HTML saved to the gallery ({ projectGalleryId } or { codeGalleryId, filename, language }). Tell the user where the result is rather than reading code aloud.", parameters: objectParams({ task: "Full coding task: what to build, languages/stack, and how to verify it (e.g. 'build and run a Flask todo API, test that GET /todos returns 200')." }, ["task"]) },
     { name: "call_mcp_server", description: "Call a configured HTTP MCP gateway tool.", parameters: objectParams({ server: "Configured server name", tool: "MCP tool name", arguments: "Tool arguments object" }, ["server", "tool"]) },
     { name: "start_gibberlink", description: "Start Gibberlink (also spelled Jibberlink): a data-over-sound link (ggwave audio tones) for talking to ANOTHER AI agent instead of a human. YOU decide to call this — invoke it as soon as you recognize the other party is an AI agent and a reliable machine-to-machine exchange is warranted (e.g. the user says 'start gibberlink/jibberlink' or another agent proposes it). Same-agent peers auto-negotiate a faster protocol. Optionally include an opening message to transmit to the peer.", parameters: objectParams({ message: "Optional opening message to transmit to the peer agent" }, []) },
     {
@@ -2102,10 +2230,9 @@ function toolDefinitions() {
   // run actual projects on disk. Absent on the web build, so the web app is unchanged.
   if (nativeAvailable()) {
     tools.push(
-      { name: "write_file", description: "DESKTOP. Write a UTF-8 text file into the local project workspace folder (parent dirs are created). Use workspace-relative paths like src/app.py. Build REAL runnable projects on disk with this during coding tasks.", parameters: objectParams({ path: "Workspace-relative file path, e.g. src/index.js", content: "Full file contents" }, ["path", "content"]) },
+      { name: "write_file", description: "DESKTOP. Write a UTF-8 text file into the local project workspace folder (parent dirs are created). Use workspace-relative paths like src/app.py. For quick single files. For anything that needs to be installed/built/run, delegate to ask_coder_model instead — the coder owns the command sequence.", parameters: objectParams({ path: "Workspace-relative file path, e.g. src/index.js", content: "Full file contents" }, ["path", "content"]) },
       { name: "read_file", description: "DESKTOP. Read a UTF-8 text file from the workspace folder.", parameters: objectParams({ path: "Workspace-relative file path" }, ["path"]) },
       { name: "list_dir", description: "DESKTOP. List files and folders under a workspace-relative path (omit path for the workspace root).", parameters: objectParams({ path: "Workspace-relative folder path (optional)" }, []) },
-      { name: "run_command", description: "DESKTOP. Run a shell command in the workspace folder (install, build, run, test, git). The user approves each command. Returns { code, stdout, stderr }. Use this to actually run the projects you write.", parameters: objectParams({ command: "Command line to run, e.g. 'npm install' or 'python main.py'" }, ["command"]) },
       { name: "open_path", description: "DESKTOP. Open/reveal a workspace file or folder (omit path for the workspace root) in the OS file manager or its default app.", parameters: objectParams({ path: "Workspace-relative path (optional)" }, []) },
       { name: "save_media_to_disk", description: "DESKTOP. Export a gallery item (by id) to a real file in the workspace's media folder so code you write can reference it by path. Generated media already auto-saves to disk; use this to place a specific item. Returns the saved path.", parameters: objectParams({ id: "Gallery item id", path: "Optional workspace-relative destination" }, ["id"]) },
     );
@@ -2146,7 +2273,7 @@ function systemPrompt() {
 // shell tools exist. Keeps the web build's prompt unchanged.
 function nativeNote() {
   if (!nativeAvailable()) return "";
-  return " DESKTOP MODE: you are running in the local desktop app with real filesystem and shell access. For coding tasks build ACTUAL projects on disk: write_file to create files in the workspace, read_file/list_dir to inspect, run_command to install/build/run/test them (the user approves each command), and open_path to reveal results. Generated images/audio/video are saved as real files under the workspace media/ folder — reference those local paths in the code you write (e.g. an HTML page that loads ./media/...). Prefer writing runnable files to disk over inline sandboxed widgets when the user wants a real, runnable app or to combine code with generated media.";
+  return " DESKTOP MODE: you are running in the local desktop app with a real workspace folder. For anything that needs to be installed, built, run, or tested, DELEGATE to ask_coder_model — the coder is the one that writes the files and chains the shell commands itself; you do not run commands. You can still do quick one-off file ops directly with write_file/read_file/list_dir and reveal results with open_path. Generated images/audio/video are saved as real files under the workspace media/ folder — reference those local paths. Prefer a real runnable project (via ask_coder_model) over inline sandboxed widgets when the user wants an actual app.";
 }
 
 function memoryPromptSection() {

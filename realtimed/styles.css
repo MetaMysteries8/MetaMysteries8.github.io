@@ -2172,3 +2172,7 @@ body[data-stageview="chat"] .stage.panel.generating {
 .desktop-status { color: var(--muted); font-size: 0.86rem; line-height: 1.5; margin: 2px 0 10px; }
 .desktop-controls { display: grid; gap: 10px; }
 .desktop-controls.hidden { display: none; }
+
+/* Desktop download button (web build only) */
+#desktopDownload { display: inline-flex; align-items: center; gap: 6px; width: fit-content; margin: 2px 0 12px; text-decoration: none; }
+#desktopDownload.hidden { display: none; }
