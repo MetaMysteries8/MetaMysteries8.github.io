@@ -85,6 +85,7 @@ const state = {
   bargeThreshold: clampGate(Number(localStorage.getItem("barge_threshold") ?? 0.085)),
   micClaimed: false, // once a mode grabs the mic, switching modes needs a refresh
   stageView: "orb",
+  lastError: null, // most recent API/generation failure, for the network_issue tool
 };
 
 // Mic noise gate for realtime barge-in: the local RMS a sound must exceed (while
@@ -1353,6 +1354,7 @@ async function runTool(name, args, realtimeCallId) {
       result = await generateMedia("audio", args.prompt, model, toolId, args);
     }
     else if (name === "web_search") result = await webSearch(args.query || args.q || args.prompt || "", toolId);
+    else if (name === "network_issue" || name === "networkissue" || name === "diagnose_error" || name === "network_error") result = await diagnoseError();
     else if (name === "build_widget") result = await buildWidget(args, toolId);
     else if (name === "edit_widget") result = await editWidget(args, toolId);
     else if (name === "save_widget") result = await saveWidgetTool(args);
@@ -1371,6 +1373,7 @@ async function runTool(name, args, realtimeCallId) {
     else if (name === "use_gallery_sources") result = await useGallerySources(args, toolId);
     // Models often spell the tool differently (jibberlink, gibber_link, start_jibber...).
     else if (/[gj]ibber.?link|[gj]ibber/i.test(name)) result = await activateGibberlink(args.message || args.text || "");
+    else if (/network.?(issue|error|problem)|diagnos|api.?error/i.test(name)) result = await diagnoseError();
     else result = { error: `Unknown tool: ${name}` };
   } catch (error) {
     result = { error: (error && error.message) || String(error) || "Tool failed." };
@@ -1453,17 +1456,71 @@ async function runMediaGeneration(kind, prompt, model, toolId, options = {}) {
   const params = mediaParams(kind, loaderKind, model, options);
   params.set("key", state.apiKey);
   const url = `${GEN_BASE}${path}?${params}`;
-  const res = await fetch(url, { headers: authHeaders() });
-  if (!res.ok) {
-    const failure = await failResponse(res, `${kind} generation failed.`);
-    if (jobId) genJobEnd(jobId, "Generation failed.");
-    return failure;
+
+  // A stalled request (connection hiccup, model wedged) must not hang forever: it
+  // would pin the gen-dock tile "active", keep the loop earcon playing, and jam the
+  // concurrency cap. Each attempt aborts on a generous per-kind timeout; a ticker
+  // shows elapsed seconds; the dock job is ALWAYS ended so the loop is released.
+  // Transient failures retry up to MAX_TRIES; deterministic ones (copyright/policy,
+  // auth, out-of-Pollen) stop immediately — retrying them just burns Pollen.
+  const timeoutMs = kind === "video" ? 240000 : kind === "audio" ? 150000 : 90000;
+  const MAX_TRIES = 3;
+  const startedAt = Date.now();
+  const ticker = setInterval(() => {
+    const secs = Math.round((Date.now() - startedAt) / 1000);
+    genJobUpdate(jobId, { detail: `Generating with ${model}… ${secs}s` });
+  }, 3000);
+  try {
+    let lastDetail = "";
+    for (let attempt = 1; attempt <= MAX_TRIES; attempt += 1) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, { headers: authHeaders(), signal: controller.signal });
+        if (res.ok) {
+          const blob = await res.blob();
+          refreshBalance();
+          const item = await saveGalleryItem({ kind, prompt, model, blob, remoteUrl: res.url });
+          genJobEnd(jobId, `${capitalize(kind)} saved to gallery.`);
+          return { ok: true, galleryId: item.id, kind, prompt, model };
+        }
+        const failure = await readApiFailure(res, `${capitalize(kind)} generation failed.`);
+        lastDetail = failure.error;
+        recordApiError(`${kind} generation`, failure.error, res.status, failure.raw);
+        // Deterministic — won't change on retry, so don't waste Pollen retrying.
+        const deterministic = failure.blocked || [400, 401, 402, 403].includes(res.status);
+        if (deterministic || attempt === MAX_TRIES) {
+          // Only surface a chat message at the terminal decision — not per retry.
+          const message = deterministic ? failure.error : `${failure.error} (gave up after ${attempt} tries to avoid wasting Pollen — ask me to diagnose it).`;
+          addMessage("system", message);
+          playSound("error");
+          genJobEnd(jobId, failure.blocked ? "Blocked." : `Failed (tried ${attempt}×).`);
+          return { error: message, status: failure.status, blocked: failure.blocked };
+        }
+      } catch (error) {
+        const aborted = error && error.name === "AbortError";
+        lastDetail = aborted ? `timed out after ${Math.round(timeoutMs / 1000)}s` : ((error && error.message) || "network failure");
+        recordApiError(`${kind} generation`, lastDetail, aborted ? "timeout" : "network", "");
+        if (attempt === MAX_TRIES) {
+          const message = `${capitalize(kind)} generation failed after ${MAX_TRIES} tries — ${lastDetail}. Stopped so it doesn't keep burning Pollen. Check your connection and try again, or ask me to diagnose it.`;
+          addMessage("system", message);
+          playSound("error");
+          genJobEnd(jobId, aborted ? "Timed out." : "Errored.");
+          return { error: message };
+        }
+      } finally {
+        clearTimeout(timeout);
+      }
+      // Backoff before the next attempt; surface the retry on the tool event.
+      updateToolEvent(toolId, "running", `Hiccup (${lastDetail || "error"}). Retry ${attempt + 1}/${MAX_TRIES}…`);
+      await new Promise((resolve) => setTimeout(resolve, 700 * attempt));
+    }
+    // Unreachable (loop always returns on the last attempt), but keep the job tidy.
+    genJobEnd(jobId, "Failed.");
+    return { error: lastDetail || `${capitalize(kind)} generation failed.` };
+  } finally {
+    clearInterval(ticker);
   }
-  const blob = await res.blob();
-  refreshBalance();
-  const item = await saveGalleryItem({ kind, prompt, model, blob, remoteUrl: res.url });
-  if (jobId) genJobEnd(jobId, `${capitalize(kind)} saved to gallery.`);
-  return { ok: true, galleryId: item.id, kind, prompt, model };
 }
 
 function mediaParams(kind, loaderKind, model, options = {}) {
@@ -1812,6 +1869,7 @@ function toolDefinitions() {
       },
     },
     { name: "web_search", description: "Search the live web for current, factual, or time-sensitive information (news, prices, docs, events, anything past your training cutoff) and get a concise answer with cited sources. Returns { answer } with inline [n] citations and a Sources list.", parameters: objectParams({ query: "The search query" }, ["query"]) },
+    { name: "network_issue", description: "Diagnose the most recent API or generation error. Returns what failed, the exact status/message the server returned, plus a LIVE connectivity check (is the API reachable, are we online, is a key connected). Call this whenever a tool returns an error, a generation fails, or the user says something 'failed', 'isn't working', or 'hung' — then read the result and help the user fix it (rephrase for copyright/policy blocks, reconnect for auth, top up for balance, retry for a transient network/timeout).", parameters: { type: "object", properties: {} } },
     {
       name: "build_widget",
       description: "Build a CUSTOM interactive widget/mini-app on the adaptive canvas by delegating to the coder model. This is the DEFAULT for anything visual or interactive that isn't plain info: charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, bespoke visualizations. The widget is sandboxed HTML rendered live, can persist its own data (a WidgetStore the user keeps across reloads/saves/downloads), and can embed gallery media. Pass galleryIds to let the widget use saved images/video/audio. Reserve show_workspace for plain note/table/metrics/code; use build_widget whenever interactivity, charts, or custom design help.",
@@ -1978,7 +2036,7 @@ function objectParams(properties, required) {
 }
 
 function systemPrompt() {
-  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. For plain informational structure, call show_workspace with layout note, table, metrics, or code (real structured data, not prose). For ANYTHING interactive or visual — charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, custom visualizations — call build_widget, which generates a live sandboxed widget on the canvas. Widgets can persist their own data (a WidgetStore the user keeps) and embed gallery media: pass galleryIds to give a widget images/video/audio to use. To fix, restyle, or extend a widget the user already has, call edit_widget with the change; call save_widget to keep one in their library. To show source code or markup, use layout "code". This app works identically whether the user TALKS OR TYPES — many users have no microphone, so you must be fully capable over text chat, including image editing. IMAGE EDITING / IMAGE-TO-VIDEO: to edit, restyle, fix, or vary an existing or user-uploaded image, call create_image with sourceImageIds set to that image's gallery id and put the change in prompt — this is a one-step edit. To animate an image into a video, call create_video with sourceImageIds. The user can upload images directly in chat; uploads are auto-saved to the gallery, so if you are unsure of an id, call list_gallery first to find it (newest entries are the recently uploaded ones). Only when no usable image exists yet (none uploaded and none in the gallery) call request_source_images to collect one. use_gallery_sources is an alternative when working from several gallery selections. Call create_image with no sourceImageIds for a brand-new image. You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink; ask the human's consent first unless they already requested it. You have a persistent long-term memory across sessions: call remember to store a durable fact about the user and forget to remove one — only durable things, not one-off chatter. You can manage the user's saved media with manage_gallery. Only end the live session (end_conversation) when the user explicitly asks to stop, end, or hang up — never on your own initiative. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."${memoryPromptSection()}`;
+  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. For plain informational structure, call show_workspace with layout note, table, metrics, or code (real structured data, not prose). For ANYTHING interactive or visual — charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, custom visualizations — call build_widget, which generates a live sandboxed widget on the canvas. Widgets can persist their own data (a WidgetStore the user keeps) and embed gallery media: pass galleryIds to give a widget images/video/audio to use. To fix, restyle, or extend a widget the user already has, call edit_widget with the change; call save_widget to keep one in their library. To show source code or markup, use layout "code". This app works identically whether the user TALKS OR TYPES — many users have no microphone, so you must be fully capable over text chat, including image editing. IMAGE EDITING / IMAGE-TO-VIDEO: to edit, restyle, fix, or vary an existing or user-uploaded image, call create_image with sourceImageIds set to that image's gallery id and put the change in prompt — this is a one-step edit. To animate an image into a video, call create_video with sourceImageIds. The user can upload images directly in chat; uploads are auto-saved to the gallery, so if you are unsure of an id, call list_gallery first to find it (newest entries are the recently uploaded ones). Only when no usable image exists yet (none uploaded and none in the gallery) call request_source_images to collect one. use_gallery_sources is an alternative when working from several gallery selections. Call create_image with no sourceImageIds for a brand-new image. You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink; ask the human's consent first unless they already requested it. You have a persistent long-term memory across sessions: call remember to store a durable fact about the user and forget to remove one — only durable things, not one-off chatter. You can manage the user's saved media with manage_gallery. If any tool returns an error, a generation fails, or the user says something "failed", "isn't working", or "hung", call network_issue to read the actual server error and a live connectivity check, then explain the cause and the fix in plain language and offer to retry — don't silently ignore failures. Note that failed generations already retry up to 3 times automatically and then stop to avoid wasting the user's Pollen; do not spam more generations after a hard failure. Only end the live session (end_conversation) when the user explicitly asks to stop, end, or hang up — never on your own initiative. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."${memoryPromptSection()}`;
 }
 
 function memoryPromptSection() {
@@ -1999,23 +2057,34 @@ function personalityInstruction() {
 }
 
 async function postJson(path, body) {
+  // Timeout so a stalled request (connection hiccup) can't hang forever — that would
+  // keep the busy() loop earcon playing and the UI stuck "thinking" indefinitely.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 120000);
   let res;
   try {
     res = await fetch(`${GEN_BASE}${path}`, {
       method: "POST",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal: controller.signal,
     });
   } catch (error) {
-    const message = `Network error calling ${path}: ${error.message || error}`;
+    const aborted = error && error.name === "AbortError";
+    const message = aborted
+      ? `Request to ${path} timed out (connection hiccup). Try again.`
+      : `Network error calling ${path}: ${error.message || error}`;
+    recordApiError(`POST ${path}`, message, aborted ? "timeout" : "network", String(error && error.message || error));
     addMessage("system", message);
     playSound("error");
     return { error: message };
+  } finally {
+    clearTimeout(timeout);
   }
   if (!res.ok) return failResponse(res, "Request failed.");
-  const json = await res.json();
+  const json = await res.json().catch(() => null);
   refreshBalance();
-  return json;
+  return json || { error: "Empty or invalid response from the server." };
 }
 
 // Parses the coder model's output per CODER_SYSTEM_PROMPT. Tolerates a missing or
@@ -2052,11 +2121,91 @@ function authHeaders() {
 
 async function failResponse(res, fallback) {
   const text = await res.text().catch(() => "");
-  const message = text || `${fallback} (${res.status})`;
+  const friendly = classifyApiError(res.status, text);
+  const message = friendly || text || `${fallback} (${res.status})`;
+  recordApiError(fallback, message, res.status, (text || "").slice(0, 400));
   addMessage("system", message);
   playSound("error");
   // Per-job tiles are ended by their own callers; nothing global to hide here.
-  return { error: message };
+  return { error: message, status: res.status, blocked: /copyright|content policy/i.test(friendly) };
+}
+
+// Read + classify a failed response WITHOUT side effects (no chat message, no sound).
+// Used by the generation retry loop so intermediate retries stay quiet and only the
+// final outcome is announced. failResponse() is the messaging version for one-shots.
+async function readApiFailure(res, fallback) {
+  const text = await res.text().catch(() => "");
+  const friendly = classifyApiError(res.status, text);
+  return {
+    error: friendly || text || `${fallback} (${res.status})`,
+    status: res.status,
+    blocked: /copyright|content policy/i.test(friendly),
+    raw: (text || "").slice(0, 400),
+  };
+}
+
+// Remember the most recent failure so the agent's network_issue tool can read the
+// actual error the API returned and help the user, instead of guessing.
+function recordApiError(source, message, status, raw) {
+  state.lastError = { source: source || "request", message: message || "", status: status ?? null, raw: raw || "", at: Date.now() };
+}
+
+// The network_issue tool: hand the agent the real last error plus a live reachability
+// probe so it can explain what actually went wrong and suggest the right fix.
+async function diagnoseError() {
+  const last = state.lastError;
+  let apiReachable = false;
+  let connectivity = "";
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    // Model-listing needs no auth, so it's a clean reachability probe.
+    const res = await fetch(`${GEN_BASE}/text/models`, { signal: controller.signal });
+    apiReachable = res.ok;
+    connectivity = res.ok ? "Pollinations API is reachable." : `API responded ${res.status}.`;
+  } catch (error) {
+    connectivity = error && error.name === "AbortError"
+      ? "Connectivity probe timed out — the connection is very slow or offline."
+      : "Could not reach the Pollinations API — likely offline, or it's blocked/down.";
+  } finally {
+    clearTimeout(timer);
+  }
+  return {
+    lastError: last ? {
+      source: last.source,
+      message: last.message,
+      status: last.status,
+      raw: last.raw || undefined,
+      secondsAgo: Math.round((Date.now() - last.at) / 1000),
+    } : null,
+    online: typeof navigator !== "undefined" ? navigator.onLine : true,
+    apiReachable,
+    connectivity,
+    keyConnected: !!state.apiKey,
+    hint: last
+      ? "Read lastError, explain in plain language what went wrong and the single most likely fix (rephrase for copyright/policy blocks, reconnect Pollen for auth/401-403, top up for balance/402, just retry for a transient network/timeout/5xx), then offer to try again."
+      : "No recent error is recorded. If the user reports a problem it was likely intermittent — suggest retrying, and check apiReachable/online above.",
+  };
+}
+
+// Turn a raw API failure into a clear, actionable line. Recognizes copyright /
+// content-policy blocks, rate limits, quota/payment, and auth problems so the user
+// sees *why* a generation failed instead of a cryptic status code or empty body.
+function classifyApiError(status, text) {
+  const t = String(text || "").toLowerCase();
+  if (/copyright|trademark|intellectual property|\bdmca\b|likeness|celebrit/.test(t))
+    return "Blocked for copyright/trademark reasons. Try again without the copyrighted character, brand, logo, or real person's likeness.";
+  if (/content policy|content_policy|safety|moderation|nsfw|sexual|violence|prohibited|disallow|not allowed|flagged|policy violation|inappropriate/.test(t))
+    return "Blocked by the content policy. Rephrase the request to avoid disallowed content.";
+  if (status === 429 || /rate.?limit|too many requests|try again later/.test(t))
+    return "Rate limited — the API is busy or you've hit a usage cap. Wait a few seconds and try again.";
+  if (status === 402 || /insufficient|\bbalance\b|out of (pollen|credit|quota)|payment required|not enough/.test(t))
+    return "Out of Pollen/credit for this request. Top up your balance or pick a cheaper model.";
+  if (status === 401 || status === 403 || /unauthor|forbidden|invalid.*(key|token)|expired/.test(t))
+    return "Authorization problem — your Pollen key may be invalid or expired. Reconnect Pollen.";
+  if (status >= 500 || /server error|bad gateway|unavailable|timeout|timed out/.test(t))
+    return "The generation service errored or is temporarily unavailable. Try again in a moment.";
+  return "";
 }
 
 function addMessage(role, content) {
@@ -2279,6 +2428,7 @@ function labelForTool(name) {
     edit_widget: "Widget editor",
     save_widget: "Save widget",
     web_search: "Web search",
+    network_issue: "Error diagnosis",
     call_mcp_server: "MCP tool call",
     manage_gallery: "Gallery management",
     remember: "Memory saved",
@@ -2311,6 +2461,7 @@ function summarizeToolResult(name, result) {
   if (name === "forget") return "Updated long-term memory.";
   if (name === "ask_coder_model") return "Coder model returned guidance.";
   if (name === "web_search") return "Web search results returned.";
+  if (name === "network_issue") return result?.apiReachable ? "Diagnosed — API reachable." : "Diagnosed — connectivity problem.";
   if (name === "build_widget") return "Custom widget added to the canvas.";
   if (name === "edit_widget") return "Widget updated on the canvas.";
   if (name === "save_widget") return "Widget saved to your library.";
