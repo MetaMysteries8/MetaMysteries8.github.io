@@ -83,6 +83,8 @@ const state = {
   pendingImages: [],
   workspaceIndex: 0,
   bargeThreshold: clampGate(Number(localStorage.getItem("barge_threshold") ?? 0.085)),
+  micClaimed: false, // once a mode grabs the mic, switching modes needs a refresh
+  stageView: "orb",
 };
 
 // Mic noise gate for realtime barge-in: the local RMS a sound must exceed (while
@@ -156,7 +158,7 @@ const el = {
   inlineImageInput: document.querySelector("#inlineImageInput"),
   inlineAttachImage: document.querySelector("#inlineAttachImage"),
   inlineAttachStrip: document.querySelector("#inlineAttachStrip"),
-  orbChatToggle: document.querySelector("#orbChatToggle"),
+  chatToggle: document.querySelector("#chatToggle"),
   cameraToggle: document.querySelector("#cameraToggle"),
   cameraPreview: document.querySelector("#cameraPreview"),
   clearConversation: document.querySelector("#clearConversation"),
@@ -361,16 +363,16 @@ function bindEvents() {
   el.modeGibber.addEventListener("click", () => setMode("gibber"));
   el.mainAction.addEventListener("click", handleMainAction);
   el.stopAction.addEventListener("click", stopAll);
-  el.textForm.addEventListener("submit", handleTextSubmit);
+  el.textForm?.addEventListener("submit", handleTextSubmit);
   el.attachImage?.addEventListener("click", () => el.imageInput?.click());
   el.imageInput?.addEventListener("change", () => handleImageUpload([...el.imageInput.files]).finally(() => { el.imageInput.value = ""; }));
   el.inlineTextForm?.addEventListener("submit", handleTextSubmit);
   el.inlineAttachImage?.addEventListener("click", () => el.inlineImageInput?.click());
   el.inlineImageInput?.addEventListener("change", () => handleImageUpload([...el.inlineImageInput.files]).finally(() => { el.inlineImageInput.value = ""; }));
-  el.orbChatToggle?.addEventListener("click", () => setStageView(state.stageView === "chat" ? "orb" : "chat"));
+  el.chatToggle?.addEventListener("click", () => setStageView(state.stageView === "chat" ? "orb" : "chat"));
   setStageView(localStorage.getItem("stage_view") === "chat" ? "chat" : "orb");
   el.cameraToggle?.addEventListener("click", toggleCamera);
-  el.clearConversation.addEventListener("click", clearConversation);
+  el.clearConversation?.addEventListener("click", clearConversation);
   el.clearWorkspace.addEventListener("click", clearWorkspace);
   el.clearGallery.addEventListener("click", clearGallery);
   el.mcpForm.addEventListener("submit", addMcpServer);
@@ -389,7 +391,7 @@ function bindEvents() {
   wireFlag("flagAutosaveUploads", "autosaveUploads");
   wireFlag("flagCamera", "camera");
   window.addEventListener("message", handleWidgetMessage);
-  el.navButtons.forEach((button) => button.addEventListener("click", () => toggleDrawer(button.dataset.drawer)));
+  el.navButtons.forEach((button) => { if (button.dataset.drawer) button.addEventListener("click", () => toggleDrawer(button.dataset.drawer)); });
   el.drawerCloses.forEach((button) => button.addEventListener("click", closeDrawers));
   el.scrim = document.createElement("div");
   el.scrim.className = "drawer-scrim";
@@ -610,7 +612,9 @@ function renderAuth() {
 
 function openDrawer(id) {
   document.querySelectorAll(".drawer").forEach((drawer) => drawer.classList.toggle("active", drawer.id === id));
-  el.navButtons.forEach((button) => button.classList.toggle("active", button.dataset.drawer === id));
+  // Only drawer-bound nav buttons reflect drawer state; the Chat toggle's active
+  // state is owned by setStageView (inline chat), so leave it alone.
+  el.navButtons.forEach((button) => { if (button.dataset.drawer) button.classList.toggle("active", button.dataset.drawer === id); });
   el.scrim?.classList.add("active");
 }
 
@@ -622,7 +626,7 @@ function toggleDrawer(id) {
 
 function closeDrawers() {
   document.querySelectorAll(".drawer").forEach((drawer) => drawer.classList.remove("active"));
-  el.navButtons.forEach((button) => button.classList.remove("active"));
+  el.navButtons.forEach((button) => { if (button.dataset.drawer) button.classList.remove("active"); });
   el.scrim?.classList.remove("active");
 }
 
@@ -701,12 +705,44 @@ function setKeyHealth(text, stateName) {
 }
 
 function setMode(mode) {
+  // Once a mode has claimed the microphone, switching live tends to leave the mic
+  // in a bad state (half-released streams, doubled getUserMedia, echo loops). So we
+  // lock the mode after first use and require a refresh to switch — a clean slate.
+  // Same-mode clicks are ignored; different-mode clicks explain the refresh rule.
+  if (state.micClaimed) {
+    if (mode !== state.mode) promptRefreshToSwitchMode();
+    return;
+  }
   stopAll();
   state.mode = mode;
   el.modeRealtime.classList.toggle("active", mode === "realtime");
   el.modePush.classList.toggle("active", mode === "push");
   el.modeGibber.classList.toggle("active", mode === "gibber");
   el.mainAction.textContent = mode === "realtime" ? "Start realtime" : mode === "gibber" ? "Start gibberlink" : "Hold to talk";
+}
+
+// Called right after a mode successfully acquires the mic. Locks the mode toggle.
+function claimMic() {
+  if (state.micClaimed) return;
+  state.micClaimed = true;
+  lockModeToggle();
+}
+
+// Lock the whole mode toggle once the mic is claimed. Buttons stay tappable (so a
+// tap can explain the refresh rule, including on touch where there's no tooltip) but
+// setMode ignores them. The .active one stays marked so you see which mode you're in.
+function lockModeToggle() {
+  [el.modeRealtime, el.modeGibber, el.modePush].forEach((button) => {
+    if (!button) return;
+    button.classList.add("locked");
+    button.title = "Refresh the page to switch modes (keeps the microphone clean)";
+  });
+}
+
+function promptRefreshToSwitchMode() {
+  setRealtimeStatus("Refresh the page to switch modes — it keeps the microphone clean.", "warning");
+  addMessage("system", "To switch modes (Realtime / Push2Talk / Gibberlink), refresh the page first. Switching live can leave the microphone in a bad state, so each mode starts from a clean slate.");
+  playSound("error");
 }
 
 async function handleMainAction() {
@@ -763,6 +799,7 @@ async function startRealtime() {
   await el.modelAudio.play().catch(() => {});
 
   const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+  claimMic();
   const source = audioContext.createMediaStreamSource(stream);
   const processor = audioContext.createScriptProcessor(4096, 1, 1);
   const mutedMonitor = audioContext.createGain();
@@ -986,6 +1023,7 @@ function setRealtimeStatus(text, mode) {
 
 async function startPushRecording() {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  claimMic();
   state.chunks = [];
   state.mediaRecorder = new MediaRecorder(stream);
   state.mediaRecorder.ondataavailable = (event) => event.data.size && state.chunks.push(event.data);
@@ -1292,12 +1330,22 @@ async function runTool(name, args, realtimeCallId) {
   let result;
   try {
     if (name === "create_image") {
-      const sources = await resolveGallerySourceUrls(args.sourceImageIds || args.imageIds || args.editImageIds);
-      result = await generateMedia("image", args.prompt, value("imageModel"), toolId, sources.length ? { ...args, images: sources } : args);
+      const wanted = args.sourceImageIds || args.imageIds || args.editImageIds;
+      const sources = await resolveGallerySourceUrls(wanted);
+      if (Array.isArray(wanted) && wanted.length && !sources.length) {
+        result = { error: "None of those sourceImageIds matched an image in the gallery. Call list_gallery for valid ids, or call request_source_images to have the user upload the image to edit." };
+      } else {
+        result = await generateMedia("image", args.prompt, value("imageModel"), toolId, sources.length ? { ...args, images: sources } : args);
+      }
     }
     else if (name === "create_video") {
-      const sources = await resolveGallerySourceUrls(args.sourceImageIds || args.imageIds);
-      result = await generateMedia("video", args.prompt, value("videoModel"), toolId, sources.length ? { ...args, images: sources } : args);
+      const wanted = args.sourceImageIds || args.imageIds;
+      const sources = await resolveGallerySourceUrls(wanted);
+      if (Array.isArray(wanted) && wanted.length && !sources.length) {
+        result = { error: "None of those sourceImageIds matched an image in the gallery. Call list_gallery for valid ids, or call request_source_images to collect the image to animate." };
+      } else {
+        result = await generateMedia("video", args.prompt, value("videoModel"), toolId, sources.length ? { ...args, images: sources } : args);
+      }
     }
     else if (name === "create_audio") {
       const audioKind = detectLoaderKind("audio", args.prompt, "");
@@ -2053,12 +2101,11 @@ function setStageView(view) {
   document.body.dataset.stageview = state.stageView;
   try { localStorage.setItem("stage_view", state.stageView); } catch { /* private mode */ }
   const on = state.stageView === "chat";
-  if (el.orbChatToggle) {
-    el.orbChatToggle.setAttribute("aria-pressed", on ? "true" : "false");
-    el.orbChatToggle.classList.toggle("active", on);
-    el.orbChatToggle.textContent = on ? "🔮 Orb" : "💬 Chat";
+  if (el.chatToggle) {
+    el.chatToggle.setAttribute("aria-pressed", on ? "true" : "false");
+    el.chatToggle.classList.toggle("active", on);
   }
-  if (on) { renderMessages(); renderAttachStrip(); el.inlineTextInput?.focus(); }
+  if (on) { closeDrawers(); renderMessages(); renderAttachStrip(); el.inlineTextInput?.focus(); }
 }
 
 function renderMessages() {
@@ -2329,8 +2376,19 @@ function requestSourceImages(args, toolId) {
   saveWorkspace();
   renderWorkspace();
   playSound("inputReq");
+  revealCanvasForInput(artifact.purpose === "video_reference" ? "source frames/images" : "source image(s) to edit");
   updateToolEvent(toolId, "running", `Waiting for ${artifact.minImages}-${artifact.maxImages} source image(s).`);
   return { ok: true, workspaceId: artifact.id, purpose: artifact.purpose };
+}
+
+// An input-required panel was just rendered on the canvas. In text/push mode the
+// user is usually inside the Chat drawer, which sits OVER the canvas — so the panel
+// would be invisible. Surface the canvas (close any open drawer) and leave a chat
+// note so a keyboard-only user knows where to look. Realtime users see it already.
+function revealCanvasForInput(what) {
+  const drawerOpen = !!document.querySelector(".drawer.active");
+  if (drawerOpen) closeDrawers();
+  addMessage("system", `I need ${what}. I opened an input panel on the canvas${drawerOpen ? " (closed the chat panel so you can see it)" : ""} — add the file(s) or paste URL(s) there and run it to continue. You can also attach an image with the 🖼 button and ask me to edit that.`);
 }
 
 // Manual reorder from the card's up/down buttons.
@@ -4008,7 +4066,9 @@ async function startGibberlink() {
   const instance = ggwave.init(params);
 
   // Echo cancellation/noise suppression would eat the data tones, so disable them.
+  // exclusive mic ownership: nothing else should be holding a stream once we lock.
   const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+  claimMic();
   const source = audioContext.createMediaStreamSource(stream);
   const processor = audioContext.createScriptProcessor(4096, 1, 1);
   const sink = audioContext.createGain();
@@ -4035,30 +4095,21 @@ async function startGibberlink() {
 
   setOrb("listening");
   el.mainAction.textContent = "Stop gibberlink";
-  updateGibberStatus("Listening. Broadcasting handshake — waiting for a peer agent.");
-  addMessage("system", "Gibberlink active: broadcasting handshake over sound. Bring another VoiceEnable agent within mic range.");
+  updateGibberStatus("Listening. Sending one handshake ping — waiting for a peer agent.");
+  addMessage("system", "Gibberlink active: sent a single handshake ping over sound. Bring another VoiceEnable agent within mic range — once it answers, the link works on its own.");
   playSound("convoStart");
   startOrbViz(analyser);
   scheduleGibberHandshake();
 }
 
-// Re-broadcast the handshake a few times so two agents that start at the same
-// moment (and collide on the first beacon) still find each other.
-function scheduleGibberHandshake() {
+// Broadcast a SINGLE handshake ping. The peer answers with an ack (and sends its
+// own single hello), so one ping per side is all that's needed — no continuous
+// beacon spamming the channel. Once a peer is heard the link just works.
+async function scheduleGibberHandshake() {
   const g = state.gibber;
   if (!g) return;
-  clearTimeout(g.helloTimer);
-  const beacon = async () => {
-    const live = state.gibber;
-    if (!live || live.peer || live.helloTries >= 6) return;
-    live.helloTries += 1;
-    await gibberSend({ t: "hello", id: GIBBER.AGENT_ID, v: GIBBER.VERSION, model: value("textModel") }, { turbo: false });
-    if (state.gibber && !state.gibber.peer) {
-      // Jitter the interval so two peers desynchronize instead of colliding forever.
-      state.gibber.helloTimer = setTimeout(beacon, 1500 + Math.floor((g.helloTries % 3) * 700));
-    }
-  };
-  beacon();
+  await gibberSend({ t: "hello", id: GIBBER.AGENT_ID, v: GIBBER.VERSION, model: value("textModel") }, { turbo: false });
+  if (state.gibber && !state.gibber.peer) updateGibberStatus("Ping sent — waiting for a peer agent.");
 }
 
 async function gibberSend(frame, options = {}) {
@@ -4159,6 +4210,12 @@ function updateGibberStatus(note) {
 }
 
 async function activateGibberlink(message) {
+  // If another mode already owns the mic, we won't yank it away mid-session (that's
+  // the mic-mangling the refresh rule prevents). Ask the user to switch deliberately.
+  if (state.micClaimed && state.mode !== "gibber") {
+    addMessage("system", "I can talk over Gibberlink, but the mic is in use by the current mode. Refresh the page and pick Gibberlink mode to start a clean data link.");
+    return { error: "Mic in use by another mode. Refresh and select Gibberlink mode." };
+  }
   if (state.mode !== "gibber") setMode("gibber");
   if (!state.gibber) await startGibberlink();
   if (message) {

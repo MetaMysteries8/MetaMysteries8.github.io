@@ -385,6 +385,9 @@ h2 { margin-bottom: 16px; }
 .mode { padding: 9px 15px; background: transparent; color: var(--muted); font-weight: 600; }
 .mode:hover { color: var(--text); }
 .mode.active { background: rgba(255, 255, 255, 0.14); color: var(--text); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.mode.locked { cursor: not-allowed; opacity: 0.5; }
+.mode.locked:not(.active):hover { color: var(--muted); }
+.mode.locked.active { opacity: 1; }
 
 .button {
   position: relative;
@@ -1949,17 +1952,24 @@ body[data-uistyle="bolder"] .orb-blob { filter: url(#orbBlur) drop-shadow(0 0 ca
     gap: 10px;
   }
 
-  /* Two-row header: brand + account on top, full-width scrollable nav below */
+  /* Stacked header: brand row, account row (full width), scrollable nav row.
+     One flat column avoids the cramped brand-vs-account squeeze. */
   .app-header {
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas: "brand account" "nav nav";
+    grid-template-columns: 1fr;
+    grid-template-areas: "brand" "account" "nav";
     gap: 10px;
     padding: 10px 12px;
     border-radius: 18px;
   }
   .brand { grid-area: brand; }
   .app-nav { grid-area: nav; }
-  .account-strip { grid-area: account; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+  .account-strip {
+    grid-area: account;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .account-strip #connectByop { margin-left: auto; }
   .brand span { display: none; }
   .app-nav {
     width: 100%;
@@ -1969,25 +1979,33 @@ body[data-uistyle="bolder"] .orb-blob { filter: url(#orbBlur) drop-shadow(0 0 ca
     scrollbar-width: none;
   }
   .app-nav::-webkit-scrollbar { display: none; }
-  .nav-button { flex: 0 0 auto; padding: 9px 14px; }
-  .account-strip .button { padding: 9px 12px; font-size: 0.86rem; }
-  .account-strip #clearKey { order: 5; font-size: 0.78rem; }
-  .balance-pill { font-size: 0.78rem; max-width: 130px; }
+  .nav-button { flex: 0 0 auto; padding: 9px 13px; }
+  .account-strip .button { padding: 8px 12px; font-size: 0.84rem; }
+  .account-strip #clearKey { font-size: 0.78rem; }
+  .balance-pill, .pill { font-size: 0.76rem; padding: 7px 10px; }
+  .balance-pill { max-width: 120px; }
 
-  /* Stage: single-column vertical flow, no centered-grid cramming */
+  /* Stage: single-column vertical flow. Topbar is in-flow now, so the old
+     56px top padding (which used to clear an absolute topbar) is gone. */
   .stage.panel,
   .stage.panel.generating {
     display: flex;
     flex-direction: column;
     grid-template-columns: none;
     align-items: stretch;
-    gap: 14px;
+    gap: 12px;
     min-height: auto;
     height: auto;
-    padding: 56px 12px 18px;
+    padding: 14px 12px 18px;
     overflow: visible;
   }
-  .stage-topbar { position: static; margin-bottom: 2px; }
+  .stage-topbar {
+    position: static;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 2px;
+  }
+  .workspace-mode { font-size: 0.78rem; }
 
   .orb,
   body[data-uistyle="bolder"] .orb { width: min(46vw, 190px); justify-self: center; margin: 4px auto 2px; }
@@ -2019,8 +2037,16 @@ body[data-uistyle="bolder"] .orb-blob { filter: url(#orbBlur) drop-shadow(0 0 ca
     box-shadow: var(--shadow-2);
   }
   .mode-toggle { flex: 1 1 100%; justify-content: center; }
-  .mode-toggle .mode { flex: 1 1 0; }
-  .controls .button { flex: 1 1 0; padding: 11px 14px; }
+  .mode-toggle .mode { flex: 1 1 0; min-width: 0; padding: 9px 6px; font-size: 0.82rem; }
+  .controls .button {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 11px 8px;
+    font-size: 0.88rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .realtime-status {
     position: fixed;
     left: 8px;
@@ -2054,7 +2080,7 @@ body[data-uistyle="bolder"] .orb-blob { filter: url(#orbBlur) drop-shadow(0 0 ca
     border-radius: 20px;
   }
   .composer { flex-wrap: wrap; }
-  .composer #textInput { flex: 1 1 140px; }
+  .composer .composer-text { flex: 1 1 140px; }
 
   /* Comfortable touch targets across interactive bits */
   .button, .nav-button, .mode, .g-btn, .mkw-btn { min-height: 40px; }
@@ -2075,12 +2101,9 @@ body[data-uistyle="bolder"] .orb-blob { filter: url(#orbBlur) drop-shadow(0 0 ca
 }
 
 /* ============================================================
-   Inline chat — swaps the orb for a keyboard-first chat panel
-   (toggle in the stage topbar). Mic-less users live here.
+   Inline chat — swaps the orb for a keyboard-first chat panel,
+   toggled by the header "Chat" button. Mic-less users live here.
    ============================================================ */
-.stage-topbar-actions { display: flex; align-items: center; gap: 8px; }
-#orbChatToggle.active { color: var(--text); border-color: var(--line-strong); background: rgba(77, 232, 255, 0.12); }
-
 .inline-chat {
   display: none;
   flex-direction: column;
@@ -2095,14 +2118,38 @@ body[data-uistyle="bolder"] .orb-blob { filter: url(#orbBlur) drop-shadow(0 0 ca
   border-radius: 22px;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.02)), rgba(0, 0, 0, 0.18);
 }
+.inline-chat-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.inline-chat-head span {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
 .inline-chat .inline-transcript {
   flex: 1 1 auto;
   min-height: 0;
   max-height: none;
   overflow-y: auto;
 }
+.inline-chat .inline-transcript:empty::before {
+  content: "Type below to chat — ask for an image, an edit, a widget, or anything.";
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
 .inline-chat .composer { margin-top: 0; }
 .inline-chat .composer .composer-text { flex: 1 1 auto; min-width: 0; }
+/* Header Chat toggle reuses .nav-button.active styling; add a subtle accent. */
+#chatToggle.active { box-shadow: inset 0 0 0 1px var(--line-strong), 0 0 0 1px rgba(77, 232, 255, 0.25); }
 
 body[data-stageview="chat"] .orb { display: none; }
 body[data-stageview="chat"] .inline-chat { display: flex; }

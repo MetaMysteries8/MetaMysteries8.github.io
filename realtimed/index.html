@@ -23,7 +23,7 @@
       </div>
 
       <nav class="app-nav" aria-label="Workspace menus">
-        <button class="nav-button" data-drawer="conversationDrawer">Chat</button>
+        <button id="chatToggle" class="nav-button" aria-pressed="false" title="Show the conversation in place of the orb">Chat</button>
         <button class="nav-button" data-drawer="settingsDrawer">Config</button>
         <button class="nav-button" data-drawer="galleryDrawer">Gallery</button>
         <button class="nav-button" data-drawer="widgetsDrawer">Widgets</button>
@@ -44,10 +44,7 @@
     <section class="stage panel">
       <div class="stage-topbar">
         <span id="workspaceMode" class="workspace-mode">Voice canvas</span>
-        <div class="stage-topbar-actions">
-          <button id="orbChatToggle" class="button ghost small" title="Show inline chat in place of the orb" aria-pressed="false">💬 Chat</button>
-          <button id="clearWorkspace" class="button ghost small">Clear canvas</button>
-        </div>
+        <button id="clearWorkspace" class="button ghost small">Clear canvas</button>
       </div>
 
       <div id="mediaDock" class="media-dock hidden">
@@ -77,6 +74,10 @@
       </div>
 
       <div id="inlineChat" class="inline-chat" aria-label="Inline chat">
+        <div class="inline-chat-head">
+          <span>Conversation</span>
+          <button id="clearConversation" class="button ghost small" type="button">Clear</button>
+        </div>
         <div id="inlineTranscript" class="transcript inline-transcript"></div>
         <div id="inlineAttachStrip" class="attach-strip"></div>
         <form id="inlineTextForm" class="composer">
@@ -236,23 +237,6 @@
         </label>
     </section>
 
-    <section id="conversationDrawer" class="drawer panel transcript-panel" aria-label="Conversation">
-        <div class="panel-head">
-          <h2>Conversation</h2>
-          <div class="panel-actions">
-            <button id="clearConversation" class="button ghost small">Clear</button>
-            <button class="button ghost small drawer-close" type="button">Close</button>
-          </div>
-        </div>
-        <div id="transcript" class="transcript"></div>
-        <div id="attachStrip" class="attach-strip"></div>
-        <form id="textForm" class="composer">
-          <input id="imageInput" type="file" accept="image/*" multiple hidden>
-          <button id="attachImage" class="button ghost" type="button" title="Attach images" aria-label="Attach images">🖼</button>
-          <input id="textInput" class="composer-text" placeholder="Type a message, attach images, or request an image/video/music...">
-          <button class="button primary" type="submit">Send</button>
-        </form>
-    </section>
 
     <section id="galleryDrawer" class="drawer panel gallery-panel" aria-label="Local gallery">
         <div class="panel-head">
