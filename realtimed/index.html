@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="dark light">
   <meta name="theme-color" content="#070812">
   <title>VoiceEnable Agent</title>
@@ -44,7 +44,10 @@
     <section class="stage panel">
       <div class="stage-topbar">
         <span id="workspaceMode" class="workspace-mode">Voice canvas</span>
-        <button id="clearWorkspace" class="button ghost small">Clear canvas</button>
+        <div class="stage-topbar-actions">
+          <button id="orbChatToggle" class="button ghost small" title="Show inline chat in place of the orb" aria-pressed="false">💬 Chat</button>
+          <button id="clearWorkspace" class="button ghost small">Clear canvas</button>
+        </div>
       </div>
 
       <div id="mediaDock" class="media-dock hidden">
@@ -71,6 +74,17 @@
           <g class="orb-poof"></g>
         </svg>
         <span class="orb-label" aria-hidden="true"></span>
+      </div>
+
+      <div id="inlineChat" class="inline-chat" aria-label="Inline chat">
+        <div id="inlineTranscript" class="transcript inline-transcript"></div>
+        <div id="inlineAttachStrip" class="attach-strip"></div>
+        <form id="inlineTextForm" class="composer">
+          <input id="inlineImageInput" type="file" accept="image/*" multiple hidden>
+          <button id="inlineAttachImage" class="button ghost" type="button" title="Attach images" aria-label="Attach images">🖼</button>
+          <input id="inlineTextInput" class="composer-text" placeholder="Type a message, attach images, or request an image/edit...">
+          <button class="button primary" type="submit">Send</button>
+        </form>
       </div>
 
       <section id="adaptiveWorkspace" class="adaptive-workspace" aria-live="polite">
@@ -235,7 +249,7 @@
         <form id="textForm" class="composer">
           <input id="imageInput" type="file" accept="image/*" multiple hidden>
           <button id="attachImage" class="button ghost" type="button" title="Attach images" aria-label="Attach images">🖼</button>
-          <input id="textInput" placeholder="Type a message, attach images, or request an image/video/music...">
+          <input id="textInput" class="composer-text" placeholder="Type a message, attach images, or request an image/video/music...">
           <button class="button primary" type="submit">Send</button>
         </form>
     </section>

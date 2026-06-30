@@ -3,6 +3,9 @@ const MEDIA_BASE = "https://media.pollinations.ai";
 const ENTER_BASE = "https://enter.pollinations.ai";
 const CLIENT_ID = "pk_VIepF2clCLKh5xiX";
 const REALTIME_MODEL = "gpt-realtime-2";
+// Seconds of lookahead kept between the playback clock and now, so a late audio
+// delta over a jittery (often mobile) connection can't open an audible gap.
+const PLAYBACK_JITTER = 0.16;
 const CODER_SYSTEM_PROMPT = [
   "You are a coding assistant embedded in a voice agent. Your reply is parsed by software, so follow this output contract exactly.",
   "",
@@ -146,6 +149,14 @@ const el = {
   imageInput: document.querySelector("#imageInput"),
   attachImage: document.querySelector("#attachImage"),
   attachStrip: document.querySelector("#attachStrip"),
+  inlineChat: document.querySelector("#inlineChat"),
+  inlineTranscript: document.querySelector("#inlineTranscript"),
+  inlineTextForm: document.querySelector("#inlineTextForm"),
+  inlineTextInput: document.querySelector("#inlineTextInput"),
+  inlineImageInput: document.querySelector("#inlineImageInput"),
+  inlineAttachImage: document.querySelector("#inlineAttachImage"),
+  inlineAttachStrip: document.querySelector("#inlineAttachStrip"),
+  orbChatToggle: document.querySelector("#orbChatToggle"),
   cameraToggle: document.querySelector("#cameraToggle"),
   cameraPreview: document.querySelector("#cameraPreview"),
   clearConversation: document.querySelector("#clearConversation"),
@@ -353,6 +364,11 @@ function bindEvents() {
   el.textForm.addEventListener("submit", handleTextSubmit);
   el.attachImage?.addEventListener("click", () => el.imageInput?.click());
   el.imageInput?.addEventListener("change", () => handleImageUpload([...el.imageInput.files]).finally(() => { el.imageInput.value = ""; }));
+  el.inlineTextForm?.addEventListener("submit", handleTextSubmit);
+  el.inlineAttachImage?.addEventListener("click", () => el.inlineImageInput?.click());
+  el.inlineImageInput?.addEventListener("change", () => handleImageUpload([...el.inlineImageInput.files]).finally(() => { el.inlineImageInput.value = ""; }));
+  el.orbChatToggle?.addEventListener("click", () => setStageView(state.stageView === "chat" ? "orb" : "chat"));
+  setStageView(localStorage.getItem("stage_view") === "chat" ? "chat" : "orb");
   el.cameraToggle?.addEventListener("click", toggleCamera);
   el.clearConversation.addEventListener("click", clearConversation);
   el.clearWorkspace.addEventListener("click", clearWorkspace);
@@ -737,8 +753,13 @@ async function startRealtime() {
   state.stoppingRealtime = false;
   setRealtimeStatus("Requesting microphone...", "live");
   const audioContext = new AudioContext({ sampleRate: 24000 });
+  // Mobile browsers (iOS Safari especially) start audio contexts suspended and will
+  // chop or drop scheduled playback until resumed inside a user gesture. The Start
+  // button is that gesture, so resume here.
+  await audioContext.resume().catch(() => {});
   const output = audioContext.createMediaStreamDestination();
   el.modelAudio.srcObject = output.stream;
+  el.modelAudio.playsInline = true;
   await el.modelAudio.play().catch(() => {});
 
   const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
@@ -874,7 +895,13 @@ function playPcmDelta(base64) {
   source.buffer = buffer;
   source.connect(rt.output);
   if (rt.analyser) source.connect(rt.analyser); // model voice drives the orb while speaking
-  rt.nextStart = Math.max(rt.nextStart, rt.audioContext.currentTime);
+  // Jitter buffer: chunks arrive over a flaky network at irregular intervals. If we
+  // schedule each one right at currentTime, a single late delta leaves an audible gap
+  // and the voice "cuts out". Keep a small cushion ahead of the clock so brief hiccups
+  // are absorbed; only when we've fully underrun (start of a burst, or playback caught
+  // up to real time) do we re-arm the cushion.
+  const now = rt.audioContext.currentTime;
+  if (rt.nextStart < now + 0.02) rt.nextStart = now + PLAYBACK_JITTER;
   source.start(rt.nextStart);
   rt.nextStart += buffer.duration;
   // Track scheduled chunks so a barge-in can stop them immediately.
@@ -1031,24 +1058,26 @@ async function handleImageUpload(files) {
 }
 
 function renderAttachStrip() {
-  if (!el.attachStrip) return;
-  el.attachStrip.innerHTML = "";
-  el.attachStrip.classList.toggle("active", state.pendingImages.length > 0);
-  state.pendingImages.forEach((image, index) => {
-    const chip = document.createElement("div");
-    chip.className = "attach-chip";
-    const thumb = document.createElement("img");
-    thumb.src = image.url;
-    thumb.alt = image.name || "Attached image";
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "attach-remove";
-    remove.textContent = "✕";
-    remove.title = "Remove attachment";
-    remove.addEventListener("click", () => { state.pendingImages.splice(index, 1); renderAttachStrip(); });
-    chip.append(thumb, remove);
-    el.attachStrip.append(chip);
-  });
+  const strips = [el.attachStrip, el.inlineAttachStrip].filter(Boolean);
+  for (const strip of strips) {
+    strip.innerHTML = "";
+    strip.classList.toggle("active", state.pendingImages.length > 0);
+    state.pendingImages.forEach((image, index) => {
+      const chip = document.createElement("div");
+      chip.className = "attach-chip";
+      const thumb = document.createElement("img");
+      thumb.src = image.url;
+      thumb.alt = image.name || "Attached image";
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "attach-remove";
+      remove.textContent = "✕";
+      remove.title = "Remove attachment";
+      remove.addEventListener("click", () => { state.pendingImages.splice(index, 1); renderAttachStrip(); });
+      chip.append(thumb, remove);
+      strip.append(chip);
+    });
+  }
 }
 
 function clearPendingImages() {
@@ -1122,10 +1151,13 @@ function stopCamera() {
 async function handleTextSubmit(event) {
   event.preventDefault();
   if (!requireKey()) return;
-  const text = el.textInput.value.trim();
+  // Either composer (the drawer one or the inline one that replaces the orb) can
+  // submit; read from the form that fired and keep both inputs in sync.
+  const input = event.currentTarget?.querySelector(".composer-text") || el.textInput;
+  const text = (input?.value || "").trim();
   const images = state.pendingImages.slice();
   if (!text && !images.length) return;
-  el.textInput.value = "";
+  [el.textInput, el.inlineTextInput].forEach((field) => { if (field) field.value = ""; });
   clearPendingImages();
   const label = text || (images.length ? `Sent ${images.length} image${images.length > 1 ? "s" : ""}.` : "");
   addMessage("user", images.length && text ? `${text}  ·  ${images.length} image${images.length > 1 ? "s" : ""}` : label);
@@ -1170,14 +1202,23 @@ async function chat(text, speak, images) {
 }
 
 async function handleToolCalls(messages, assistantMessage, speak) {
-  messages.push(assistantMessage);
-  for (const call of assistantMessage.tool_calls) {
-    const args = JSON.parse(call.function.arguments || "{}");
-    const result = await runTool(call.function.name, args);
-    messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result) });
+  const tools = toolDefinitions().map((tool) => ({ type: "function", function: tool }));
+  let message = assistantMessage;
+  // Loop tool rounds so the text model can chain steps — e.g. list_gallery to find
+  // an image, then create_image with that id to edit it. The followup MUST carry
+  // the tool list, or the model can never take a second step (this is why editing
+  // used to silently fail in chat mode). Cap the rounds so it can't run away.
+  for (let round = 0; round < 6 && message?.tool_calls?.length; round += 1) {
+    messages.push(message);
+    for (const call of message.tool_calls) {
+      const args = JSON.parse(call.function.arguments || "{}");
+      const result = await runTool(call.function.name, args);
+      messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result) });
+    }
+    const followup = await busy(() => postJson("/v1/chat/completions", { model: value("textModel"), messages, tools }));
+    message = followup?.choices?.[0]?.message;
   }
-  const followup = await busy(() => postJson("/v1/chat/completions", { model: value("textModel"), messages }));
-  const content = followup?.choices?.[0]?.message?.content || "Done.";
+  const content = message?.content || "Done.";
   addMessage("agent", content);
   playSound("messageReceive");
   if (speak && value("ttsVoice")) await speakText(content);
@@ -1250,8 +1291,14 @@ async function runTool(name, args, realtimeCallId) {
   vizBurst(name); // a little morph "pop" so you can see the agent act
   let result;
   try {
-    if (name === "create_image") result = await generateMedia("image", args.prompt, value("imageModel"), toolId, args);
-    else if (name === "create_video") result = await generateMedia("video", args.prompt, value("videoModel"), toolId, args);
+    if (name === "create_image") {
+      const sources = await resolveGallerySourceUrls(args.sourceImageIds || args.imageIds || args.editImageIds);
+      result = await generateMedia("image", args.prompt, value("imageModel"), toolId, sources.length ? { ...args, images: sources } : args);
+    }
+    else if (name === "create_video") {
+      const sources = await resolveGallerySourceUrls(args.sourceImageIds || args.imageIds);
+      result = await generateMedia("video", args.prompt, value("videoModel"), toolId, sources.length ? { ...args, images: sources } : args);
+    }
     else if (name === "create_audio") {
       const audioKind = detectLoaderKind("audio", args.prompt, "");
       const model = audioKind === "tts" ? ttsModelName() : value("audioModel");
@@ -1676,19 +1723,20 @@ function toolDefinitions() {
   const tools = [
     {
       name: "create_image",
-      description: "Generate one or more image variations and save them to the local gallery. Use count for multi-image generation.",
+      description: "Generate images, OR EDIT/restyle/vary existing ones, and save to the local gallery. To edit an existing or user-uploaded image, pass its gallery id in sourceImageIds and describe the change in prompt — this is the one-step image-edit path. Use count for multiple variations.",
       parameters: {
         type: "object",
         properties: {
-          prompt: { type: "string", description: "Detailed image prompt" },
+          prompt: { type: "string", description: "Detailed image prompt. When editing, describe the change to apply to the source image(s)." },
           count: { type: "integer", minimum: 1, maximum: 4, description: "Number of variations/images" },
+          sourceImageIds: { type: "array", items: { type: "string" }, description: "Gallery item ids of image(s) to EDIT or use as visual reference. Provide these to edit/restyle an existing or user-uploaded image (uploads are auto-saved to the gallery — call list_gallery for ids). Omit for a brand-new image. A source-capable image model is selected automatically." },
         },
         required: ["prompt"],
       },
     },
     {
       name: "create_video",
-      description: "Generate one or two videos and save them to the local gallery. Use duration and aspectRatio when the user specifies length or format.",
+      description: "Generate videos and save them to the local gallery. To animate an existing or user-uploaded image (image-to-video), pass its gallery id in sourceImageIds. Use duration and aspectRatio when the user specifies length or format.",
       parameters: {
         type: "object",
         properties: {
@@ -1697,6 +1745,7 @@ function toolDefinitions() {
           duration: { type: "integer", minimum: 1, maximum: 120, description: "Duration in seconds, model-dependent" },
           aspectRatio: { type: "string", enum: ["16:9", "9:16"], description: "Video aspect ratio" },
           withAudio: { type: "boolean", description: "Whether to request video audio when the model supports it" },
+          sourceImageIds: { type: "array", items: { type: "string" }, description: "Gallery item ids of image(s) to animate into video (image-to-video). Call list_gallery for ids; uploaded images are auto-saved there. A source-capable video model is selected automatically." },
         },
         required: ["prompt"],
       },
@@ -1881,7 +1930,7 @@ function objectParams(properties, required) {
 }
 
 function systemPrompt() {
-  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. For plain informational structure, call show_workspace with layout note, table, metrics, or code (real structured data, not prose). For ANYTHING interactive or visual — charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, custom visualizations — call build_widget, which generates a live sandboxed widget on the canvas. Widgets can persist their own data (a WidgetStore the user keeps) and embed gallery media: pass galleryIds to give a widget images/video/audio to use. To fix, restyle, or extend a widget the user already has, call edit_widget with the change; call save_widget to keep one in their library. To show source code or markup, use layout "code". If the user asks to reuse a prior image/video/audio, call list_gallery first. If the user asks to edit an existing image or use one as a reference, use use_gallery_sources when it is already in the gallery, otherwise call request_source_images. The user can upload images directly (saved to the gallery and shared with you); reference what they uploaded by its gallery entry. You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink; ask the human's consent first unless they already requested it. You have a persistent long-term memory across sessions: call remember to store a durable fact about the user and forget to remove one — only durable things, not one-off chatter. You can manage the user's saved media with manage_gallery. Only end the live session (end_conversation) when the user explicitly asks to stop, end, or hang up — never on your own initiative. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."${memoryPromptSection()}`;
+  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. For plain informational structure, call show_workspace with layout note, table, metrics, or code (real structured data, not prose). For ANYTHING interactive or visual — charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, custom visualizations — call build_widget, which generates a live sandboxed widget on the canvas. Widgets can persist their own data (a WidgetStore the user keeps) and embed gallery media: pass galleryIds to give a widget images/video/audio to use. To fix, restyle, or extend a widget the user already has, call edit_widget with the change; call save_widget to keep one in their library. To show source code or markup, use layout "code". This app works identically whether the user TALKS OR TYPES — many users have no microphone, so you must be fully capable over text chat, including image editing. IMAGE EDITING / IMAGE-TO-VIDEO: to edit, restyle, fix, or vary an existing or user-uploaded image, call create_image with sourceImageIds set to that image's gallery id and put the change in prompt — this is a one-step edit. To animate an image into a video, call create_video with sourceImageIds. The user can upload images directly in chat; uploads are auto-saved to the gallery, so if you are unsure of an id, call list_gallery first to find it (newest entries are the recently uploaded ones). Only when no usable image exists yet (none uploaded and none in the gallery) call request_source_images to collect one. use_gallery_sources is an alternative when working from several gallery selections. Call create_image with no sourceImageIds for a brand-new image. You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink; ask the human's consent first unless they already requested it. You have a persistent long-term memory across sessions: call remember to store a durable fact about the user and forget to remove one — only durable things, not one-off chatter. You can manage the user's saved media with manage_gallery. Only end the live session (end_conversation) when the user explicitly asks to stop, end, or hang up — never on your own initiative. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."${memoryPromptSection()}`;
 }
 
 function memoryPromptSection() {
@@ -1997,17 +2046,37 @@ function saveConversation() {
   localStorage.setItem("conversation", JSON.stringify(state.messages.slice(-60)));
 }
 
-function renderMessages() {
-  el.transcript.innerHTML = "";
-  for (const message of state.messages) {
-    const div = document.createElement("div");
-    div.className = `message ${message.role}`;
-    if (message.role === "tool") renderToolMessage(div, message);
-    else if (message.role === "agent") div.append(renderMarkdown(message.content));
-    else div.textContent = message.content;
-    el.transcript.append(div);
+// Swap the stage's presence column between the orb visualizer and an inline chat
+// panel (for keyboard-first / mic-less use). Persisted so it sticks across reloads.
+function setStageView(view) {
+  state.stageView = view === "chat" ? "chat" : "orb";
+  document.body.dataset.stageview = state.stageView;
+  try { localStorage.setItem("stage_view", state.stageView); } catch { /* private mode */ }
+  const on = state.stageView === "chat";
+  if (el.orbChatToggle) {
+    el.orbChatToggle.setAttribute("aria-pressed", on ? "true" : "false");
+    el.orbChatToggle.classList.toggle("active", on);
+    el.orbChatToggle.textContent = on ? "🔮 Orb" : "💬 Chat";
   }
-  el.transcript.scrollTop = el.transcript.scrollHeight;
+  if (on) { renderMessages(); renderAttachStrip(); el.inlineTextInput?.focus(); }
+}
+
+function renderMessages() {
+  // Render the same conversation into every transcript surface (the Chat drawer and
+  // the inline-chat panel). Build fresh nodes per target so copy buttons etc. work.
+  const targets = [el.transcript, el.inlineTranscript].filter(Boolean);
+  for (const target of targets) {
+    target.innerHTML = "";
+    for (const message of state.messages) {
+      const div = document.createElement("div");
+      div.className = `message ${message.role}`;
+      if (message.role === "tool") renderToolMessage(div, message);
+      else if (message.role === "agent") div.append(renderMarkdown(message.content));
+      else div.textContent = message.content;
+      target.append(div);
+    }
+    target.scrollTop = target.scrollHeight;
+  }
 }
 
 // Minimal, XSS-safe markdown: fenced code, headings, lists, and inline
@@ -2810,6 +2879,19 @@ function renderImageRequest(artifact) {
     form.prepend(preview);
   }
   return form;
+}
+
+// Turn gallery item ids the agent passed (sourceImageIds) into uploaded remote URLs
+// usable as generation sources. Non-image and unknown ids are skipped silently.
+async function resolveGallerySourceUrls(ids) {
+  if (!Array.isArray(ids) || !ids.length) return [];
+  const items = await getGalleryItems().catch(() => []);
+  const urls = [];
+  for (const id of ids) {
+    const item = items.find((entry) => entry.id === id && entry.kind === "image");
+    if (item) { try { urls.push(await ensureGalleryRemoteUrl(item)); } catch { /* skip unresolvable source */ } }
+  }
+  return urls;
 }
 
 async function resolveArtifactGalleryUrls(artifact) {

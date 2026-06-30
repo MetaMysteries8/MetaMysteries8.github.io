@@ -1932,3 +1932,186 @@ body[data-uistyle="bolder"] .nav-button.active { box-shadow: inset 0 0 0 1px var
 body[data-uistyle="bolder"] .workspace-mode,
 body[data-uistyle="bolder"] .ws-page-info strong { letter-spacing: -0.01em; }
 body[data-uistyle="bolder"] .orb-blob { filter: url(#orbBlur) drop-shadow(0 0 calc(26px + var(--level) * 80px) rgba(142, 108, 255, calc(0.45 + var(--level) * 0.5))); }
+
+/* ============================================================
+   Mobile / touch layout — phones and small tablets (≤ 720px)
+   Stage becomes a vertical flow; Start/Stop pin to the viewport
+   bottom so they're always reachable instead of buried in a tall
+   stage. Drawers go full-screen. Honors the iOS safe area.
+   ============================================================ */
+@media (max-width: 720px) {
+  html { -webkit-text-size-adjust: 100%; }
+  body { overflow-y: auto; overflow-x: hidden; }
+  .app-shell {
+    width: 100%;
+    margin: 0;
+    padding: 8px 8px calc(140px + env(safe-area-inset-bottom));
+    gap: 10px;
+  }
+
+  /* Two-row header: brand + account on top, full-width scrollable nav below */
+  .app-header {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "brand account" "nav nav";
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 18px;
+  }
+  .brand { grid-area: brand; }
+  .app-nav { grid-area: nav; }
+  .account-strip { grid-area: account; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+  .brand span { display: none; }
+  .app-nav {
+    width: 100%;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .app-nav::-webkit-scrollbar { display: none; }
+  .nav-button { flex: 0 0 auto; padding: 9px 14px; }
+  .account-strip .button { padding: 9px 12px; font-size: 0.86rem; }
+  .account-strip #clearKey { order: 5; font-size: 0.78rem; }
+  .balance-pill { font-size: 0.78rem; max-width: 130px; }
+
+  /* Stage: single-column vertical flow, no centered-grid cramming */
+  .stage.panel,
+  .stage.panel.generating {
+    display: flex;
+    flex-direction: column;
+    grid-template-columns: none;
+    align-items: stretch;
+    gap: 14px;
+    min-height: auto;
+    height: auto;
+    padding: 56px 12px 18px;
+    overflow: visible;
+  }
+  .stage-topbar { position: static; margin-bottom: 2px; }
+
+  .orb,
+  body[data-uistyle="bolder"] .orb { width: min(46vw, 190px); justify-self: center; margin: 4px auto 2px; }
+  .stage.panel.generating .orb { width: min(40vw, 168px); }
+
+  .media-dock { order: 1; }
+  .adaptive-workspace {
+    order: 2;
+    width: 100%;
+    max-height: none;
+    min-height: 220px;
+  }
+
+  /* Pin transport controls to the bottom of the viewport, in a stable two-row
+     bar: a full-width mode segment on top, action buttons below. Fixed height
+     keeps the status line above it from overlapping. */
+  .controls {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    bottom: calc(8px + env(safe-area-inset-bottom));
+    transform: none;
+    max-width: none;
+    width: auto;
+    z-index: 25;
+    justify-content: center;
+    gap: 8px;
+    padding: 8px;
+    box-shadow: var(--shadow-2);
+  }
+  .mode-toggle { flex: 1 1 100%; justify-content: center; }
+  .mode-toggle .mode { flex: 1 1 0; }
+  .controls .button { flex: 1 1 0; padding: 11px 14px; }
+  .realtime-status {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    bottom: calc(118px + env(safe-area-inset-bottom));
+    transform: none;
+    z-index: 25;
+    pointer-events: none;
+    padding: 5px 12px;
+    border-radius: 999px;
+    width: fit-content;
+    margin: 0 auto;
+    background: rgba(7, 8, 18, 0.82);
+    backdrop-filter: blur(10px);
+  }
+
+  /* The drawers own the screen, so the floating transport must yield to them */
+  body:has(.drawer.active) .controls,
+  body:has(.drawer.active) .realtime-status { display: none; }
+
+  /* Full-screen drawers using the dynamic viewport (no iOS URL-bar clipping) */
+  .drawer {
+    top: 8px;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    width: auto;
+    height: auto;
+    max-height: calc(100dvh - 16px);
+    padding: 16px;
+    border-radius: 20px;
+  }
+  .composer { flex-wrap: wrap; }
+  .composer #textInput { flex: 1 1 140px; }
+
+  /* Comfortable touch targets across interactive bits */
+  .button, .nav-button, .mode, .g-btn, .mkw-btn { min-height: 40px; }
+}
+
+@media (max-width: 420px) {
+  .orb { width: min(52vw, 168px); }
+  .controls { gap: 6px; padding: 7px; }
+  .controls .button { padding: 10px 13px; font-size: 0.88rem; }
+  .nav-button { padding: 8px 12px; font-size: 0.9rem; }
+  .stage.panel, .stage.panel.generating { padding: 52px 10px 16px; }
+}
+
+/* Coarse-pointer (touch) devices: drop hover lifts that stick on tap */
+@media (hover: none) {
+  .workspace-card:hover,
+  .gallery-item:hover { transform: none; }
+}
+
+/* ============================================================
+   Inline chat — swaps the orb for a keyboard-first chat panel
+   (toggle in the stage topbar). Mic-less users live here.
+   ============================================================ */
+.stage-topbar-actions { display: flex; align-items: center; gap: 8px; }
+#orbChatToggle.active { color: var(--text); border-color: var(--line-strong); background: rgba(77, 232, 255, 0.12); }
+
+.inline-chat {
+  display: none;
+  flex-direction: column;
+  align-self: stretch;
+  justify-self: stretch;
+  width: 100%;
+  min-height: 320px;
+  max-height: 560px;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.02)), rgba(0, 0, 0, 0.18);
+}
+.inline-chat .inline-transcript {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+}
+.inline-chat .composer { margin-top: 0; }
+.inline-chat .composer .composer-text { flex: 1 1 auto; min-width: 0; }
+
+body[data-stageview="chat"] .orb { display: none; }
+body[data-stageview="chat"] .inline-chat { display: flex; }
+body[data-stageview="chat"] .stage.panel,
+body[data-stageview="chat"] .stage.panel.generating {
+  grid-template-columns: minmax(320px, 0.85fr) minmax(360px, 1fr);
+}
+
+@media (max-width: 720px) {
+  .inline-chat { max-height: 56vh; min-height: 240px; }
+  body[data-stageview="chat"] .inline-chat { order: 0; }
+}
