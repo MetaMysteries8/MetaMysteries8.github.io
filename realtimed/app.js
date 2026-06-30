@@ -106,7 +106,48 @@ const FLAG_DEFAULTS = {
   voiceInterrupt: true,    // barge-in: user speech cuts off the model in realtime
   autosaveUploads: true,   // uploaded images land in the gallery automatically
   camera: false,           // allow attaching live camera frames in realtime
+  saveToDisk: true,        // desktop: mirror generated media to real files
+  allowShell: false,       // desktop: let the agent run shell commands (with approval)
 };
+
+// ---------------------------------------------------------------------------
+// Native (desktop) bridge — progressive enhancement. Inside the Tauri desktop
+// shell, window.__TAURI__ is injected (withGlobalTauri) and we light up the
+// filesystem + shell + local-storage tools. On the web (GitHub Pages) it's null
+// and nothing changes: one codebase, two capability tiers.
+// ---------------------------------------------------------------------------
+const NATIVE = (() => {
+  const t = typeof window !== "undefined" ? window.__TAURI__ : null;
+  const invoke = t && ((t.core && t.core.invoke) || t.invoke);
+  return invoke ? { invoke: (cmd, args) => invoke(cmd, args) } : null;
+})();
+function nativeAvailable() { return !!NATIVE; }
+async function nativeInvoke(cmd, args) {
+  if (!NATIVE) throw new Error("Native bridge unavailable (this is the web build).");
+  return NATIVE.invoke(cmd, args || {});
+}
+
+// Reflect desktop vs web in the Config panel and show the active workspace folder.
+async function renderDesktopStatus() {
+  if (!el.desktopStatus) return;
+  if (!nativeAvailable()) {
+    el.desktopStatus.textContent = "Web mode — download the desktop app for local files, a real coding agent, and shell access.";
+    el.desktopControls?.classList.add("hidden");
+    return;
+  }
+  el.desktopControls?.classList.remove("hidden");
+  let root = "";
+  try { root = await nativeInvoke("workspace_root"); } catch { /* not chosen yet */ }
+  el.desktopStatus.textContent = root
+    ? `Desktop mode — full features on. Workspace: ${root}`
+    : "Desktop mode — choose a workspace folder to store files and generated media.";
+}
+
+async function pickWorkspaceFolder() {
+  if (!nativeAvailable()) return;
+  try { await nativeInvoke("pick_workspace"); await renderDesktopStatus(); }
+  catch (error) { addMessage("system", `Could not set workspace folder: ${(error && error.message) || error}`); }
+}
 
 function flag(name) {
   return state.flags[name] ?? FLAG_DEFAULTS[name] ?? false;
@@ -160,6 +201,9 @@ const el = {
   inlineAttachImage: document.querySelector("#inlineAttachImage"),
   inlineAttachStrip: document.querySelector("#inlineAttachStrip"),
   chatToggle: document.querySelector("#chatToggle"),
+  desktopStatus: document.querySelector("#desktopStatus"),
+  desktopControls: document.querySelector("#desktopControls"),
+  pickWorkspace: document.querySelector("#pickWorkspace"),
   cameraToggle: document.querySelector("#cameraToggle"),
   cameraPreview: document.querySelector("#cameraPreview"),
   clearConversation: document.querySelector("#clearConversation"),
@@ -391,6 +435,10 @@ function bindEvents() {
   wireFlag("flagVoiceInterrupt", "voiceInterrupt");
   wireFlag("flagAutosaveUploads", "autosaveUploads");
   wireFlag("flagCamera", "camera");
+  wireFlag("flagSaveToDisk", "saveToDisk");
+  wireFlag("flagAllowShell", "allowShell");
+  el.pickWorkspace?.addEventListener("click", pickWorkspaceFolder);
+  renderDesktopStatus();
   window.addEventListener("message", handleWidgetMessage);
   el.navButtons.forEach((button) => { if (button.dataset.drawer) button.addEventListener("click", () => toggleDrawer(button.dataset.drawer)); });
   el.drawerCloses.forEach((button) => button.addEventListener("click", closeDrawers));
@@ -1371,6 +1419,12 @@ async function runTool(name, args, realtimeCallId) {
     else if (name === "list_gallery") result = await listGalleryForAgent();
     else if (name === "manage_gallery") result = await manageGallery(args, toolId);
     else if (name === "use_gallery_sources") result = await useGallerySources(args, toolId);
+    else if (name === "write_file") result = await nativeWriteFile(args);
+    else if (name === "read_file") result = await nativeReadFile(args);
+    else if (name === "list_dir") result = await nativeListDir(args);
+    else if (name === "run_command") result = await nativeRunCommand(args);
+    else if (name === "open_path") result = await nativeOpenPath(args);
+    else if (name === "save_media_to_disk") result = await nativeSaveMediaToDisk(args);
     // Models often spell the tool differently (jibberlink, gibber_link, start_jibber...).
     else if (/[gj]ibber.?link|[gj]ibber/i.test(name)) result = await activateGibberlink(args.message || args.text || "");
     else if (/network.?(issue|error|problem)|diagnos|api.?error/i.test(name)) result = await diagnoseError();
@@ -1468,51 +1522,59 @@ async function runMediaGeneration(kind, prompt, model, toolId, options = {}) {
   const startedAt = Date.now();
   const ticker = setInterval(() => {
     const secs = Math.round((Date.now() - startedAt) / 1000);
-    genJobUpdate(jobId, { detail: `Generating with ${model}… ${secs}s` });
-  }, 3000);
+    genJobDetail(jobId, `Generating with ${model}… ${secs}s`);
+  }, 1000);
   try {
     let lastDetail = "";
     for (let attempt = 1; attempt <= MAX_TRIES; attempt += 1) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      // failure is left null on success; otherwise { error, status, blocked, deterministic }.
+      let failure = null;
       try {
         const res = await fetch(url, { headers: authHeaders(), signal: controller.signal });
         if (res.ok) {
           const blob = await res.blob();
-          refreshBalance();
-          const item = await saveGalleryItem({ kind, prompt, model, blob, remoteUrl: res.url });
-          genJobEnd(jobId, `${capitalize(kind)} saved to gallery.`);
-          return { ok: true, galleryId: item.id, kind, prompt, model };
-        }
-        const failure = await readApiFailure(res, `${capitalize(kind)} generation failed.`);
-        lastDetail = failure.error;
-        recordApiError(`${kind} generation`, failure.error, res.status, failure.raw);
-        // Deterministic — won't change on retry, so don't waste Pollen retrying.
-        const deterministic = failure.blocked || [400, 401, 402, 403].includes(res.status);
-        if (deterministic || attempt === MAX_TRIES) {
-          // Only surface a chat message at the terminal decision — not per retry.
-          const message = deterministic ? failure.error : `${failure.error} (gave up after ${attempt} tries to avoid wasting Pollen — ask me to diagnose it).`;
-          addMessage("system", message);
-          playSound("error");
-          genJobEnd(jobId, failure.blocked ? "Blocked." : `Failed (tried ${attempt}×).`);
-          return { error: message, status: failure.status, blocked: failure.blocked };
+          // Pollinations sometimes returns 200 with a NON-media body — an error page,
+          // a JSON message, or a near-empty placeholder ("generated weird"). Saving
+          // that yields a broken gallery item, so treat it as a (retryable) failure.
+          const badReason = badMediaBlob(kind, blob);
+          if (!badReason) {
+            refreshBalance();
+            const item = await saveGalleryItem({ kind, prompt, model, blob, remoteUrl: res.url });
+            genJobEnd(jobId, `${capitalize(kind)} saved to gallery.`);
+            return { ok: true, galleryId: item.id, kind, prompt, model };
+          }
+          const snippet = await blobTextSnippet(blob);
+          const friendly = classifyApiError(200, snippet) || badReason;
+          recordApiError(`${kind} generation`, friendly, 200, snippet);
+          failure = { error: friendly, status: 200, blocked: /copyright|content policy/i.test(friendly), deterministic: false };
+        } else {
+          const f = await readApiFailure(res, `${capitalize(kind)} generation failed.`);
+          recordApiError(`${kind} generation`, f.error, res.status, f.raw);
+          failure = { error: f.error, status: f.status, blocked: f.blocked, deterministic: f.blocked || [400, 401, 402, 403].includes(res.status) };
         }
       } catch (error) {
         const aborted = error && error.name === "AbortError";
-        lastDetail = aborted ? `timed out after ${Math.round(timeoutMs / 1000)}s` : ((error && error.message) || "network failure");
-        recordApiError(`${kind} generation`, lastDetail, aborted ? "timeout" : "network", "");
-        if (attempt === MAX_TRIES) {
-          const message = `${capitalize(kind)} generation failed after ${MAX_TRIES} tries — ${lastDetail}. Stopped so it doesn't keep burning Pollen. Check your connection and try again, or ask me to diagnose it.`;
-          addMessage("system", message);
-          playSound("error");
-          genJobEnd(jobId, aborted ? "Timed out." : "Errored.");
-          return { error: message };
-        }
+        const why = aborted ? `timed out after ${Math.round(timeoutMs / 1000)}s` : ((error && error.message) || "network failure");
+        recordApiError(`${kind} generation`, why, aborted ? "timeout" : "network", "");
+        failure = { error: why, status: aborted ? "timeout" : "network", blocked: false, deterministic: false };
       } finally {
         clearTimeout(timeout);
       }
+      // Reached only on failure (success returned above).
+      lastDetail = failure.error;
+      if (failure.deterministic || attempt === MAX_TRIES) {
+        const message = failure.deterministic
+          ? failure.error
+          : `${capitalize(kind)} generation failed after ${attempt} tries — ${failure.error}. Stopped so it doesn't keep wasting Pollen; ask me to diagnose it.`;
+        addMessage("system", message);
+        playSound("error");
+        genJobEnd(jobId, failure.blocked ? "Blocked." : `Failed (tried ${attempt}×).`);
+        return { error: message, status: failure.status, blocked: failure.blocked };
+      }
       // Backoff before the next attempt; surface the retry on the tool event.
-      updateToolEvent(toolId, "running", `Hiccup (${lastDetail || "error"}). Retry ${attempt + 1}/${MAX_TRIES}…`);
+      updateToolEvent(toolId, "running", `Hiccup (${failure.error}). Retry ${attempt + 1}/${MAX_TRIES}…`);
       await new Promise((resolve) => setTimeout(resolve, 700 * attempt));
     }
     // Unreachable (loop always returns on the last attempt), but keep the job tidy.
@@ -1688,10 +1750,10 @@ async function buildWidget(args, toolId) {
   updateToolEvent(toolId, "running", `Building widget "${title}" with ${model}.`);
   const jobId = genJobStart({ kind: "widget", title: "Widget", status: "active" });
   genJobTerminal(jobId, [`$ widget-builder --model ${model}`, "Designing interactive widget...", `Spec: ${spec.slice(0, 160)}`], false);
-  const assets = await galleryAssetsFromIds(args.galleryIds || args.sources || []);
+  const assets = await galleryAssetsFor(args);
   const userParts = [spec];
   if (args.data !== undefined) userParts.push(`\n\nUse this JSON data:\n${JSON.stringify(args.data).slice(0, 6000)}`);
-  if (assets.length) userParts.push(`\n\nWidgetStore.assets contains ${assets.length} attached gallery item(s): ${assets.map((a, i) => `[${i}] ${a.kind} "${a.name}"`).join(", ")}. Reference them via WidgetStore.assets[i].url.`);
+  if (assets.length) userParts.push(`\n\nWidgetStore.assets has ${assets.length} attached gallery item(s) — BUILD THE WIDGET TO ACTUALLY DISPLAY/USE THEM: ${assets.map((a, i) => `[${i}] ${a.kind} "${a.name}"`).join(", ")}. Read them at runtime via WidgetStore.assets (e.g. WidgetStore.assets.forEach(a => ... a.url)) and set them as the src of <img>/<video>/<audio>. Do not hardcode the list; iterate WidgetStore.assets so it stays correct.`);
   const result = await postJson("/v1/chat/completions", {
     model,
     messages: [
@@ -1729,8 +1791,10 @@ async function editWidget(args, toolId) {
   updateToolEvent(toolId, "running", `Editing widget "${artifact.title}" with ${model}.`);
   const jobId = genJobStart({ kind: "widget", title: "Edit widget", status: "active" });
   genJobTerminal(jobId, [`$ widget-editor --model ${model}`, `Editing: ${artifact.title}`, `Change: ${changes.slice(0, 160)}`], false);
-  const newAssets = await galleryAssetsFromIds(args.addGalleryIds || []);
-  const assets = [...(artifact.assets || []), ...newAssets];
+  const newAssets = await galleryAssetsFor({ galleryIds: args.addGalleryIds || [], galleryFilter: args.addGalleryFilter, galleryLimit: args.galleryLimit });
+  // Drop any that the widget already has, so re-attaching the same kind doesn't dupe.
+  const existingIds = new Set((artifact.assets || []).map((a) => a.id));
+  const assets = [...(artifact.assets || []), ...newAssets.filter((a) => !existingIds.has(a.id))];
   const userParts = [
     `Current widget document:\n\`\`\`html\n${String(artifact.content || "").slice(0, 40000)}\n\`\`\``,
     `\n\nApply these changes: ${changes}`,
@@ -1795,9 +1859,33 @@ async function galleryAssetsFromIds(ids) {
     const item = items.find((entry) => entry.id === id);
     if (!item || item.kind === "project") continue;
     try {
-      const url = await blobToDataUrl(item.blob);
-      assets.push({ id: item.id, kind: item.kind, name: shortPrompt(item.prompt), prompt: item.prompt, url });
+      assets.push(await galleryItemToAsset(item));
     } catch { /* skip unreadable asset */ }
+  }
+  return assets;
+}
+
+async function galleryItemToAsset(item) {
+  const url = await blobToDataUrl(item.blob);
+  return { id: item.id, kind: item.kind, name: shortPrompt(item.prompt), prompt: item.prompt, url };
+}
+
+// Resolve the gallery media a widget should embed, from explicit ids AND/OR a kind
+// filter ("image"/"video"/"audio"/"all"). The filter path lets the model attach media
+// from a plain request ("use my photos") without juggling exact ids, which it's bad
+// at. Returns self-contained data-URL assets, newest first, de-duplicated.
+async function galleryAssetsFor(args) {
+  const assets = await galleryAssetsFromIds(args.galleryIds || args.sources || []);
+  const filter = String(args.galleryFilter || args.galleryKind || "").toLowerCase().trim();
+  if (filter && filter !== "none") {
+    const want = filter === "all" || filter === "media" ? ["image", "video", "audio"] : [filter.replace(/s$/, "").replace("photo", "image").replace("music", "audio")];
+    const limit = Math.max(1, Math.min(40, Number(args.galleryLimit) || 12));
+    const items = await getGalleryItems().catch(() => []);
+    const have = new Set(assets.map((a) => a.id));
+    const picked = items.filter((it) => want.includes(it.kind) && !have.has(it.id)).slice(0, limit);
+    for (const item of picked) {
+      try { assets.push(await galleryItemToAsset(item)); } catch { /* skip unreadable */ }
+    }
   }
   return assets;
 }
@@ -1872,14 +1960,16 @@ function toolDefinitions() {
     { name: "network_issue", description: "Diagnose the most recent API or generation error. Returns what failed, the exact status/message the server returned, plus a LIVE connectivity check (is the API reachable, are we online, is a key connected). Call this whenever a tool returns an error, a generation fails, or the user says something 'failed', 'isn't working', or 'hung' — then read the result and help the user fix it (rephrase for copyright/policy blocks, reconnect for auth, top up for balance, retry for a transient network/timeout).", parameters: { type: "object", properties: {} } },
     {
       name: "build_widget",
-      description: "Build a CUSTOM interactive widget/mini-app on the adaptive canvas by delegating to the coder model. This is the DEFAULT for anything visual or interactive that isn't plain info: charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, bespoke visualizations. The widget is sandboxed HTML rendered live, can persist its own data (a WidgetStore the user keeps across reloads/saves/downloads), and can embed gallery media. Pass galleryIds to let the widget use saved images/video/audio. Reserve show_workspace for plain note/table/metrics/code; use build_widget whenever interactivity, charts, or custom design help.",
+      description: "Build a CUSTOM interactive widget/mini-app on the adaptive canvas by delegating to the coder model. This is the DEFAULT for anything visual or interactive that isn't plain info: charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, bespoke visualizations, and media galleries/slideshows/players. The widget is sandboxed HTML rendered live, can persist its own data (a WidgetStore the user keeps across reloads/saves/downloads), and can embed saved gallery media. To USE saved images/video/audio in a widget (slideshow, gallery, moodboard, player), set galleryFilter to the kind ('image'/'video'/'audio'/'all') — the most recent matching items are attached automatically as WidgetStore.assets; OR pass specific galleryIds if you already know them. Reserve show_workspace for plain note/table/metrics/code; use build_widget whenever interactivity, charts, custom design, or showing saved media helps.",
       parameters: {
         type: "object",
         properties: {
           title: { type: "string", description: "Short widget title" },
-          spec: { type: "string", description: "Detailed description of the widget/mini-app and how it should look, behave, and persist data" },
+          spec: { type: "string", description: "Detailed description of the widget/mini-app and how it should look, behave, and persist data. If it shows media, say so (e.g. 'a slideshow of the attached gallery images')." },
           data: { type: "array", description: "Optional structured data the widget should seed from", items: { type: "object", additionalProperties: true } },
-          galleryIds: { type: "array", items: { type: "string" }, description: "Gallery item ids (images/video/audio) to embed as usable assets in the widget. Call list_gallery first to get ids." },
+          galleryIds: { type: "array", items: { type: "string" }, description: "Specific gallery item ids to embed as assets. Optional — prefer galleryFilter when the user just wants 'my images/videos/music'. Call list_gallery to get ids if you need specific ones." },
+          galleryFilter: { type: "string", enum: ["image", "video", "audio", "all"], description: "Attach the most recent saved gallery items of this kind as WidgetStore.assets, no ids required. Use this whenever the user wants a widget that shows/uses their saved media." },
+          galleryLimit: { type: "integer", minimum: 1, maximum: 40, description: "How many items to attach when using galleryFilter (default 12)." },
         },
         required: ["spec"],
       },
@@ -1892,7 +1982,8 @@ function toolDefinitions() {
         properties: {
           workspaceId: { type: "string", description: "Workspace id of the widget to edit (optional; defaults to the most recent widget)" },
           changes: { type: "string", description: "What to change, fix, add, or remove" },
-          addGalleryIds: { type: "array", items: { type: "string" }, description: "Additional gallery item ids to embed as new assets" },
+          addGalleryIds: { type: "array", items: { type: "string" }, description: "Additional specific gallery item ids to embed as new assets" },
+          addGalleryFilter: { type: "string", enum: ["image", "video", "audio", "all"], description: "Attach the most recent saved gallery items of this kind as new assets (no ids needed) — use when the user asks the widget to also show their saved media." },
         },
         required: ["changes"],
       },
@@ -2007,6 +2098,18 @@ function toolDefinitions() {
       parameters: { type: "object", properties: {} },
     });
   }
+  // Desktop-only capabilities: real filesystem + shell, so the agent can build and
+  // run actual projects on disk. Absent on the web build, so the web app is unchanged.
+  if (nativeAvailable()) {
+    tools.push(
+      { name: "write_file", description: "DESKTOP. Write a UTF-8 text file into the local project workspace folder (parent dirs are created). Use workspace-relative paths like src/app.py. Build REAL runnable projects on disk with this during coding tasks.", parameters: objectParams({ path: "Workspace-relative file path, e.g. src/index.js", content: "Full file contents" }, ["path", "content"]) },
+      { name: "read_file", description: "DESKTOP. Read a UTF-8 text file from the workspace folder.", parameters: objectParams({ path: "Workspace-relative file path" }, ["path"]) },
+      { name: "list_dir", description: "DESKTOP. List files and folders under a workspace-relative path (omit path for the workspace root).", parameters: objectParams({ path: "Workspace-relative folder path (optional)" }, []) },
+      { name: "run_command", description: "DESKTOP. Run a shell command in the workspace folder (install, build, run, test, git). The user approves each command. Returns { code, stdout, stderr }. Use this to actually run the projects you write.", parameters: objectParams({ command: "Command line to run, e.g. 'npm install' or 'python main.py'" }, ["command"]) },
+      { name: "open_path", description: "DESKTOP. Open/reveal a workspace file or folder (omit path for the workspace root) in the OS file manager or its default app.", parameters: objectParams({ path: "Workspace-relative path (optional)" }, []) },
+      { name: "save_media_to_disk", description: "DESKTOP. Export a gallery item (by id) to a real file in the workspace's media folder so code you write can reference it by path. Generated media already auto-saves to disk; use this to place a specific item. Returns the saved path.", parameters: objectParams({ id: "Gallery item id", path: "Optional workspace-relative destination" }, ["id"]) },
+    );
+  }
   return tools;
 }
 
@@ -2036,7 +2139,14 @@ function objectParams(properties, required) {
 }
 
 function systemPrompt() {
-  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. For plain informational structure, call show_workspace with layout note, table, metrics, or code (real structured data, not prose). For ANYTHING interactive or visual — charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, custom visualizations — call build_widget, which generates a live sandboxed widget on the canvas. Widgets can persist their own data (a WidgetStore the user keeps) and embed gallery media: pass galleryIds to give a widget images/video/audio to use. To fix, restyle, or extend a widget the user already has, call edit_widget with the change; call save_widget to keep one in their library. To show source code or markup, use layout "code". This app works identically whether the user TALKS OR TYPES — many users have no microphone, so you must be fully capable over text chat, including image editing. IMAGE EDITING / IMAGE-TO-VIDEO: to edit, restyle, fix, or vary an existing or user-uploaded image, call create_image with sourceImageIds set to that image's gallery id and put the change in prompt — this is a one-step edit. To animate an image into a video, call create_video with sourceImageIds. The user can upload images directly in chat; uploads are auto-saved to the gallery, so if you are unsure of an id, call list_gallery first to find it (newest entries are the recently uploaded ones). Only when no usable image exists yet (none uploaded and none in the gallery) call request_source_images to collect one. use_gallery_sources is an alternative when working from several gallery selections. Call create_image with no sourceImageIds for a brand-new image. You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink; ask the human's consent first unless they already requested it. You have a persistent long-term memory across sessions: call remember to store a durable fact about the user and forget to remove one — only durable things, not one-off chatter. You can manage the user's saved media with manage_gallery. If any tool returns an error, a generation fails, or the user says something "failed", "isn't working", or "hung", call network_issue to read the actual server error and a live connectivity check, then explain the cause and the fix in plain language and offer to retry — don't silently ignore failures. Note that failed generations already retry up to 3 times automatically and then stop to avoid wasting the user's Pollen; do not spam more generations after a hard failure. Only end the live session (end_conversation) when the user explicitly asks to stop, end, or hang up — never on your own initiative. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."${memoryPromptSection()}`;
+  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. For plain informational structure, call show_workspace with layout note, table, metrics, or code (real structured data, not prose). For ANYTHING interactive or visual — charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, custom visualizations — call build_widget, which generates a live sandboxed widget on the canvas. Widgets can persist their own data (a WidgetStore the user keeps) and embed the user's saved gallery media. To make a widget that shows or uses saved media (a slideshow, image gallery, moodboard, audio/video player), call build_widget with galleryFilter set to the kind ("image"/"video"/"audio"/"all") — the recent matching items are attached automatically, so you do NOT need exact ids; only pass galleryIds when you already have specific ones. To fix, restyle, or extend a widget the user already has, call edit_widget with the change; call save_widget to keep one in their library. To show source code or markup, use layout "code". This app works identically whether the user TALKS OR TYPES — many users have no microphone, so you must be fully capable over text chat, including image editing. IMAGE EDITING / IMAGE-TO-VIDEO: to edit, restyle, fix, or vary an existing or user-uploaded image, call create_image with sourceImageIds set to that image's gallery id and put the change in prompt — this is a one-step edit. To animate an image into a video, call create_video with sourceImageIds. The user can upload images directly in chat; uploads are auto-saved to the gallery, so if you are unsure of an id, call list_gallery first to find it (newest entries are the recently uploaded ones). Only when no usable image exists yet (none uploaded and none in the gallery) call request_source_images to collect one. use_gallery_sources is an alternative when working from several gallery selections. Call create_image with no sourceImageIds for a brand-new image. You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink; ask the human's consent first unless they already requested it. You have a persistent long-term memory across sessions: call remember to store a durable fact about the user and forget to remove one — only durable things, not one-off chatter. You can manage the user's saved media with manage_gallery. If any tool returns an error, a generation fails, or the user says something "failed", "isn't working", or "hung", call network_issue to read the actual server error and a live connectivity check, then explain the cause and the fix in plain language and offer to retry — don't silently ignore failures. Note that failed generations already retry up to 3 times automatically and then stop to avoid wasting the user's Pollen; do not spam more generations after a hard failure. Only end the live session (end_conversation) when the user explicitly asks to stop, end, or hang up — never on your own initiative. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."${nativeNote()}${memoryPromptSection()}`;
+}
+
+// Extra system guidance only present in the desktop build, where the filesystem and
+// shell tools exist. Keeps the web build's prompt unchanged.
+function nativeNote() {
+  if (!nativeAvailable()) return "";
+  return " DESKTOP MODE: you are running in the local desktop app with real filesystem and shell access. For coding tasks build ACTUAL projects on disk: write_file to create files in the workspace, read_file/list_dir to inspect, run_command to install/build/run/test them (the user approves each command), and open_path to reveal results. Generated images/audio/video are saved as real files under the workspace media/ folder — reference those local paths in the code you write (e.g. an HTML page that loads ./media/...). Prefer writing runnable files to disk over inline sandboxed widgets when the user wants a real, runnable app or to combine code with generated media.";
 }
 
 function memoryPromptSection() {
@@ -2128,6 +2238,27 @@ async function failResponse(res, fallback) {
   playSound("error");
   // Per-job tiles are ended by their own callers; nothing global to hide here.
   return { error: message, status: res.status, blocked: /copyright|content policy/i.test(friendly) };
+}
+
+// Detect a "successful" (200) media response that isn't actually usable media —
+// an error page, a JSON message, or a near-empty file. Returns a reason string when
+// the blob is bad, or null when it looks like real media. Avoids saving broken items.
+function badMediaBlob(kind, blob) {
+  if (!blob || blob.size < 512) return `${capitalize(kind)} came back empty — the model returned no usable ${kind}.`;
+  const type = String(blob.type || "").toLowerCase();
+  const expected = kind === "image" ? "image/" : kind === "video" ? "video/" : "audio/";
+  // Accept the right media type, or an unlabeled binary (some endpoints omit it).
+  if (!type || type.startsWith(expected) || type === "application/octet-stream" || type === "binary/octet-stream") return null;
+  return `${capitalize(kind)} came back as ${blob.type} instead of ${kind} — the model returned a bad result.`;
+}
+
+// Pull a short text snippet from a non-media blob so we can show/​classify its reason.
+async function blobTextSnippet(blob) {
+  const type = String(blob.type || "").toLowerCase();
+  if (type.includes("text") || type.includes("json") || type.includes("html") || type.includes("xml")) {
+    try { return (await blob.text()).slice(0, 400); } catch { return ""; }
+  }
+  return "";
 }
 
 // Read + classify a failed response WITHOUT side effects (no chat message, no sound).
@@ -3002,6 +3133,10 @@ function renderNoteBody(content) {
 
 function renderTable(data) {
   data = normalizeRows(data);
+  // Wrap in a scroll container so a long list (e.g. the whole gallery) scrolls
+  // inside the card instead of being clipped by the card's overflow:hidden.
+  const scroll = document.createElement("div");
+  scroll.className = "table-scroll";
   const table = document.createElement("table");
   table.className = "workspace-table";
   const keys = [...new Set(data.flatMap((row) => Object.keys(row || {})))].slice(0, 5);
@@ -3024,7 +3159,8 @@ function renderTable(data) {
     tbody.append(tr);
   });
   table.append(thead, tbody);
-  return table;
+  scroll.append(table);
+  return scroll;
 }
 
 function normalizeRows(data) {
@@ -3236,6 +3372,17 @@ function genJobUpdate(id, patch = {}) {
   renderGenDock();
 }
 
+// Update ONLY a tile's status line in place — no full dock re-render, so the loader
+// animations don't restart and the elapsed counter ticks smoothly (immersion intact).
+function genJobDetail(id, detail) {
+  const job = state.genJobs.find((j) => j.id === id);
+  if (!job) return;
+  job.detail = detail;
+  const node = el.genDock.querySelector(`[data-job-id="${id}"] .gen-tile-status`);
+  if (node) node.textContent = detail;
+  else renderGenDock();
+}
+
 function genJobTerminal(id, lines, done) {
   const job = state.genJobs.find((j) => j.id === id);
   if (!job) return;
@@ -3279,6 +3426,7 @@ function renderGenDock() {
 function buildGenTile(job) {
   const tile = document.createElement("div");
   tile.className = `gen-tile ${job.kind}-loader ${job.status}`;
+  tile.dataset.jobId = job.id;
   const tag = document.createElement("span");
   tag.className = "gen-tile-tag";
   tag.textContent = job.title || labelForKind(job.kind);
@@ -3697,9 +3845,89 @@ async function saveGalleryItem({ kind, prompt, model, blob, remoteUrl, language,
   if (language) item.language = language;
   if (filename) item.filename = filename;
   await putGalleryItem(item, db);
+  // Desktop: also persist the blob as a real file so it survives outside the cache
+  // and code can reference it by path. Best-effort — IndexedDB remains the index.
+  if (nativeAvailable() && flag("saveToDisk")) {
+    try { item.localPath = await mirrorItemToDisk(item); await putGalleryItem(item, db); }
+    catch (error) { console.warn("disk mirror failed", error); }
+  }
   await renderGallery();
   playSound("genComplete");
   return item;
+}
+
+// ---------------------------------------------------------------------------
+// Native tool handlers (desktop only). Each guards on nativeAvailable() and
+// returns the same {ok|error} shape the rest of runTool uses, so both realtime
+// and chat modes pick them up. The Rust side confines all paths to the workspace.
+// ---------------------------------------------------------------------------
+async function mirrorItemToDisk(item) {
+  const bytes = Array.from(new Uint8Array(await item.blob.arrayBuffer()));
+  const ext = item.filename ? item.filename.split(".").pop() : extensionFor(item.kind, item.blob.type);
+  const base = item.filename || `${item.kind}-${item.id}.${ext}`;
+  return nativeInvoke("save_binary", { path: `media/${base}`, bytes });
+}
+
+async function nativeWriteFile(args) {
+  if (!nativeAvailable()) return { error: "Filesystem tools require the desktop app." };
+  const path = String(args.path || "").trim();
+  if (!path) return { error: "No file path given." };
+  try {
+    const saved = await nativeInvoke("write_text_file", { path, contents: String(args.content ?? args.contents ?? "") });
+    return { ok: true, path: saved };
+  } catch (error) { return { error: `write_file failed: ${(error && error.message) || error}` }; }
+}
+
+async function nativeReadFile(args) {
+  if (!nativeAvailable()) return { error: "Filesystem tools require the desktop app." };
+  try {
+    const content = await nativeInvoke("read_text_file", { path: String(args.path || "") });
+    return { ok: true, path: args.path, content: String(content).slice(0, 60000) };
+  } catch (error) { return { error: `read_file failed: ${(error && error.message) || error}` }; }
+}
+
+async function nativeListDir(args) {
+  if (!nativeAvailable()) return { error: "Filesystem tools require the desktop app." };
+  try {
+    const entries = await nativeInvoke("list_dir", { path: String(args.path || "") });
+    return { ok: true, path: args.path || ".", entries };
+  } catch (error) { return { error: `list_dir failed: ${(error && error.message) || error}` }; }
+}
+
+async function nativeRunCommand(args) {
+  if (!nativeAvailable()) return { error: "Shell commands require the desktop app." };
+  if (!flag("allowShell")) return { error: "Shell commands are disabled. Turn on 'Let the agent run commands' in Config to allow them." };
+  const command = String(args.command || "").trim();
+  if (!command) return { error: "No command given." };
+  // Explicit human approval for every command — the agent never runs shell silently.
+  const approved = typeof window !== "undefined" && window.confirm
+    ? window.confirm(`The agent wants to run this command:\n\n${command}\n\nAllow it?`)
+    : false;
+  if (!approved) return { error: "User declined to run the command." };
+  try {
+    const r = await nativeInvoke("run_command", { command });
+    return { ok: (r.code ?? 0) === 0, code: r.code, stdout: String(r.stdout || "").slice(0, 6000), stderr: String(r.stderr || "").slice(0, 4000) };
+  } catch (error) { return { error: `run_command failed: ${(error && error.message) || error}` }; }
+}
+
+async function nativeOpenPath(args) {
+  if (!nativeAvailable()) return { error: "This requires the desktop app." };
+  try { const opened = await nativeInvoke("open_path", { path: String(args.path || "") }); return { ok: true, opened }; }
+  catch (error) { return { error: `open_path failed: ${(error && error.message) || error}` }; }
+}
+
+async function nativeSaveMediaToDisk(args) {
+  if (!nativeAvailable()) return { error: "This requires the desktop app." };
+  const items = await getGalleryItems().catch(() => []);
+  const item = items.find((entry) => entry.id === args.id);
+  if (!item || !item.blob) return { error: "No gallery item with that id (call list_gallery for ids)." };
+  try {
+    const bytes = Array.from(new Uint8Array(await item.blob.arrayBuffer()));
+    const ext = item.filename ? item.filename.split(".").pop() : extensionFor(item.kind, item.blob.type);
+    const dest = String(args.path || `media/${item.kind}-${item.id}.${ext}`);
+    const saved = await nativeInvoke("save_binary", { path: dest, bytes });
+    return { ok: true, path: saved };
+  } catch (error) { return { error: `save_media_to_disk failed: ${(error && error.message) || error}` }; }
 }
 
 async function putGalleryItem(item, db) {

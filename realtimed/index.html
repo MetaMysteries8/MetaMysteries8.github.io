@@ -124,6 +124,16 @@
           <label class="toggle"><input id="flagAutosaveUploads" type="checkbox"><span>Auto-save uploaded images to the gallery</span></label>
           <label class="toggle"><input id="flagCamera" type="checkbox"><span>Allow live camera vision in realtime</span></label>
         </div>
+
+        <h3 class="config-section">Desktop</h3>
+        <p id="desktopStatus" class="desktop-status">Web mode — download the desktop app for local files, a real coding agent, and shell access.</p>
+        <div id="desktopControls" class="desktop-controls hidden">
+          <button id="pickWorkspace" class="button ghost small" type="button">Choose workspace folder…</button>
+          <div class="toggle-list">
+            <label class="toggle"><input id="flagSaveToDisk" type="checkbox"><span>Save generated media to the workspace folder as real files</span></label>
+            <label class="toggle"><input id="flagAllowShell" type="checkbox"><span>Let the agent run shell commands (you approve each one)</span></label>
+          </div>
+        </div>
         <label>Mic noise gate (barge-in sensitivity)
           <input id="bargeGate" type="range" min="1" max="35" value="9">
         </label>

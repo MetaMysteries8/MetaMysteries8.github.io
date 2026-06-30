@@ -343,10 +343,12 @@ h2 { margin-bottom: 16px; }
 .workspace-svg-chart .chart-grid line { stroke: rgba(255, 255, 255, 0.08); stroke-width: 0.5; }
 .workspace-svg-chart .chart-area { fill: rgba(77, 232, 255, 0.1); stroke: none; }
 
-.workspace-table { width: 100%; border-collapse: collapse; overflow: hidden; border-radius: 14px; }
+.table-scroll { max-height: 360px; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--line); border-radius: 14px; }
+.workspace-table { width: 100%; border-collapse: collapse; overflow: hidden; }
 .workspace-table th, .workspace-table td { padding: 10px; border-bottom: 1px solid var(--line); text-align: left; }
-.workspace-table th { color: var(--text); background: rgba(255, 255, 255, 0.06); }
+.workspace-table th { position: sticky; top: 0; z-index: 1; color: var(--text); background: #161a2e; }
 .workspace-table td { color: var(--muted); }
+.workspace-table tr:last-child td { border-bottom: 0; }
 
 .checklist { display: grid; gap: 6px; padding: 0; margin: 0; list-style: none; }
 .checklist li { display: flex; align-items: center; gap: 11px; color: var(--muted); cursor: pointer; padding: 8px; border-radius: 12px; transition: background var(--t-fast); }
@@ -962,6 +964,7 @@ body { overflow: hidden; }
 .drawer .transcript,
 .drawer .gallery,
 .drawer .mcp-list {
+  flex: 1 1 auto;   /* fill the remaining drawer height so the list itself scrolls */
   min-height: 0;
   max-height: none;
   overflow: auto;
@@ -1703,7 +1706,7 @@ input:focus, select:focus, textarea:focus { box-shadow: var(--ring), inset 0 1px
 .ws-viewport .workspace-card.widget .widget-stage,
 .ws-viewport .project-viewer .viewer-stage,
 .ws-viewport .code-block .code-view { flex: 1 1 auto; min-height: 160px; height: auto; max-height: none; resize: none; }
-.ws-viewport .workspace-table { max-height: 100%; }
+.ws-viewport .table-scroll { max-height: 100%; }
 
 @media (max-width: 920px) {
   .ws-viewport .workspace-card.widget .widget-stage { min-height: 320px; }
@@ -1734,8 +1737,10 @@ input:focus, select:focus, textarea:focus { box-shadow: var(--ring), inset 0 1px
   overflow: hidden;
   background: #05070d;
 }
+/* contain (not cover) so images/videos show in full at their true aspect ratio —
+   never cropped or stretched/squished to fill the box. */
 .g-media img,
-.g-media > video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.g-media > video { width: 100%; height: 100%; object-fit: contain; display: block; }
 .g-openable { cursor: zoom-in; transition: filter var(--t-fast); }
 .g-openable:hover { filter: brightness(1.08); }
 .g-play {
@@ -2162,3 +2167,8 @@ body[data-stageview="chat"] .stage.panel.generating {
   .inline-chat { max-height: 56vh; min-height: 240px; }
   body[data-stageview="chat"] .inline-chat { order: 0; }
 }
+
+/* Desktop (Tauri) status block in Config */
+.desktop-status { color: var(--muted); font-size: 0.86rem; line-height: 1.5; margin: 2px 0 10px; }
+.desktop-controls { display: grid; gap: 10px; }
+.desktop-controls.hidden { display: none; }
