@@ -964,11 +964,15 @@ body { overflow: hidden; }
 .drawer .transcript,
 .drawer .gallery,
 .drawer .mcp-list {
-  flex: 1 1 auto;   /* fill the remaining drawer height so the list itself scrolls */
+  flex: 1 1 0;      /* basis 0: take exactly the leftover height, don't size to content */
   min-height: 0;
   max-height: none;
-  overflow: auto;
+  overflow-y: auto;
 }
+/* Never stretch/compress gallery rows to "fit" — rows are content-height and the
+   grid scrolls once it overflows, so top thumbnails stay proportioned. */
+.drawer .gallery { align-content: start; grid-auto-rows: max-content; }
+.drawer .panel-head { flex: 0 0 auto; }
 
 .drawer.settings { overflow: auto; }
 .drawer .composer { margin-top: auto; }

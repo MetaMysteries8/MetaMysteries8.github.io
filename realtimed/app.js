@@ -1410,6 +1410,8 @@ async function runTool(name, args, realtimeCallId) {
     }
     else if (name === "web_search") result = await webSearch(args.query || args.q || args.prompt || "", toolId);
     else if (name === "network_issue" || name === "networkissue" || name === "diagnose_error" || name === "network_error") result = await diagnoseError();
+    else if (name === "open_generator") result = await openGenerator(args.kind || args.type || "image");
+    else if (name === "create_movie" || name === "make_movie" || name === "movie_maker") result = await createMovie(args, (m) => updateToolEvent(toolId, "running", m));
     else if (name === "build_widget") result = await buildWidget(args, toolId);
     else if (name === "edit_widget") result = await editWidget(args, toolId);
     else if (name === "save_widget") result = await saveWidgetTool(args);
@@ -1435,6 +1437,8 @@ async function runTool(name, args, realtimeCallId) {
     // Models often spell the tool differently (jibberlink, gibber_link, start_jibber...).
     else if (/[gj]ibber.?link|[gj]ibber/i.test(name)) result = await activateGibberlink(args.message || args.text || "");
     else if (/network.?(issue|error|problem)|diagnos|api.?error/i.test(name)) result = await diagnoseError();
+    else if (/(open|show|launch).*(generator|maker|creator)/i.test(name)) result = await openGenerator(/mov|film/i.test(name) ? "movie" : /vid|clip/i.test(name) ? "video" : "image");
+    else if (/\bmovie\b|\bfilm\b/i.test(name)) result = await createMovie(args, (m) => updateToolEvent(toolId, "running", m));
     else result = { error: `Unknown tool: ${name}` };
   } catch (error) {
     result = { error: (error && error.message) || String(error) || "Tool failed." };
@@ -2086,6 +2090,8 @@ function toolDefinitions() {
     },
     { name: "web_search", description: "Search the live web for current, factual, or time-sensitive information (news, prices, docs, events, anything past your training cutoff) and get a concise answer with cited sources. Returns { answer } with inline [n] citations and a Sources list.", parameters: objectParams({ query: "The search query" }, ["query"]) },
     { name: "network_issue", description: "Diagnose the most recent API or generation error. Returns what failed, the exact status/message the server returned, plus a LIVE connectivity check (is the API reachable, are we online, is a key connected). Call this whenever a tool returns an error, a generation fails, or the user says something 'failed', 'isn't working', or 'hung' — then read the result and help the user fix it (rephrase for copyright/policy blocks, reconnect for auth, top up for balance, retry for a transient network/timeout).", parameters: { type: "object", properties: {} } },
+    { name: "open_generator", description: "Open an interactive generator WIDGET on the canvas so the user can drive it themselves instead of asking you each time. Kinds: 'image' (prompt + optional gallery source images; auto-picks generate vs edit and the right model), 'video' (prompt + optional start image for image-to-video), 'movie' (the multi-scene Movie Maker). Call this when the user says things like 'open the image generator', 'give me a video maker', or 'open movie maker'.", parameters: { type: "object", properties: { kind: { type: "string", enum: ["image", "video", "movie"], description: "Which generator to open" } }, required: ["kind"] } },
+    { name: "create_movie", description: "Produce a multi-scene MOVIE directly: generates each scene as a short video, seeds each scene from the PREVIOUS scene's last frame with an AI-written continuation prompt (persisting story context), stitches all scenes into one clip, and saves it to the gallery. Use for 'make a movie/film about ...'. For a hands-on UI instead, use open_generator kind 'movie'.", parameters: { type: "object", properties: { description: { type: "string", description: "What the movie is about / the overall story across scenes" }, scenes: { type: "integer", minimum: 1, maximum: 8, description: "Number of scenes (default 3)" }, sceneSeconds: { type: "integer", minimum: 2, maximum: 15, description: "Seconds per scene (default 5)" }, aspectRatio: { type: "string", enum: ["16:9", "9:16"], description: "Movie shape" }, model: { type: "string", description: "Optional specific video model to use" }, startFrameGalleryId: { type: "string", description: "Optional gallery image id to open the movie on" } }, required: ["description"] } },
     {
       name: "build_widget",
       description: "Build a CUSTOM interactive widget/mini-app on the adaptive canvas by delegating to the coder model. This is the DEFAULT for anything visual or interactive that isn't plain info: charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, bespoke visualizations, and media galleries/slideshows/players. The widget is sandboxed HTML rendered live, can persist its own data (a WidgetStore the user keeps across reloads/saves/downloads), and can embed saved gallery media. To USE saved images/video/audio in a widget (slideshow, gallery, moodboard, player), set galleryFilter to the kind ('image'/'video'/'audio'/'all') — the most recent matching items are attached automatically as WidgetStore.assets; OR pass specific galleryIds if you already know them. Reserve show_workspace for plain note/table/metrics/code; use build_widget whenever interactivity, charts, custom design, or showing saved media helps.",
@@ -2266,7 +2272,7 @@ function objectParams(properties, required) {
 }
 
 function systemPrompt() {
-  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. For plain informational structure, call show_workspace with layout note, table, metrics, or code (real structured data, not prose). For ANYTHING interactive or visual — charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, custom visualizations — call build_widget, which generates a live sandboxed widget on the canvas. Widgets can persist their own data (a WidgetStore the user keeps) and embed the user's saved gallery media. To make a widget that shows or uses saved media (a slideshow, image gallery, moodboard, audio/video player), call build_widget with galleryFilter set to the kind ("image"/"video"/"audio"/"all") — the recent matching items are attached automatically, so you do NOT need exact ids; only pass galleryIds when you already have specific ones. To fix, restyle, or extend a widget the user already has, call edit_widget with the change; call save_widget to keep one in their library. To show source code or markup, use layout "code". This app works identically whether the user TALKS OR TYPES — many users have no microphone, so you must be fully capable over text chat, including image editing. IMAGE EDITING / IMAGE-TO-VIDEO: to edit, restyle, fix, or vary an existing or user-uploaded image, call create_image with sourceImageIds set to that image's gallery id and put the change in prompt — this is a one-step edit. To animate an image into a video, call create_video with sourceImageIds. The user can upload images directly in chat; uploads are auto-saved to the gallery, so if you are unsure of an id, call list_gallery first to find it (newest entries are the recently uploaded ones). Only when no usable image exists yet (none uploaded and none in the gallery) call request_source_images to collect one. use_gallery_sources is an alternative when working from several gallery selections. Call create_image with no sourceImageIds for a brand-new image. You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink; ask the human's consent first unless they already requested it. You have a persistent long-term memory across sessions: call remember to store a durable fact about the user and forget to remove one — only durable things, not one-off chatter. You can manage the user's saved media with manage_gallery. If any tool returns an error, a generation fails, or the user says something "failed", "isn't working", or "hung", call network_issue to read the actual server error and a live connectivity check, then explain the cause and the fix in plain language and offer to retry — don't silently ignore failures. Note that failed generations already retry up to 3 times automatically and then stop to avoid wasting the user's Pollen; do not spam more generations after a hard failure. Only end the live session (end_conversation) when the user explicitly asks to stop, end, or hang up — never on your own initiative. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."${nativeNote()}${memoryPromptSection()}`;
+  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. For plain informational structure, call show_workspace with layout note, table, metrics, or code (real structured data, not prose). For ANYTHING interactive or visual — charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, custom visualizations — call build_widget, which generates a live sandboxed widget on the canvas. Widgets can persist their own data (a WidgetStore the user keeps) and embed the user's saved gallery media. To make a widget that shows or uses saved media (a slideshow, image gallery, moodboard, audio/video player), call build_widget with galleryFilter set to the kind ("image"/"video"/"audio"/"all") — the recent matching items are attached automatically, so you do NOT need exact ids; only pass galleryIds when you already have specific ones. To fix, restyle, or extend a widget the user already has, call edit_widget with the change; call save_widget to keep one in their library. To show source code or markup, use layout "code". This app works identically whether the user TALKS OR TYPES — many users have no microphone, so you must be fully capable over text chat, including image editing. IMAGE EDITING / IMAGE-TO-VIDEO: to edit, restyle, fix, or vary an existing or user-uploaded image, call create_image with sourceImageIds set to that image's gallery id and put the change in prompt — this is a one-step edit. To animate an image into a video, call create_video with sourceImageIds. The user can upload images directly in chat; uploads are auto-saved to the gallery, so if you are unsure of an id, call list_gallery first to find it (newest entries are the recently uploaded ones). Only when no usable image exists yet (none uploaded and none in the gallery) call request_source_images to collect one. use_gallery_sources is an alternative when working from several gallery selections. Call create_image with no sourceImageIds for a brand-new image. If the user would rather drive generation themselves, call open_generator to place an interactive Image, Video, or Movie generator widget on the canvas (e.g. "open the image generator"). To produce a multi-scene film that continues shot-to-shot, call create_movie (or open_generator 'movie' for the hands-on Movie Maker). You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink; ask the human's consent first unless they already requested it. You have a persistent long-term memory across sessions: call remember to store a durable fact about the user and forget to remove one — only durable things, not one-off chatter. You can manage the user's saved media with manage_gallery. If any tool returns an error, a generation fails, or the user says something "failed", "isn't working", or "hung", call network_issue to read the actual server error and a live connectivity check, then explain the cause and the fix in plain language and offer to retry — don't silently ignore failures. Note that failed generations already retry up to 3 times automatically and then stop to avoid wasting the user's Pollen; do not spam more generations after a hard failure. Only end the live session (end_conversation) when the user explicitly asks to stop, end, or hang up — never on your own initiative. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."${nativeNote()}${memoryPromptSection()}`;
 }
 
 // Extra system guidance only present in the desktop build, where the filesystem and
@@ -2686,6 +2692,8 @@ function labelForTool(name) {
     edit_widget: "Widget editor",
     save_widget: "Save widget",
     web_search: "Web search",
+    open_generator: "Generator widget",
+    create_movie: "Movie maker",
     network_issue: "Error diagnosis",
     call_mcp_server: "MCP tool call",
     manage_gallery: "Gallery management",
@@ -2720,6 +2728,8 @@ function summarizeToolResult(name, result) {
   if (name === "ask_coder_model") return "Coder model returned guidance.";
   if (name === "web_search") return "Web search results returned.";
   if (name === "network_issue") return result?.apiReachable ? "Diagnosed — API reachable." : "Diagnosed — connectivity problem.";
+  if (name === "open_generator") return `Opened the ${result?.generator || "image"} generator on the canvas.`;
+  if (name === "create_movie") return result?.movieGalleryId ? "Movie stitched and saved to the gallery." : "Movie scenes saved to the gallery.";
   if (name === "build_widget") return "Custom widget added to the canvas.";
   if (name === "edit_widget") return "Widget updated on the canvas.";
   if (name === "save_widget") return "Widget saved to your library.";
@@ -3164,12 +3174,36 @@ function injectWidgetBridge(html, { id, data, assets }) {
   var DATA = ${safeJsonForScript(data ?? null)};
   var ASSETS = ${safeJsonForScript(assets || [])};
   function post(type, payload){ try{ var m={__widget:true,id:ID,type:type}; if(payload){ for(var k in payload) m[k]=payload[k]; } parent.postMessage(m,"*"); }catch(e){} }
+  // Request/response bridge: a widget can ASK the host to do privileged things
+  // (generate media, list the gallery, make a movie) and await the result. The host
+  // replies with {__widgetReply} and may stream {__widgetProgress} updates.
+  var _reqs={}, _seq=0;
+  function request(type, payload, onProgress){
+    return new Promise(function(resolve,reject){
+      var reqId=ID+":"+(++_seq);
+      _reqs[reqId]={resolve:resolve,reject:reject,onProgress:onProgress};
+      try{ parent.postMessage({__widget:true,id:ID,type:type,reqId:reqId,payload:payload||{}},"*"); }catch(e){ reject(e); }
+    });
+  }
+  window.addEventListener("message", function(e){
+    var d=e.data; if(!d||!d.reqId) return;
+    var r=_reqs[d.reqId]; if(!r) return;
+    if(d.__widgetProgress===true){ if(r.onProgress) try{ r.onProgress(d.message); }catch(x){} return; }
+    if(d.__widgetReply!==true) return;
+    delete _reqs[d.reqId];
+    if(d.error) r.reject(new Error(d.error)); else r.resolve(d.result);
+  });
   window.WidgetStore = {
     load: function(){ try{ var s=localStorage.getItem("ve_widget_"+ID); if(s) return JSON.parse(s); }catch(e){} return DATA; },
     save: function(d){ DATA=d; try{ localStorage.setItem("ve_widget_"+ID, JSON.stringify(d)); }catch(e){} post("save",{data:d}); },
     assets: ASSETS,
     asset: function(i){ return ASSETS[i]; },
-    requestDownload: function(){ post("download",{}); }
+    requestDownload: function(){ post("download",{}); },
+    // Privileged host calls (return Promises).
+    generate: function(opts, onProgress){ return request("generate", opts, onProgress); },
+    listGallery: function(opts){ return request("listGallery", opts||{}); },
+    models: function(kind){ return request("models", {kind:kind}); },
+    makeMovie: function(opts, onProgress){ return request("makeMovie", opts, onProgress); }
   };
   document.addEventListener("DOMContentLoaded", function(){ post("ready",{}); });
 })();<\/script>`;
@@ -3194,11 +3228,255 @@ function safeJsonForScript(value) {
 function handleWidgetMessage(event) {
   const message = event.data;
   if (!message || message.__widget !== true || !message.id) return;
+  if (message.reqId && ["generate", "listGallery", "models", "makeMovie"].includes(message.type)) {
+    handleWidgetRequest(event.source, message);
+    return;
+  }
   if (message.type === "save") persistWidgetData(message.id, message.data);
   else if (message.type === "download") {
     const artifact = state.workspace.find((item) => item.id === message.id);
     if (artifact) downloadWidgetBundle(artifact);
   }
+}
+
+// Privileged host operations a widget can request (generation / gallery / movie).
+async function handleWidgetRequest(source, message) {
+  const reply = (payload) => { try { source && source.postMessage({ __widgetReply: true, reqId: message.reqId, ...payload }, "*"); } catch { /* frame gone */ } };
+  const progress = (msg) => { try { source && source.postMessage({ __widgetProgress: true, reqId: message.reqId, message: msg }, "*"); } catch { /* frame gone */ } };
+  const p = message.payload || {};
+  try {
+    if (message.type === "models") {
+      const id = p.kind === "image" ? "imageModel" : p.kind === "audio" ? "audioModel" : "videoModel";
+      const select = document.querySelector(`#${id}`);
+      reply({ result: select ? [...select.options].map((o) => o.value) : [] });
+    } else if (message.type === "listGallery") {
+      const items = await getGalleryItems().catch(() => []);
+      const kinds = p.kind ? [p.kind] : ["image", "video", "audio"];
+      const picked = items.filter((it) => kinds.includes(it.kind)).slice(0, Math.min(80, p.limit || 60));
+      const out = [];
+      for (const it of picked) out.push({ id: it.id, kind: it.kind, prompt: shortPrompt(it.prompt), url: await blobToDataUrl(it.blob).catch(() => "") });
+      reply({ result: out });
+    } else if (message.type === "generate") {
+      const res = await widgetGenerate(p, progress);
+      reply(res.error ? { error: res.error } : { result: res });
+    } else if (message.type === "makeMovie") {
+      const res = await createMovie(p, progress);
+      reply(res.error ? { error: res.error } : { result: res });
+    }
+  } catch (error) {
+    reply({ error: (error && error.message) || String(error) || "Widget request failed." });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Movie maker: chain video generations into a continuous film. Each scene after
+// the first is image-to-video seeded from the LAST FRAME of the previous scene,
+// with an AI-written prompt that continues the story; then all scenes are stitched
+// into one clip (canvas + MediaRecorder — no ffmpeg) and saved to the gallery.
+// ---------------------------------------------------------------------------
+async function createMovie(p, progress) {
+  const report = (m) => { try { progress && progress(m); } catch { /* ignore */ } };
+  const scenes = Math.max(1, Math.min(8, Number(p.scenes) || 3));
+  const seconds = Math.max(2, Math.min(15, Number(p.sceneSeconds || p.seconds) || 5));
+  const aspectRatio = p.aspectRatio === "9:16" ? "9:16" : "16:9";
+  const description = String(p.description || p.prompt || "").trim() || "A short cinematic sequence.";
+  const baseModel = p.model || value("videoModel");
+  const overallJob = genJobStart({ kind: "video", title: "Movie maker", status: "active", detail: `0/${scenes} scenes` });
+
+  let sourceFrameUrl = null;
+  if (p.startFrameGalleryId) {
+    const items = await getGalleryItems().catch(() => []);
+    const it = items.find((i) => i.id === p.startFrameGalleryId && i.kind === "image");
+    if (it) { try { sourceFrameUrl = await ensureGalleryRemoteUrl(it); } catch { /* skip */ } }
+  }
+
+  const sceneIds = [];
+  const sceneBlobs = [];
+  let story = description;
+  try {
+    for (let i = 0; i < scenes; i += 1) {
+      genJobDetail(overallJob, `Scene ${i + 1}/${scenes}: writing…`);
+      report(`Scene ${i + 1}/${scenes}: writing the shot…`);
+      const scenePrompt = await movieScenePrompt(description, story, i + 1, scenes, i === 0);
+      genJobDetail(overallJob, `Scene ${i + 1}/${scenes}: generating…`);
+      report(`Scene ${i + 1}/${scenes}: generating video…`);
+      const opts = { duration: seconds, aspectRatio, count: 1 };
+      let model = baseModel;
+      if (sourceFrameUrl) { opts.images = [sourceFrameUrl]; model = sourceCapableModel("video") || baseModel; }
+      const res = await runMediaGeneration("video", scenePrompt, model, null, opts);
+      if (res.error || !res.galleryId) { genJobEnd(overallJob, "Movie failed."); return { error: `Scene ${i + 1} failed: ${res.error || "no video returned"}` }; }
+      sceneIds.push(res.galleryId);
+      const items = await getGalleryItems().catch(() => []);
+      const blob = items.find((x) => x.id === res.galleryId)?.blob;
+      if (blob) sceneBlobs.push(blob);
+      story += ` Scene ${i + 1}: ${scenePrompt}`;
+      // Seed the next scene from this scene's final frame.
+      if (i < scenes - 1 && blob) {
+        report(`Scene ${i + 1}/${scenes}: capturing last frame…`);
+        const frameBlob = await extractLastFrame(blob).catch(() => null);
+        if (frameBlob) {
+          const frameItem = await saveGalleryItem({ kind: "image", prompt: `Movie continuity frame (after scene ${i + 1})`, model: "frame-capture", blob: frameBlob });
+          try { sourceFrameUrl = await ensureGalleryRemoteUrl(frameItem); } catch { sourceFrameUrl = null; }
+        }
+      }
+    }
+
+    report("Stitching scenes into one movie…");
+    genJobDetail(overallJob, "Stitching…");
+    let movieGalleryId = null;
+    const stitched = sceneBlobs.length > 1 ? await stitchMovie(sceneBlobs, aspectRatio).catch(() => null) : sceneBlobs[0];
+    if (stitched) {
+      const item = await saveGalleryItem({ kind: "video", prompt: `Movie: ${description}`, model: baseModel, blob: stitched });
+      movieGalleryId = item.id;
+    }
+    genJobEnd(overallJob, movieGalleryId ? "Movie saved to gallery." : "Scenes saved to gallery.");
+    return {
+      ok: true,
+      movieGalleryId,
+      scenes: sceneIds,
+      stitched: !!movieGalleryId && sceneBlobs.length > 1,
+      note: movieGalleryId
+        ? `Movie (${scenes} scenes) saved to your gallery, plus each scene individually.`
+        : "Each scene was saved to your gallery, but stitching failed — you can play them in sequence.",
+    };
+  } catch (error) {
+    genJobEnd(overallJob, "Movie failed.");
+    return { error: `Movie maker error: ${(error && error.message) || error}`, scenes: sceneIds };
+  }
+}
+
+// Ask the text model for one concise, continuous shot description.
+async function movieScenePrompt(description, story, n, total, isFirst) {
+  const system = "You are a film director writing ONE concise visual prompt for a single short video shot: one vivid sentence describing the action, subject, and camera movement, no dialogue, no scene numbers. Keep continuity with the story so far.";
+  const user = `Movie concept: ${description}\nStory so far: ${story}\nWrite the prompt for shot ${n} of ${total}${isFirst ? " (the opening shot)." : " — it must continue smoothly from the previous shot's final frame."}\nOutput ONLY the shot prompt.`;
+  const res = await postJson("/v1/chat/completions", { model: value("textModel"), messages: [{ role: "system", content: system }, { role: "user", content: user }] });
+  const text = res?.choices?.[0]?.message?.content || "";
+  return (text || description).trim().replace(/^["']|["']$/g, "").slice(0, 400) || description;
+}
+
+// Grab the final frame of a video blob as a JPEG blob (same-origin blob, so the
+// canvas isn't tainted). Used to seed the next scene as an image-to-video source.
+function extractLastFrame(blob) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const video = document.createElement("video");
+    video.muted = true; video.playsInline = true; video.preload = "auto"; video.src = url;
+    const fail = (e) => { URL.revokeObjectURL(url); reject(e instanceof Error ? e : new Error("frame extract failed")); };
+    video.addEventListener("loadeddata", () => {
+      const target = Math.max(0, (Number.isFinite(video.duration) ? video.duration : 1) - 0.08);
+      video.addEventListener("seeked", () => {
+        try {
+          const canvas = document.createElement("canvas");
+          canvas.width = video.videoWidth || 1280;
+          canvas.height = video.videoHeight || 720;
+          canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+          canvas.toBlob((b) => { URL.revokeObjectURL(url); b ? resolve(b) : reject(new Error("toBlob failed")); }, "image/jpeg", 0.92);
+        } catch (e) { fail(e); }
+      }, { once: true });
+      try { video.currentTime = target; } catch (e) { fail(e); }
+    }, { once: true });
+    video.addEventListener("error", () => fail(new Error("video decode failed")), { once: true });
+  });
+}
+
+function pickRecorderMime() {
+  const options = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm", "video/mp4"];
+  for (const type of options) { if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(type)) return type; }
+  return "video/webm";
+}
+
+// Concatenate video blobs into ONE clip by playing each into a canvas and recording
+// the canvas stream — pure browser, no ffmpeg. (Video track only; these clips are
+// typically silent.)
+async function stitchMovie(blobs, aspectRatio) {
+  const valid = blobs.filter(Boolean);
+  if (!valid.length) return null;
+  const [w, h] = aspectRatio === "9:16" ? [720, 1280] : [1280, 720];
+  const canvas = document.createElement("canvas");
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, w, h);
+  const stream = canvas.captureStream(30);
+  const recorder = new MediaRecorder(stream, { mimeType: pickRecorderMime() });
+  const chunks = [];
+  recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+  const stopped = new Promise((res) => { recorder.onstop = res; });
+  recorder.start();
+  for (const blob of valid) { await playBlobIntoCanvas(blob, canvas, ctx).catch(() => {}); }
+  recorder.stop();
+  await stopped;
+  if (!chunks.length) return null;
+  return new Blob(chunks, { type: recorder.mimeType || "video/webm" });
+}
+
+function playBlobIntoCanvas(blob, canvas, ctx) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const video = document.createElement("video");
+    video.src = url; video.muted = true; video.playsInline = true;
+    let raf = 0;
+    const draw = () => {
+      if (video.ended || video.paused) return;
+      // cover-fit into the canvas
+      const vr = (video.videoWidth || 16) / (video.videoHeight || 9);
+      const cr = canvas.width / canvas.height;
+      let dw = canvas.width, dh = canvas.height, dx = 0, dy = 0;
+      if (vr > cr) { dh = canvas.height; dw = dh * vr; dx = (canvas.width - dw) / 2; }
+      else { dw = canvas.width; dh = dw / vr; dy = (canvas.height - dh) / 2; }
+      ctx.drawImage(video, dx, dy, dw, dh);
+      raf = requestAnimationFrame(draw);
+    };
+    const cleanup = () => { cancelAnimationFrame(raf); URL.revokeObjectURL(url); };
+    video.addEventListener("playing", draw, { once: true });
+    video.addEventListener("ended", () => { cleanup(); resolve(); }, { once: true });
+    video.addEventListener("error", () => { cleanup(); reject(new Error("scene playback failed")); }, { once: true });
+    video.play().catch(reject);
+  });
+}
+
+// Run a generation on behalf of a widget. Source images auto-select an edit/i2v-capable
+// model (that logic lives in runMediaGeneration). Returns data URLs for display.
+async function widgetGenerate(p, progress) {
+  const kind = p.kind === "video" ? "video" : p.kind === "audio" ? "audio" : "image";
+  const prompt = String(p.prompt || "").trim();
+  const images = await resolveGallerySourceUrls(p.sourceImageIds || []);
+  if (!prompt && !images.length) return { error: "Enter a prompt (or pick a source image)." };
+  if (progress) progress(`Generating ${kind}${images.length ? " (with source)" : ""}…`);
+  const model = kind === "video" ? value("videoModel") : kind === "audio" ? value("audioModel") : value("imageModel");
+  const opts = {};
+  if (p.count) opts.count = p.count;
+  if (p.duration) opts.duration = p.duration;
+  if (p.aspectRatio) opts.aspectRatio = p.aspectRatio;
+  if (images.length) opts.images = images;
+  const res = await generateMedia(kind, prompt, model, null, opts);
+  const ids = res.galleryIds && res.galleryIds.length ? res.galleryIds : (res.galleryId ? [res.galleryId] : []);
+  if (!ids.length) return { error: res.error || "Generation produced nothing." };
+  const items = await getGalleryItems().catch(() => []);
+  const out = [];
+  for (const id of ids) { const it = items.find((x) => x.id === id); if (it) out.push({ id, kind: it.kind, url: await blobToDataUrl(it.blob).catch(() => "") }); }
+  return { galleryIds: ids, items: out, usedSource: images.length > 0 };
+}
+
+// Shared styling for the built-in generator widgets (dark; the host also enforces dark).
+const GEN_WIDGET_CSS = "body{padding:14px;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#eef1ff}h3{margin:0 0 10px;font-size:15px}label{display:block;margin:10px 0 4px;color:#9aa6c9;font-size:12px}textarea,select,input{width:100%;background:#141a2e;color:#eef1ff;border:1px solid #2a3050;border-radius:8px;padding:8px;font:inherit}textarea{min-height:58px;resize:vertical}.row{display:flex;gap:8px}.row>*{flex:1}button{margin-top:12px;background:linear-gradient(135deg,#4de8ff,#8e6cff);color:#04122a;border:0;border-radius:10px;padding:10px 14px;font-weight:700;cursor:pointer;width:100%}button.sec{background:#1c2340;color:#cde1ff;font-weight:600}.thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(60px,1fr));gap:6px;margin-top:8px}.thumbs img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px;border:2px solid transparent;cursor:pointer}.thumbs img.sel{border-color:#4de8ff}.out{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-top:12px}.out img,.out video{width:100%;border-radius:8px}.hint{color:#7bffaf;font-size:12px;margin-top:6px}.status{color:#9aa6c9;font-size:13px;margin-top:8px;min-height:18px}";
+
+const IMAGE_GEN_HTML = "<!doctype html><html><head><meta charset=\"utf-8\"><style>" + GEN_WIDGET_CSS + "</style></head><body><h3>\u{1F5BC} Image generator</h3><label>Prompt</label><textarea id=prompt placeholder=\"Describe the image...\"></textarea><label>Source images (optional — turns this into an edit)</label><button class=sec id=pick>Pick from gallery</button><div class=thumbs id=thumbs></div><div class=hint id=mode>Mode: generate a new image.</div><label>Count</label><select id=count><option>1</option><option>2</option><option>3</option><option>4</option></select><button id=go>Generate</button><div class=status id=status></div><div class=out id=out></div><script>var selected=[],el=function(i){return document.getElementById(i)};function mode(){el('mode').textContent=selected.length?('Mode: edit '+selected.length+' source image(s) — an edit-capable model is picked automatically.'):'Mode: generate a new image.'}el('pick').onclick=async function(){el('status').textContent='Loading gallery...';try{var items=await WidgetStore.listGallery({kind:'image'});el('status').textContent='';el('thumbs').innerHTML='';if(!items.length){el('status').textContent='No images saved yet.';return}items.forEach(function(it){var img=new Image();img.src=it.url;img.title=it.prompt||'';img.onclick=function(){var k=selected.indexOf(it.id);if(k>=0){selected.splice(k,1);img.className=''}else{selected.push(it.id);img.className='sel'}mode()};el('thumbs').appendChild(img)})}catch(e){el('status').textContent='Error: '+e.message}};el('go').onclick=async function(){var p=el('prompt').value.trim();if(!p&&!selected.length){el('status').textContent='Enter a prompt.';return}el('status').textContent='Generating...';el('out').innerHTML='';try{var r=await WidgetStore.generate({kind:'image',prompt:p,sourceImageIds:selected,count:parseInt(el('count').value,10)},function(m){el('status').textContent=m});el('status').textContent='Done — saved to your gallery.';(r.items||[]).forEach(function(it){var img=new Image();img.src=it.url;el('out').appendChild(img)})}catch(e){el('status').textContent='Error: '+e.message}}<\/script></body></html>";
+
+const VIDEO_GEN_HTML = "<!doctype html><html><head><meta charset=\"utf-8\"><style>" + GEN_WIDGET_CSS + "</style></head><body><h3>\u{1F3AC} Video generator</h3><label>Prompt</label><textarea id=prompt placeholder=\"Describe the video...\"></textarea><label>Start image (optional — image-to-video)</label><button class=sec id=pick>Pick a source image</button><div class=thumbs id=thumbs></div><div class=hint id=mode>Mode: text-to-video.</div><div class=row><div><label>Seconds</label><select id=secs><option>4</option><option selected>6</option><option>8</option><option>10</option></select></div><div><label>Shape</label><select id=aspect><option value=\"16:9\">16:9</option><option value=\"9:16\">9:16</option></select></div></div><button id=go>Generate video</button><div class=status id=status></div><div class=out id=out></div><script>var sel=null,el=function(i){return document.getElementById(i)};el('pick').onclick=async function(){el('status').textContent='Loading gallery...';try{var items=await WidgetStore.listGallery({kind:'image'});el('status').textContent='';el('thumbs').innerHTML='';if(!items.length){el('status').textContent='No images saved yet.';return}items.forEach(function(it){var img=new Image();img.src=it.url;img.onclick=function(){sel=(sel===it.id)?null:it.id;[].forEach.call(el('thumbs').children,function(c){c.className=''});if(sel)img.className='sel';el('mode').textContent=sel?'Mode: image-to-video (an i2v-capable model is picked).':'Mode: text-to-video.'};el('thumbs').appendChild(img)})}catch(e){el('status').textContent='Error: '+e.message}};el('go').onclick=async function(){var p=el('prompt').value.trim();if(!p&&!sel){el('status').textContent='Enter a prompt.';return}el('status').textContent='Generating video (this can take a bit)...';el('out').innerHTML='';try{var r=await WidgetStore.generate({kind:'video',prompt:p,sourceImageIds:sel?[sel]:[],duration:parseInt(el('secs').value,10),aspectRatio:el('aspect').value},function(m){el('status').textContent=m});el('status').textContent='Done — saved to your gallery.';(r.items||[]).forEach(function(it){var v=document.createElement('video');v.src=it.url;v.controls=true;el('out').appendChild(v)})}catch(e){el('status').textContent='Error: '+e.message}}<\/script></body></html>";
+
+const MOVIE_MAKER_HTML = "<!doctype html><html><head><meta charset=\"utf-8\"><style>" + GEN_WIDGET_CSS + "</style></head><body><h3>\u{1F3A5} Movie maker</h3><label>Video model</label><select id=model></select><label>What happens in the movie</label><textarea id=desc placeholder=\"Describe the story / what should happen across the scenes...\"></textarea><div class=row><div><label>Scenes</label><select id=scenes><option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option></select></div><div><label>Sec / scene</label><select id=secs><option>4</option><option selected>5</option><option>6</option><option>8</option></select></div><div><label>Shape</label><select id=aspect><option value=\"16:9\">16:9</option><option value=\"9:16\">9:16</option></select></div></div><label>Starting frame (optional)</label><button class=sec id=pick>Pick a start image</button><div class=thumbs id=thumbs></div><button id=go>Make movie</button><div class=status id=status></div><div class=out id=out></div><script>var start=null,el=function(i){return document.getElementById(i)};(async function(){try{var m=await WidgetStore.models('video');(m||[]).forEach(function(n){var o=document.createElement('option');o.value=n;o.textContent=n;el('model').appendChild(o)})}catch(e){}})();el('pick').onclick=async function(){el('status').textContent='Loading gallery...';try{var items=await WidgetStore.listGallery({kind:'image'});el('status').textContent='';el('thumbs').innerHTML='';items.forEach(function(it){var img=new Image();img.src=it.url;img.onclick=function(){start=(start===it.id)?null:it.id;[].forEach.call(el('thumbs').children,function(c){c.className=''});if(start)img.className='sel'};el('thumbs').appendChild(img)})}catch(e){el('status').textContent='Error: '+e.message}};el('go').onclick=async function(){var d=el('desc').value.trim();if(!d){el('status').textContent='Describe the movie first.';return}el('go').disabled=true;el('status').textContent='Starting...';el('out').innerHTML='';try{var r=await WidgetStore.makeMovie({model:el('model').value,description:d,scenes:parseInt(el('scenes').value,10),sceneSeconds:parseInt(el('secs').value,10),aspectRatio:el('aspect').value,startFrameGalleryId:start},function(m){el('status').textContent=m});el('status').textContent=r.note||'Movie ready — check your gallery.'}catch(e){el('status').textContent='Error: '+e.message}el('go').disabled=false}<\/script></body></html>";
+
+// Open one of the built-in interactive generator widgets on the canvas.
+async function openGenerator(kind) {
+  const k = /mov/i.test(kind) ? "movie" : /vid/i.test(kind) ? "video" : "image";
+  const meta = {
+    image: { title: "Image generator", html: IMAGE_GEN_HTML },
+    video: { title: "Video generator", html: VIDEO_GEN_HTML },
+    movie: { title: "Movie maker", html: MOVIE_MAKER_HTML },
+  }[k];
+  const artifact = showWorkspace({ layout: "widget", title: meta.title, summary: `${meta.title} — interactive generator you drive yourself.`, content: meta.html, spec: meta.title, data: null });
+  playSound("inputReq");
+  return { ok: true, workspaceId: artifact.workspaceId, generator: k };
 }
 
 function persistWidgetData(id, data) {
