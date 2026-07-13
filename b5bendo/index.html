@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#02030a" />
+    <title>Bear 5 Alive — Hallway Shift</title>
+    <script type="module" crossorigin src="/assets/index-UqUK1ujU.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-ZPDm6tX6.css">
+  </head>
+  <body>
+    <div id="game" aria-label="Bear 5 Alive game viewport"></div>
+
+    <div id="hud" class="hidden" aria-live="polite">
+      <div class="hud-top">
+        <div><span class="label">SHIFT</span><strong id="distance">000m</strong></div>
+        <div class="health-panel">
+          <div class="health-copy"><span class="label">HEALTH</span><strong id="health-text">100</strong></div>
+          <div id="health-track" class="health-track" role="progressbar" aria-label="Player health" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100"><i id="health-fill"></i></div>
+        </div>
+        <div class="status" id="status">KEEP MOVING</div>
+        <div class="threat"><span class="label">THREAT</span><strong id="threat">x1.00</strong></div>
+        <button id="mute" class="icon-button" aria-label="Mute audio">SOUND: ON</button>
+      </div>
+      <div id="outrun-warning" role="alert" aria-hidden="true">⚠ BEAR5 IS FASTER THAN YOUR MAXIMUM SPEED ⚠</div>
+      <div id="crosshair" aria-hidden="true"></div>
+      <div id="danger-frame" aria-hidden="true"></div>
+      <div class="controls-hint">
+        <span>WASD MOVE · DRAG LOOK · DOUBLE-CLICK MOUSE LOCK · SPACE BUFFERED JUMP · ESC PAUSE</span>
+        <div class="lobby-actions">
+          <button id="contract-button" class="icon-button">CONTRACT DESK [E]</button>
+          <button id="next-round" class="icon-button">GENERATE NEXT SHIFT [N]</button>
+          <small>LOBBY ONLY</small>
+        </div>
+      </div>
+      <div id="webgpu-badge">WEBGPU</div>
+      <div id="contract-status">CONTRACT: NONE</div>
+      <div id="heal-quota">HEAL QUOTA: 500 / 500</div>
+    </div>
+
+    <section id="intro" class="screen active">
+      <div class="vhs-card">
+        <p class="eyebrow">NIGHT SECURITY TRAINING TAPE #05</p>
+        <h1>BEAR<br /><span>5 ALIVE</span></h1>
+        <p class="tagline">The hallway is longer than your employment contract.</p>
+        <div class="rules">
+          <p><b>STATIC FADES IN:</b> you have three seconds to get comfortable.</p>
+          <p><b>STATIC IS FULL:</b> do not touch WASD. Seriously. Three seconds.</p>
+          <p><b>BEAR:</b> he is a union issue. Keep your distance.</p>
+          <p><b>BOMBS:</b> cost 25 health, stun Bear5, and lower threat. Rest benches heal you and cool the threat level.</p>
+          <p><b>OTHER EMPLOYEES:</b> Goober likes Simon Says, Roller likes arithmetic, Aqua throws knives, Virdbirus outsources murder, and the hallway hates backtracking.</p>
+        </div>
+        <button id="start">CLOCK IN</button>
+        <p class="fineprint">Headphones recommended. Good judgment also recommended, but not supplied.</p>
+      </div>
+    </section>
+
+    <div id="pause" class="screen"><div class="pause-copy"><p>UNAUTHORIZED COFFEE BREAK</p><button id="resume">RETURN TO BAD IDEA</button></div></div>
+
+    <div id="regen" class="screen regen-screen" aria-live="assertive">
+      <div><strong>GENERATING NEXT SHIFT</strong><span id="regen-progress">0%</span><small>THE PAGE IS NOT RELOADING. MANAGEMENT HAS LEARNED ONE THING.</small></div>
+    </div>
+
+    <div id="simon" aria-live="assertive">
+      <span id="simon-copy">SIMON SAYS</span>
+      <strong id="simon-key">W</strong>
+      <small id="simon-progress">1 / 7</small>
+    </div>
+
+    <div id="cinema-bars" aria-hidden="true"></div>
+
+    <div id="roller-overlay" aria-live="assertive">
+      <img src="/12equaldeath.gif" alt="Roller's extremely legitimate random number machine" />
+      <div><span>ROLLER ROLLED</span><strong id="roller-roll">1</strong></div>
+    </div>
+
+    <section id="contract" aria-live="polite">
+      <div class="contract-card">
+        <p class="eyebrow">LOBBY BENEFITS DESK • OPTIONAL • NEXT ROUND ONLY</p>
+        <h2>COMPLIMENTARY<br />BUFF &amp; DEBUFF</h2>
+        <p>Goober chooses the cost. Gren supplies the perk. Press 1–3, or 0 to leave.</p>
+        <div class="contract-grid">
+          <button data-contract="vitality"><b>1 • LUNCH BREAK</b><span>GREN: +25 MAX HEALTH</span><i>GOOBER: 12% SLOWER</i></button>
+          <button data-contract="sprinter"><b>2 • TRACK STAR</b><span>GREN: 18% FASTER</span><i>GOOBER: 22% WEAKER JUMPS</i></button>
+          <button data-contract="medic"><b>3 • UNLICENSED MEDIC</b><span>GREN: 82% FASTER REST HEALING</span><i>GOOBER: 25% MORE DAMAGE</i></button>
+        </div>
+        <button id="contract-skip" class="contract-skip">0 • NO THANKS, I VALUE CONSISTENCY</button>
+      </div>
+    </section>
+
+    <div id="explosion" aria-hidden="true">
+      <img src="/shitty explosion.webp" alt="A very low budget explosion" />
+      <div id="particles"></div>
+      <strong>OW.</strong>
+    </div>
+
+    <section id="death" class="screen death-screen" aria-live="assertive">
+      <div id="death-copy">
+        <p class="eyebrow">INCIDENT REPORT #LOL</p>
+        <h2 id="death-title">YOU MOVED.</h2>
+        <p id="death-reason">The static asked for one thing.</p>
+      </div>
+      <img id="friend" src="/frien.jpeg" alt="Your new friend" />
+      <button id="restart">REGENERATE MAP / RESTART</button>
+    </section>
+
+  </body>
+</html>
