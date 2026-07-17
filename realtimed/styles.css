@@ -2298,13 +2298,14 @@ body[data-version="2"] .realtime-status,
 body[data-version="2"] .orb { display: none !important; }
 body[data-version="2"] .app-shell { display: block; padding: 0; gap: 0; max-width: none; }
 body[data-version="2"] .stage.panel { margin: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; padding: 0; min-height: 0; }
+/* The desktop root is the FULL viewport; chrome space is reserved via WinBox's own
+   viewport options so its bounds math stays consistent (windows can't hide under the
+   top bar / taskbar, and they can use the entire free area). */
 body[data-version="2"] .adaptive-workspace.ve-desktop {
-  position: fixed; left: 0; right: 0; top: var(--os-top-h); bottom: var(--os-bar-h);
+  position: fixed; inset: 0;
   width: auto; height: auto; min-height: 0; margin: 0; padding: 0; border: 0; border-radius: 0;
   overflow: hidden; z-index: 1; background: transparent;
 }
-/* macOS floats its dock, so the desktop can run to the very bottom behind it. */
-body[data-os="mac"][data-version="2"] .adaptive-workspace.ve-desktop { bottom: 0; }
 body[data-version="2"] #mediaDock { position: fixed; right: 12px; bottom: calc(var(--os-bar-h) + 12px); width: min(320px, 80vw); z-index: 950; }
 body[data-version="2"] .inline-chat { position: fixed; left: 12px; bottom: calc(var(--os-bar-h) + 12px); width: min(420px, 82vw); max-height: 52vh; z-index: 900; border-radius: 16px; background: var(--os-surface); border: var(--os-border); box-shadow: var(--os-shadow); backdrop-filter: var(--os-blur); }
 
@@ -2446,3 +2447,17 @@ body[data-version="2"][data-wallpaper="void"]::after, body[data-version="2"][dat
 .winbox.ve-wb .wb-body .ve-winmount { padding: 10px; }
 .winbox.ve-wb .wb-body .workspace-card { background: transparent; border: 0; padding: 0; margin: 0; box-shadow: none; }
 .winbox.ve-wb .wb-body .workspace-card > header { display: none; }
+
+/* Reskin old v1 card chrome so it doesn't look dated inside v2 windows: drop the
+   "Build notes" dev collapsible, and slim the live-widget action bar. Applies to both
+   WinBox and the fallback windows. */
+.winbox.ve-wb .card-info,
+body[data-version="2"] .ve-window .card-info { display: none; }
+.winbox.ve-wb .widget-bar,
+body[data-version="2"] .ve-window .widget-bar { border: 0; padding: 2px 2px 8px; background: transparent; }
+.winbox.ve-wb .widget-bar .code-lang,
+body[data-version="2"] .ve-window .widget-bar .code-lang { text-transform: uppercase; letter-spacing: 0.1em; opacity: 0.5; font-size: 0.7rem; }
+.winbox.ve-wb .widget-actions .code-copy,
+body[data-version="2"] .ve-window .widget-actions .code-copy { border-radius: 9px; border-color: rgba(255, 255, 255, 0.14); }
+.winbox.ve-wb .card-summary,
+body[data-version="2"] .ve-window .card-summary { color: var(--os-text, #cdd8f5); opacity: 0.75; }

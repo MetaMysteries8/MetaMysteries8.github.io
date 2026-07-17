@@ -3099,10 +3099,11 @@ function updateVersionButton() {
   el.versionBtn.setAttribute("aria-pressed", v2 ? "true" : "false");
 }
 
-// Per-window geometry (persisted). Falls back to a cascade for new windows.
+// Per-window geometry (persisted). Falls back to a cascade for new windows. Width/
+// height are left unset so a new window is sized relative to the desktop at creation.
 function windowState(id, idx = 0) {
   if (!state.windows[id]) {
-    state.windows[id] = { x: 22 + (idx % 6) * 30, y: 16 + (idx % 6) * 30, w: 380, h: 360, z: ++veTopZ, minimized: false };
+    state.windows[id] = { x: 22 + (idx % 6) * 30, y: 16 + (idx % 6) * 30, w: null, h: null, z: ++veTopZ, minimized: false };
   }
   return state.windows[id];
 }
@@ -3202,15 +3203,33 @@ function createWinbox(artifact, idx) {
   mount.className = "ve-winmount";
   mount.append(renderArtifact(artifact));
   const host = el.adaptiveWorkspace;
+  // Root is the FULL-viewport desktop, so WinBox coords are viewport coords. We reserve
+  // the top bar + taskbar via WinBox's own viewport options (top/bottom/left/right) —
+  // it honors them for move, resize, AND maximize, which keeps titlebars on-screen and
+  // lets windows use the entire free area instead of being boxed.
+  const cs = getComputedStyle(document.body);
+  const topH = parseInt(cs.getPropertyValue("--os-top-h"), 10) || 34;
+  const barH = (parseInt(cs.getPropertyValue("--os-bar-h"), 10) || 58) + (state.os === "mac" ? 16 : 6);
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const availH = vh - topH - barH;
+  const width = Math.round(Math.min(st.w || Math.max(480, vw * 0.52), vw - 20));
+  const height = Math.round(Math.min(st.h || Math.max(430, availH * 0.84), availH - 8));
+  let x = st.x != null ? st.x : Math.round(44 + (idx % 6) * 30);
+  let y = st.y != null ? st.y : Math.round(topH + 22 + (idx % 6) * 26);
+  x = Math.max(6, Math.min(x, vw - width - 6));
+  y = Math.max(topH + 4, Math.min(y, vh - barH - Math.min(height, availH) - 4));
   const wb = new window.WinBox({
     title: artifact.title || artifact.layout,
     root: host,
     mount,
-    x: Math.max(0, st.x || 24),
-    y: Math.max(0, st.y || 20),
-    width: st.w || 400,
-    height: st.h || 360,
-    minwidth: 240,
+    x, y, width, height,
+    minwidth: 260,
+    minheight: 180,
+    top: `${topH}px`,
+    bottom: `${barH}px`,
+    left: "6px",
+    right: "6px",
     background: "#12172b",
     class: ["ve-wb", "no-full"],
     onclose() {
@@ -3219,7 +3238,7 @@ function createWinbox(artifact, idx) {
       wbClosing.delete(artifact.id);
       return false;
     },
-    onmove(x, y) { const s = windowState(artifact.id); s.x = x; s.y = y; s.snap = ""; saveWindowsThrottled(); },
+    onmove(x2, y2) { const s = windowState(artifact.id); s.x = x2; s.y = y2; s.snap = ""; saveWindowsThrottled(); },
     onresize(w, h) { const s = windowState(artifact.id); if (w) s.w = w; if (h) s.h = h; saveWindowsThrottled(); },
   });
   winboxes.set(artifact.id, wb);
