@@ -88,6 +88,8 @@ const state = {
   lastError: null, // most recent API/generation failure, for the network_issue tool
   version: localStorage.getItem("ui_version") === "2" ? "2" : "1", // "1" classic, "2" web-OS
   windows: JSON.parse(localStorage.getItem("ve_windows") || "{}"), // v2 window geometry by artifact id
+  os: ["mac", "win", "chrome"].includes(localStorage.getItem("ve_os")) ? localStorage.getItem("ve_os") : "mac", // v2 desktop-environment shell
+  osStyle: ["mixed", "glass", "neu", "studio"].includes(localStorage.getItem("ve_style")) ? localStorage.getItem("ve_style") : "mixed", // v2 surface style
 };
 
 // Mic noise gate for realtime barge-in: the local RMS a sound must exceed (while
@@ -410,6 +412,8 @@ function init() {
   checkKeyHealth();
   startBalancePolling();
   startVizLoop();
+  // Booting straight into v2 on reload plays the OS boot sequence (loader → boot cutscene).
+  if (state.version === "2") startBootSequence();
 }
 
 function bindEvents() {
@@ -458,6 +462,8 @@ function bindEvents() {
   el.versionBtn.addEventListener("click", () => setUiVersion(state.version === "2" ? "1" : "2", { animate: true }));
   document.querySelector(".account-strip")?.prepend(el.versionBtn);
   updateVersionButton();
+  buildOsChrome();
+  setInterval(refreshOsChrome, 1000);
   renderDesktopStatus();
   window.addEventListener("message", handleWidgetMessage);
   el.navButtons.forEach((button) => { if (button.dataset.drawer) button.addEventListener("click", () => toggleDrawer(button.dataset.drawer)); });
@@ -705,6 +711,8 @@ function applyPresets() {
   document.body.dataset.layout = value("layoutPreset") || "focus";
   document.body.dataset.personality = value("personalityPreset") || "operator";
   document.body.dataset.version = state.version || "1";
+  document.body.dataset.os = state.os;
+  document.body.dataset.style = state.osStyle;
   const accent = localStorage.getItem("v2_accent");
   if (accent) document.documentElement.style.setProperty("--v2-accent", accent);
 }
@@ -1431,6 +1439,8 @@ async function runTool(name, args, realtimeCallId) {
     else if (name === "open_generator") result = await openGenerator(args.kind || args.type || "image");
     else if (name === "set_version" || name === "upgrade_version" || name === "set_ui_version" || name === "upgrade" || /upgrade.*version|version\s*2|web\s*os/i.test(name)) result = setVersionTool(args);
     else if (name === "morph_ui" || name === "morph" || name === "reshape_ui") result = morphUi(args);
+    else if (name === "set_os" || name === "switch_os" || name === "set_desktop") result = morphUi({ os: args.os || args.to || args.desktop });
+    else if (name === "set_style" || name === "set_surface" || name === "set_theme_style") result = morphUi({ style: args.style || args.to });
     else if (name === "create_movie" || name === "make_movie" || name === "movie_maker") result = await createMovie(args, (m) => updateToolEvent(toolId, "running", m));
     else if (name === "build_widget") result = await buildWidget(args, toolId);
     else if (name === "edit_widget") result = await editWidget(args, toolId);
@@ -2280,16 +2290,23 @@ function toolDefinitions() {
     },
     {
       name: "morph_ui",
-      description: "(Version 2 / Web OS) Reshape the live interface to fit the moment: set the color theme, layout density, accent color, and/or rearrange the open windows. Use when the user asks the UI to change look/mood/arrangement, or proactively to suit the task (cinematic dark theme for movie work, bright focused theme for writing, tile the windows to compare them). If the app is still on v1, this upgrades to v2 first.",
+      description: "(Version 2 / Web OS) Reshape the whole live interface to fit the moment: switch the desktop environment (macOS / Windows / ChromeOS shell — each moves the menu bar, dock/taskbar, and window buttons), change the surface STYLE (mixed / glassmorphic / neumorphic / studio-flat), set the color theme + accent color, and/or rearrange the open windows. Use when the user asks the UI to change look/feel/mood/arrangement, or proactively to suit the task (cinematic dark glass for movie work, crisp studio for writing, tile the windows to compare). If the app is still on v1, this upgrades to v2 first (with the cutscene).",
       parameters: {
         type: "object",
         properties: {
+          os: { type: "string", enum: ["mac", "win", "chrome"], description: "Desktop environment shell: mac (menu bar + centered dock), win (Windows taskbar), chrome (ChromeOS shelf)" },
+          style: { type: "string", enum: ["mixed", "glass", "neu", "studio"], description: "Surface style: mixed (glass+neu+studio blend), glass (glassmorphism), neu (neumorphism), studio (flat/crisp)" },
           theme: { type: "string", enum: ["aurora", "obsidian", "studio", "paper"], description: "Color theme" },
           layout: { type: "string", enum: ["focus", "canvas", "compact"], description: "Layout density" },
           accent: { type: "string", description: "Accent color as any CSS color (e.g. #4de8ff, violet, #ff4fd8)" },
           arrange: { type: "string", enum: ["tile", "cascade", "stack"], description: "Rearrange the open windows" },
         },
       },
+    },
+    {
+      name: "set_os",
+      description: "(Version 2 / Web OS) Switch the desktop environment shell between macOS ('mac'), Windows ('win'), and ChromeOS ('chrome') looks — this relocates the menu bar, dock/taskbar, launcher, and window controls to match. Call when the user says e.g. 'make it look like Windows', 'give me the Mac desktop', 'ChromeOS style'.",
+      parameters: { type: "object", properties: { os: { type: "string", enum: ["mac", "win", "chrome"], description: "Target desktop shell" } }, required: ["os"] },
     },
   ];
   if (flag("endConversation")) {
@@ -2339,7 +2356,7 @@ function objectParams(properties, required) {
 }
 
 function systemPrompt() {
-  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. For plain informational structure, call show_workspace with layout note, table, metrics, or code (real structured data, not prose). For ANYTHING interactive or visual — charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, custom visualizations — call build_widget, which generates a live sandboxed widget on the canvas. Widgets can persist their own data (a WidgetStore the user keeps) and embed the user's saved gallery media. To make a widget that shows or uses saved media (a slideshow, image gallery, moodboard, audio/video player), call build_widget with galleryFilter set to the kind ("image"/"video"/"audio"/"all") — the recent matching items are attached automatically, so you do NOT need exact ids; only pass galleryIds when you already have specific ones. To fix, restyle, or extend a widget the user already has, call edit_widget with the change; call save_widget to keep one in their library. To show source code or markup, use layout "code". This app works identically whether the user TALKS OR TYPES — many users have no microphone, so you must be fully capable over text chat, including image editing. IMAGE EDITING / IMAGE-TO-VIDEO: to edit, restyle, fix, or vary an existing or user-uploaded image, call create_image with sourceImageIds set to that image's gallery id and put the change in prompt — this is a one-step edit. To animate an image into a video, call create_video with sourceImageIds. The user can upload images directly in chat; uploads are auto-saved to the gallery, so if you are unsure of an id, call list_gallery first to find it (newest entries are the recently uploaded ones). Only when no usable image exists yet (none uploaded and none in the gallery) call request_source_images to collect one. use_gallery_sources is an alternative when working from several gallery selections. Call create_image with no sourceImageIds for a brand-new image. If the user would rather drive generation themselves, call open_generator to place an interactive Image, Video, or Movie generator widget on the canvas (e.g. "open the image generator"). To produce a multi-scene film that continues shot-to-shot, call create_movie (or open_generator 'movie' for the hands-on Movie Maker). You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink; ask the human's consent first unless they already requested it. You have a persistent long-term memory across sessions: call remember to store a durable fact about the user and forget to remove one — only durable things, not one-off chatter. You can manage the user's saved media with manage_gallery. If any tool returns an error, a generation fails, or the user says something "failed", "isn't working", or "hung", call network_issue to read the actual server error and a live connectivity check, then explain the cause and the fix in plain language and offer to retry — don't silently ignore failures. Note that failed generations already retry up to 3 times automatically and then stop to avoid wasting the user's Pollen; do not spam more generations after a hard failure. Only end the live session (end_conversation) when the user explicitly asks to stop, end, or hang up — never on your own initiative. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery." The app has two UI versions: v1 (classic) and v2 — "VoiceEnable OS", a reimagined desktop where every widget/artifact becomes its own movable window (many at once) and the whole interface can morph to fit the setup. If the user asks to "upgrade to version 2", turn on the web OS, or go back to v1, call set_version (upgrading plays a cinematic reveal). In v2 you can call morph_ui to change the theme, layout, or accent color, or to tile/cascade/stack the open windows to suit the task. Users can always return to v1 from the version button, so reassure them it's reversible.${nativeNote()}${memoryPromptSection()}`;
+  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. For plain informational structure, call show_workspace with layout note, table, metrics, or code (real structured data, not prose). For ANYTHING interactive or visual — charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, custom visualizations — call build_widget, which generates a live sandboxed widget on the canvas. Widgets can persist their own data (a WidgetStore the user keeps) and embed the user's saved gallery media. To make a widget that shows or uses saved media (a slideshow, image gallery, moodboard, audio/video player), call build_widget with galleryFilter set to the kind ("image"/"video"/"audio"/"all") — the recent matching items are attached automatically, so you do NOT need exact ids; only pass galleryIds when you already have specific ones. To fix, restyle, or extend a widget the user already has, call edit_widget with the change; call save_widget to keep one in their library. To show source code or markup, use layout "code". This app works identically whether the user TALKS OR TYPES — many users have no microphone, so you must be fully capable over text chat, including image editing. IMAGE EDITING / IMAGE-TO-VIDEO: to edit, restyle, fix, or vary an existing or user-uploaded image, call create_image with sourceImageIds set to that image's gallery id and put the change in prompt — this is a one-step edit. To animate an image into a video, call create_video with sourceImageIds. The user can upload images directly in chat; uploads are auto-saved to the gallery, so if you are unsure of an id, call list_gallery first to find it (newest entries are the recently uploaded ones). Only when no usable image exists yet (none uploaded and none in the gallery) call request_source_images to collect one. use_gallery_sources is an alternative when working from several gallery selections. Call create_image with no sourceImageIds for a brand-new image. If the user would rather drive generation themselves, call open_generator to place an interactive Image, Video, or Movie generator widget on the canvas (e.g. "open the image generator"). To produce a multi-scene film that continues shot-to-shot, call create_movie (or open_generator 'movie' for the hands-on Movie Maker). You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink; ask the human's consent first unless they already requested it. You have a persistent long-term memory across sessions: call remember to store a durable fact about the user and forget to remove one — only durable things, not one-off chatter. You can manage the user's saved media with manage_gallery. If any tool returns an error, a generation fails, or the user says something "failed", "isn't working", or "hung", call network_issue to read the actual server error and a live connectivity check, then explain the cause and the fix in plain language and offer to retry — don't silently ignore failures. Note that failed generations already retry up to 3 times automatically and then stop to avoid wasting the user's Pollen; do not spam more generations after a hard failure. Only end the live session (end_conversation) when the user explicitly asks to stop, end, or hang up — never on your own initiative. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery." The app has two UI versions: v1 (classic) and v2 — "VoiceEnable OS", a reimagined desktop where every widget/artifact becomes its own movable window (many at once) and the whole interface can morph to fit the setup. If the user asks to "upgrade to version 2", turn on the web OS, or go back to v1, call set_version (upgrading plays a cinematic reveal). v2 is a full, agentic desktop OS with switchable desktop-environment shells — macOS, Windows, and ChromeOS looks (set_os, or morph_ui os) — and switchable surface styles: mixed, glassmorphic, neumorphic, or studio-flat (morph_ui style). Via morph_ui you can also change the color theme + accent and the layout, and tile/cascade/stack the open windows — so you can reshape the ENTIRE interface to fit the moment (e.g. a Mac desktop in cinematic dark glass for movie work, or a crisp Windows studio look for focused writing). Reloading the page in v2 plays an OS boot sequence. Users can always return to v1 from the version button, so reassure them it's reversible.${nativeNote()}${memoryPromptSection()}`;
 }
 
 // Extra system guidance only present in the desktop build, where the filesystem and
@@ -2763,6 +2780,7 @@ function labelForTool(name) {
     create_movie: "Movie maker",
     set_version: "UI version",
     morph_ui: "Morph UI",
+    set_os: "Desktop shell",
     network_issue: "Error diagnosis",
     call_mcp_server: "MCP tool call",
     manage_gallery: "Gallery management",
@@ -2799,7 +2817,7 @@ function summarizeToolResult(name, result) {
   if (name === "network_issue") return result?.apiReachable ? "Diagnosed — API reachable." : "Diagnosed — connectivity problem.";
   if (name === "open_generator") return `Opened the ${result?.generator || "image"} generator on the canvas.`;
   if (name === "set_version") return result?.version === "2" ? "Upgraded to VoiceEnable OS (v2)." : "Switched back to the classic UI (v1).";
-  if (name === "morph_ui") return result?.note || "UI reshaped.";
+  if (name === "morph_ui" || name === "set_os" || name === "set_style") return result?.note || "UI reshaped.";
   if (name === "create_movie") return result?.movieGalleryId ? "Movie stitched and saved to the gallery." : "Movie scenes saved to the gallery.";
   if (name === "build_widget") return "Custom widget added to the canvas.";
   if (name === "edit_widget") return "Widget updated on the canvas.";
@@ -3035,7 +3053,7 @@ function setUiVersion(version, opts = {}) {
   const goingUp = target === "2" && changing;
   state.version = target;
   localStorage.setItem("ui_version", target);
-  const finish = () => { document.body.dataset.version = target; renderWorkspace(); updateVersionButton(); };
+  const finish = () => { document.body.dataset.version = target; ensureOsChrome(); renderWorkspace(); updateVersionButton(); refreshOsChrome(); };
   if (opts.animate && goingUp) playV2Transition(finish);
   else if (opts.animate && target === "1" && changing) playV1Transition(finish);
   else finish();
@@ -3088,6 +3106,7 @@ function saveWindows() {
 }
 
 function renderWorkspaceV2() {
+  ensureOsChrome();
   const host = el.adaptiveWorkspace;
   host.classList.remove("paged");
   host.classList.add("ve-desktop");
@@ -3102,20 +3121,21 @@ function renderWorkspaceV2() {
   if (!items.length) {
     const empty = document.createElement("div");
     empty.className = "ve-desktop-empty";
-    empty.innerHTML = "<span>VoiceEnable OS</span><strong>Your windows live here.</strong><p>Ask for a widget, chart, generator, or media — each opens as its own movable window. Ask me to “morph the UI” to reshape everything.</p>";
+    empty.innerHTML = "<span>VoiceEnable OS</span><strong>Your desktop is ready.</strong><p>Ask for a widget, chart, generator, or media — each opens as its own window. Say “switch to the Windows desktop”, “make it neumorphic”, or “morph the UI” and I’ll reshape everything.</p>";
     host.append(empty);
+    syncTaskbarWindows();
     saveWindows();
     return;
   }
   items.forEach((artifact, idx) => host.append(makeWindow(artifact, idx)));
-  host.append(renderDock());
+  syncTaskbarWindows();
   saveWindows();
 }
 
-function mkWinBtn(glyph, title, onClick) {
+function mkWinBtn(glyph, title, onClick, extra) {
   const b = document.createElement("button");
   b.type = "button";
-  b.className = "ve-winbtn";
+  b.className = "ve-winbtn" + (extra ? ` ${extra}` : "");
   b.textContent = glyph;
   b.title = title;
   b.setAttribute("aria-label", title);
@@ -3126,11 +3146,13 @@ function mkWinBtn(glyph, title, onClick) {
 function makeWindow(artifact, idx) {
   const st = windowState(artifact.id, idx);
   const win = document.createElement("section");
-  win.className = "ve-window" + (st.minimized ? " minimized" : "");
+  win.className = "ve-window" + (st.minimized ? " minimized" : "") + (st.max ? " maximized" : "");
   win.dataset.winId = artifact.id;
-  win.style.left = `${st.x}px`;
-  win.style.top = `${st.y}px`;
-  if (st.w) win.style.width = `${st.w}px`;
+  if (!st.max) {
+    win.style.left = `${st.x}px`;
+    win.style.top = `${st.y}px`;
+    if (st.w) win.style.width = `${st.w}px`;
+  }
   win.style.zIndex = String(st.z || 1);
 
   const bar = document.createElement("header");
@@ -3140,9 +3162,12 @@ function makeWindow(artifact, idx) {
   title.textContent = artifact.title || artifact.layout;
   const btns = document.createElement("div");
   btns.className = "ve-winbtns";
+  // Glyphs are shown for Windows/ChromeOS; on macOS CSS hides them and renders the
+  // three as colored "traffic light" dots (and moves them to the left).
   btns.append(
-    mkWinBtn("—", "Minimize", () => minimizeWindow(artifact.id)),
-    mkWinBtn("✕", "Close", () => removeWorkspace({ id: artifact.id })),
+    mkWinBtn("✕", "Close", () => removeWorkspace({ id: artifact.id }), "close"),
+    mkWinBtn("—", "Minimize", () => minimizeWindow(artifact.id), "min"),
+    mkWinBtn("▢", st.max ? "Restore" : "Maximize", () => toggleMaximize(artifact.id), "max"),
   );
   bar.append(title, btns);
 
@@ -3152,9 +3177,12 @@ function makeWindow(artifact, idx) {
 
   win.append(bar, body);
   win.addEventListener("pointerdown", () => focusWindow(artifact.id), true);
-  enableWindowDrag(win, bar, artifact.id);
+  bar.addEventListener("dblclick", () => toggleMaximize(artifact.id));
+  if (!st.max) enableWindowDrag(win, bar, artifact.id);
   return win;
 }
+
+function toggleMaximize(id) { const s = windowState(id); s.max = !s.max; saveWindows(); renderWorkspace(); }
 
 function focusWindow(id) {
   const s = windowState(id);
@@ -3247,8 +3275,11 @@ function morphUi(args = {}) {
     localStorage.setItem("v2_accent", c);
     changed.push("accent");
   }
+  if (args.os) { setOs(args.os); changed.push(`desktop ${state.os}`); }
+  if (args.style) { setDesktopStyle(args.style); changed.push(`style ${state.osStyle}`); }
   if (args.arrange) { arrangeWindows(args.arrange); changed.push(`windows ${args.arrange}`); }
   if (state.version !== "2") setUiVersion("2", { animate: true });
+  else refreshOsChrome();
   return { ok: true, changed, note: changed.length ? `UI morphed: ${changed.join(", ")}.` : "Nothing to change was specified." };
 }
 
@@ -3263,6 +3294,216 @@ function setVersionTool(args = {}) {
       ? "Upgraded to VoiceEnable OS (v2): widgets are now movable windows and the UI can morph. The user can return to v1 anytime with the version button or by asking."
       : "Reverted to the classic v1 UI.",
   };
+}
+
+// ---------------------------------------------------------------------------
+// v2 OS SHELL — a real desktop environment. The chrome (top bar + taskbar/dock +
+// launcher) is built ONCE and lives in the DOM always; CSS shows it only under
+// body[data-version="2"] and repositions it per body[data-os] (mac | win | chrome).
+// It drives the SAME underlying functions as v1 (setMode, handleMainAction,
+// toggleDrawer, …) so nothing is duplicated in behavior — only relocated.
+// ---------------------------------------------------------------------------
+function setOs(os) {
+  state.os = ["mac", "win", "chrome"].includes(os) ? os : "mac";
+  localStorage.setItem("ve_os", state.os);
+  document.body.dataset.os = state.os;
+  refreshOsChrome();
+}
+
+function setDesktopStyle(styleName) {
+  state.osStyle = ["mixed", "glass", "neu", "studio"].includes(styleName) ? styleName : "mixed";
+  localStorage.setItem("ve_style", state.osStyle);
+  document.body.dataset.style = state.osStyle;
+}
+
+function ensureOsChrome() {
+  if (el.osChromeBuilt) return;
+  buildOsChrome();
+}
+
+// The "apps" the launcher exposes — each is either a drawer to open or an action.
+function osApps() {
+  return [
+    { label: "Config", glyph: "⚙", act: () => toggleDrawer("settingsDrawer") },
+    { label: "Gallery", glyph: "🖼", act: () => toggleDrawer("galleryDrawer") },
+    { label: "Widgets", glyph: "🧩", act: () => toggleDrawer("widgetsDrawer") },
+    { label: "MCP", glyph: "🔌", act: () => toggleDrawer("mcpDrawer") },
+    { label: "Image", glyph: "🎨", act: () => openGenerator("image") },
+    { label: "Video", glyph: "🎬", act: () => openGenerator("video") },
+    { label: "Movie", glyph: "🎥", act: () => openGenerator("movie") },
+    { label: "Chat", glyph: "💬", act: () => setStageView(state.stageView === "chat" ? "orb" : "chat") },
+  ];
+}
+
+function buildOsChrome() {
+  el.osChromeBuilt = true;
+  // --- Top bar (menu bar / status bar) ---
+  const top = document.createElement("div");
+  top.id = "ve-topbar";
+  top.innerHTML =
+    "<button class='ve-osmenu' title='Apps'>◈ <b>VoiceEnable OS</b></button>" +
+    "<span class='ve-activetitle'></span>" +
+    "<div class='ve-tray'>" +
+      "<span class='ve-pollen'>Pollen --</span>" +
+      "<span class='ve-authdot' title='Connection'></span>" +
+      "<button class='ve-tsound' title='Sound'>🔊</button>" +
+      "<span class='ve-clock'>--:--</span>" +
+      "<button class='ve-exit' title='Return to classic v1'>Exit</button>" +
+    "</div>";
+  // --- Taskbar / dock / shelf ---
+  const bar = document.createElement("div");
+  bar.id = "ve-taskbar";
+  bar.innerHTML =
+    "<button class='ve-start' title='Apps'>▦</button>" +
+    "<div class='ve-tb-mode'>" +
+      "<button data-mode='realtime' class='ve-mode'>Realtime</button>" +
+      "<button data-mode='push' class='ve-mode'>Push</button>" +
+      "<button data-mode='gibber' class='ve-mode'>Gibber</button>" +
+    "</div>" +
+    "<button class='ve-talk'>Start</button>" +
+    "<button class='ve-stop' title='Stop'>■</button>" +
+    "<div class='ve-dockzone'></div>" +
+    "<span class='ve-tb-clock'>--:--</span>";
+  // --- Launcher popover ---
+  const launcher = document.createElement("div");
+  launcher.id = "ve-launcher";
+  launcher.className = "hidden";
+  const grid = document.createElement("div");
+  grid.className = "ve-launch-grid";
+  osApps().forEach((app) => {
+    const b = document.createElement("button");
+    b.className = "ve-launch-app";
+    b.innerHTML = `<span class='ve-launch-ic'>${app.glyph}</span><span>${app.label}</span>`;
+    b.addEventListener("click", () => { app.act(); toggleLauncher(false); });
+    grid.append(b);
+  });
+  const shelf = document.createElement("div");
+  shelf.className = "ve-launch-shelf";
+  shelf.innerHTML =
+    "<div class='ve-seg' data-seg='os'><span>Desktop</span>" +
+      "<button data-os='mac'>macOS</button><button data-os='win'>Windows</button><button data-os='chrome'>ChromeOS</button></div>" +
+    "<div class='ve-seg' data-seg='style'><span>Style</span>" +
+      "<button data-style='mixed'>Mixed</button><button data-style='glass'>Glass</button><button data-style='neu'>Neu</button><button data-style='studio'>Studio</button></div>" +
+    "<div class='ve-seg' data-seg='arrange'><span>Windows</span>" +
+      "<button data-arrange='tile'>Tile</button><button data-arrange='cascade'>Cascade</button><button data-arrange='stack'>Stack</button></div>";
+  launcher.append(grid, shelf);
+
+  document.body.append(top, bar, launcher);
+  el.osTopbar = top; el.osTaskbar = bar; el.osLauncher = launcher;
+  wireOsChrome();
+  refreshOsChrome();
+}
+
+function wireOsChrome() {
+  const top = el.osTopbar; const bar = el.osTaskbar; const launcher = el.osLauncher;
+  top.querySelector(".ve-osmenu").addEventListener("click", () => toggleLauncher());
+  top.querySelector(".ve-exit").addEventListener("click", () => setUiVersion("1", { animate: true }));
+  top.querySelector(".ve-tsound").addEventListener("click", () => setSoundMuted(!sound.muted));
+  bar.querySelector(".ve-start").addEventListener("click", () => toggleLauncher());
+  bar.querySelector(".ve-talk").addEventListener("click", handleMainAction);
+  bar.querySelector(".ve-stop").addEventListener("click", stopAll);
+  bar.querySelectorAll(".ve-mode").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
+  launcher.querySelectorAll("[data-os]").forEach((b) => b.addEventListener("click", () => { setOs(b.dataset.os); refreshOsChrome(); }));
+  launcher.querySelectorAll("[data-style]").forEach((b) => b.addEventListener("click", () => { setDesktopStyle(b.dataset.style); refreshOsChrome(); }));
+  launcher.querySelectorAll("[data-arrange]").forEach((b) => b.addEventListener("click", () => { arrangeWindows(b.dataset.arrange); toggleLauncher(false); }));
+  // Click-away closes the launcher.
+  document.addEventListener("pointerdown", (e) => {
+    if (!el.osLauncher || el.osLauncher.classList.contains("hidden")) return;
+    if (el.osLauncher.contains(e.target) || e.target.closest(".ve-osmenu, .ve-start")) return;
+    toggleLauncher(false);
+  });
+}
+
+function toggleLauncher(force) {
+  if (!el.osLauncher) return;
+  const show = force == null ? el.osLauncher.classList.contains("hidden") : force;
+  el.osLauncher.classList.toggle("hidden", !show);
+}
+
+// Populate the live bits of the OS chrome (clock, status, active window, dock,
+// active mode + talk state, selected os/style). Cheap; safe to call often.
+function refreshOsChrome() {
+  if (!el.osTopbar || state.version !== "2") return;
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  el.osTopbar.querySelector(".ve-clock").textContent = `${hh}:${mm}`;
+  el.osTaskbar.querySelector(".ve-tb-clock").textContent = `${hh}:${mm}`;
+  el.osTopbar.querySelector(".ve-pollen").textContent = el.pollenBalance ? el.pollenBalance.textContent : "Pollen --";
+  const dot = el.osTopbar.querySelector(".ve-authdot");
+  const connected = !!state.apiKey;
+  dot.classList.toggle("ok", connected);
+  dot.title = connected ? "Connected" : "Not connected";
+  el.osTopbar.querySelector(".ve-tsound").textContent = sound.muted ? "🔇" : "🔊";
+  // Active window title = the top-most (highest z) non-minimized window.
+  let activeTitle = "";
+  let bestZ = -1;
+  state.workspace.forEach((a) => { const s = state.windows[a.id]; if (s && !s.minimized && (s.z || 0) > bestZ) { bestZ = s.z || 0; activeTitle = a.title || a.layout; } });
+  el.osTopbar.querySelector(".ve-activetitle").textContent = activeTitle;
+  // Mode + talk state.
+  el.osTaskbar.querySelectorAll(".ve-mode").forEach((b) => b.classList.toggle("active", b.dataset.mode === state.mode));
+  const talk = el.osTaskbar.querySelector(".ve-talk");
+  if (talk) talk.textContent = state.mode === "realtime" ? "Start realtime" : state.mode === "push" ? "Hold to talk" : "Gibberlink";
+  // Selected desktop + style highlights in the launcher.
+  el.osLauncher.querySelectorAll("[data-os]").forEach((b) => b.classList.toggle("on", b.dataset.os === state.os));
+  el.osLauncher.querySelectorAll("[data-style]").forEach((b) => b.classList.toggle("on", b.dataset.style === state.osStyle));
+}
+
+// Window chips in the taskbar dock (open/minimized). Replaces the in-desktop dock.
+function syncTaskbarWindows() {
+  if (!el.osTaskbar) return;
+  const zone = el.osTaskbar.querySelector(".ve-dockzone");
+  if (!zone) return;
+  zone.innerHTML = "";
+  state.workspace.forEach((a) => {
+    const s = windowState(a.id);
+    const chip = document.createElement("button");
+    chip.className = "ve-dock-chip" + (s.minimized ? " min" : "");
+    chip.textContent = a.title || a.layout;
+    chip.title = s.minimized ? "Restore" : "Bring to front";
+    chip.addEventListener("click", () => (s.minimized ? restoreWindow(a.id) : focusWindow(a.id)));
+    zone.append(chip);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// BOOT SEQUENCE — shown on every v2 page load: a loading bar, then a boot-up
+// cutscene (same upgrade sound) that "powers on" the OS and reveals the desktop.
+// Click anywhere to skip. The upgrade cutscene (v1→v2) is separate (playV2Transition).
+// ---------------------------------------------------------------------------
+function startBootSequence() {
+  const boot = document.createElement("div");
+  boot.id = "ve-boot";
+  boot.innerHTML =
+    "<div class='ve-boot-logo'>◈</div>" +
+    "<div class='ve-boot-name'>VoiceEnable OS</div>" +
+    "<div class='ve-boot-barwrap'><div class='ve-boot-bar'></div></div>" +
+    "<div class='ve-boot-tip'>Starting your desktop…</div>";
+  document.body.append(boot);
+  let advanced = false;
+  const advance = () => {
+    if (advanced) return; advanced = true;
+    boot.remove();
+    document.removeEventListener("pointerdown", skip);
+    document.removeEventListener("keydown", skip);
+    playBootCutscene();
+  };
+  const skip = () => { advanced = true; boot.remove(); document.getElementById("ve-bootcut")?.remove(); document.removeEventListener("pointerdown", skip); document.removeEventListener("keydown", skip); };
+  document.addEventListener("pointerdown", skip, { once: true });
+  document.addEventListener("keydown", skip, { once: true });
+  setTimeout(advance, 2200);
+}
+
+function playBootCutscene() {
+  const cut = document.createElement("div");
+  cut.id = "ve-bootcut";
+  cut.innerHTML = "<div class='ve-bc-grid'></div><div class='ve-bc-ring'></div><div class='ve-bc-logo'>◈</div><div class='ve-bc-flash'></div>";
+  document.body.append(cut);
+  playSound(sound.buffers.v2Upgrade ? "v2Upgrade" : "convoStart");
+  const done = () => cut.remove();
+  cut.addEventListener("pointerdown", done, { once: true });
+  setTimeout(() => cut.classList.add("reveal"), 3000);
+  setTimeout(done, 3900);
 }
 
 function renderArtifact(artifact) {

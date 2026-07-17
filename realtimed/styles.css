@@ -2245,3 +2245,154 @@ body[data-version="2"] .ve-desktop-empty p { max-width: 420px; font-size: 13px; 
 @media (max-width: 720px) {
   .ve-window { width: calc(100% - 16px) !important; left: 8px !important; }
 }
+
+/* =====================================================================
+   v2 OS SHELL — full desktop environment: switchable shells (mac/win/chrome),
+   surface styles (mixed/glass/neu/studio), top bar + taskbar + launcher, and a
+   boot sequence. All scoped to body[data-version="2"]; v1 stays untouched.
+   ===================================================================== */
+
+/* Surface-style variables (defaults = "mixed": glass + soft depth + crisp accent). */
+body[data-version="2"] {
+  --os-top-h: 34px;
+  --os-bar-h: 58px;
+  --os-text: #eaf0ff;
+  --os-surface: rgba(18, 22, 40, 0.82);
+  --os-border: 1px solid rgba(255, 255, 255, 0.09);
+  --os-radius: 14px;
+  --os-shadow: 0 16px 44px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --os-blur: blur(13px);
+}
+body[data-version="2"][data-style="glass"] {
+  --os-surface: rgba(14, 18, 34, 0.55);
+  --os-border: 1px solid rgba(255, 255, 255, 0.14);
+  --os-blur: blur(22px);
+  --os-shadow: 0 18px 52px rgba(0, 0, 0, 0.5);
+}
+body[data-version="2"][data-style="neu"] {
+  --os-surface: #171d31;
+  --os-border: 0;
+  --os-radius: 18px;
+  --os-blur: none;
+  --os-shadow: 8px 8px 20px rgba(0, 0, 0, 0.5), -6px -6px 16px rgba(255, 255, 255, 0.04);
+}
+body[data-version="2"][data-style="studio"] {
+  --os-surface: #0e1222;
+  --os-border: 1px solid rgba(255, 255, 255, 0.16);
+  --os-radius: 8px;
+  --os-blur: none;
+  --os-shadow: 0 2px 0 rgba(0, 0, 0, 0.35);
+}
+body[data-version="2"][data-style="neu"]::before { background: #141a2b; }
+body[data-version="2"][data-style="neu"]::after,
+body[data-version="2"][data-style="studio"]::after { display: none; }
+body[data-version="2"][data-style="studio"]::before { background: linear-gradient(160deg, #090c16, #0b0e1c); }
+
+/* Full-screen OS: hide the v1 chrome, let the desktop own the viewport. */
+body[data-version="2"] .app-header,
+body[data-version="2"] .controls,
+body[data-version="2"] .stage-topbar,
+body[data-version="2"] .realtime-status,
+body[data-version="2"] .orb { display: none !important; }
+body[data-version="2"] .app-shell { display: block; padding: 0; gap: 0; max-width: none; }
+body[data-version="2"] .stage.panel { margin: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; padding: calc(var(--os-top-h) + 10px) 12px calc(var(--os-bar-h) + 16px); min-height: 100vh; }
+body[data-version="2"] .adaptive-workspace.ve-desktop { min-height: calc(100vh - var(--os-top-h) - var(--os-bar-h) - 40px); }
+body[data-version="2"] .inline-chat { position: fixed; left: 12px; bottom: calc(var(--os-bar-h) + 12px); width: min(420px, 82vw); max-height: 52vh; z-index: 900; border-radius: 16px; background: var(--os-surface); border: var(--os-border); box-shadow: var(--os-shadow); backdrop-filter: var(--os-blur); }
+
+/* Windows read the style variables. */
+body[data-version="2"] .ve-window { background: var(--os-surface); border: var(--os-border); border-radius: var(--os-radius); box-shadow: var(--os-shadow); backdrop-filter: var(--os-blur); }
+.ve-window.maximized { left: 6px !important; top: 6px !important; right: 6px; width: auto !important; max-width: none !important; height: calc(100% - 12px) !important; max-height: none !important; }
+
+/* Top bar (macOS menu bar / status strip). */
+#ve-topbar, #ve-taskbar, #ve-launcher { display: none; }
+body[data-version="2"] #ve-topbar { display: flex; }
+body[data-version="2"] #ve-taskbar { display: flex; }
+body[data-version="2"] #ve-launcher { display: block; }
+body[data-version="2"] #ve-launcher.hidden { display: none; }
+#ve-topbar { position: fixed; inset: 0 0 auto 0; height: var(--os-top-h); align-items: center; gap: 12px; padding: 0 12px; z-index: 1000; color: var(--os-text); font: 600 12px "Space Grotesk", system-ui, sans-serif; background: var(--os-surface); border-bottom: var(--os-border); backdrop-filter: var(--os-blur); }
+#ve-topbar .ve-osmenu { display: flex; align-items: center; gap: 6px; background: none; border: 0; color: var(--os-text); cursor: pointer; font: inherit; }
+#ve-topbar .ve-osmenu b { font-weight: 700; }
+#ve-topbar .ve-activetitle { opacity: 0.62; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#ve-topbar .ve-tray { margin-left: auto; display: flex; align-items: center; gap: 11px; }
+.ve-pollen { font-size: 11px; opacity: 0.85; }
+.ve-authdot { width: 9px; height: 9px; border-radius: 50%; background: #ff5f57; box-shadow: 0 0 8px rgba(255, 95, 87, 0.6); }
+.ve-authdot.ok { background: #28c840; box-shadow: 0 0 8px rgba(40, 200, 64, 0.6); }
+#ve-topbar .ve-tsound, #ve-topbar .ve-exit { background: rgba(255, 255, 255, 0.08); border: 0; color: var(--os-text); border-radius: 8px; padding: 3px 9px; cursor: pointer; font: 600 11px system-ui, sans-serif; }
+#ve-topbar .ve-exit:hover { background: var(--v2-accent, #4de8ff); color: #04122a; }
+.ve-clock, .ve-tb-clock { font-variant-numeric: tabular-nums; }
+
+/* Taskbar / dock / shelf. */
+#ve-taskbar { position: fixed; inset: auto 0 0 0; height: var(--os-bar-h); align-items: center; gap: 10px; padding: 0 12px; z-index: 1000; color: var(--os-text); background: var(--os-surface); border-top: var(--os-border); backdrop-filter: var(--os-blur); }
+#ve-taskbar .ve-start { width: 38px; height: 38px; border-radius: 12px; border: var(--os-border); background: rgba(255, 255, 255, 0.06); color: var(--os-text); font-size: 17px; cursor: pointer; flex: 0 0 auto; }
+#ve-taskbar .ve-start:hover { border-color: var(--v2-accent, #4de8ff); }
+#ve-taskbar .ve-tb-mode { display: flex; gap: 2px; background: rgba(255, 255, 255, 0.05); border-radius: 10px; padding: 3px; flex: 0 0 auto; }
+.ve-mode { background: none; border: 0; color: var(--os-text); opacity: 0.66; border-radius: 8px; padding: 5px 9px; cursor: pointer; font: 600 12px system-ui, sans-serif; }
+.ve-mode.active { background: var(--v2-accent, #4de8ff); color: #04122a; opacity: 1; }
+.ve-talk { background: var(--v2-accent, #4de8ff); color: #04122a; border: 0; border-radius: 10px; padding: 8px 14px; font-weight: 700; cursor: pointer; flex: 0 0 auto; }
+.ve-stop { background: rgba(255, 255, 255, 0.08); border: 0; color: var(--os-text); border-radius: 10px; width: 34px; height: 34px; cursor: pointer; flex: 0 0 auto; }
+#ve-taskbar .ve-dockzone { flex: 1 1 auto; display: flex; gap: 6px; overflow-x: auto; padding: 0 4px; }
+.ve-tb-clock { font: 600 12px system-ui, sans-serif; opacity: 0.85; flex: 0 0 auto; }
+
+/* Launcher popover (Start menu / Spotlight / Everything button). */
+#ve-launcher { position: fixed; z-index: 1100; bottom: calc(var(--os-bar-h) + 10px); left: 12px; width: min(430px, 92vw); padding: 14px; border-radius: 16px; color: var(--os-text); background: var(--os-surface); border: var(--os-border); box-shadow: var(--os-shadow); backdrop-filter: var(--os-blur); }
+.ve-launch-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.ve-launch-app { display: flex; flex-direction: column; align-items: center; gap: 6px; background: rgba(255, 255, 255, 0.05); border: var(--os-border); border-radius: 12px; padding: 10px 6px; color: var(--os-text); cursor: pointer; font: 600 11px system-ui, sans-serif; }
+.ve-launch-app:hover { border-color: var(--v2-accent, #4de8ff); }
+.ve-launch-ic { font-size: 20px; }
+.ve-launch-shelf { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.ve-seg { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ve-seg > span { font: 600 11px system-ui, sans-serif; opacity: 0.6; width: 62px; flex: 0 0 auto; }
+.ve-seg button { background: rgba(255, 255, 255, 0.06); border: var(--os-border); color: var(--os-text); border-radius: 8px; padding: 5px 9px; cursor: pointer; font: 600 11px system-ui, sans-serif; }
+.ve-seg button.on { background: var(--v2-accent, #4de8ff); color: #04122a; }
+
+/* Drawers become floating OS panels in v2. */
+body[data-version="2"] .drawer { top: calc(var(--os-top-h) + 10px); bottom: calc(var(--os-bar-h) + 12px); z-index: 1200; background: var(--os-surface); border: var(--os-border); border-radius: 16px; box-shadow: var(--os-shadow); backdrop-filter: var(--os-blur); }
+
+/* ---- macOS shell: prominent menu bar + centered floating dock + traffic lights ---- */
+body[data-os="mac"][data-version="2"] #ve-taskbar { left: 50%; right: auto; transform: translateX(-50%); bottom: 10px; width: auto; height: 52px; border-radius: 18px; border: var(--os-border); box-shadow: var(--os-shadow); }
+body[data-os="mac"][data-version="2"] #ve-launcher { left: 50%; transform: translateX(-50%); }
+body[data-os="mac"] .ve-titlebar { position: relative; }
+body[data-os="mac"] .ve-winbtns { order: -1; }
+body[data-os="mac"] .ve-title { text-align: center; }
+body[data-os="mac"] .ve-winbtn { width: 12px; height: 12px; border-radius: 50%; font-size: 0; border: 0; }
+body[data-os="mac"] .ve-winbtn.close { background: #ff5f57; }
+body[data-os="mac"] .ve-winbtn.min { background: #febc2e; }
+body[data-os="mac"] .ve-winbtn.max { background: #28c840; }
+
+/* ---- Windows shell: full-width taskbar, square window buttons ---- */
+body[data-os="win"][data-version="2"] #ve-topbar { height: 26px; font-size: 11px; }
+body[data-os="win"] .ve-winbtn.close:hover { background: #e81123; color: #fff; border-color: transparent; }
+body[data-os="win"] .ve-window { border-radius: 8px; }
+
+/* ---- ChromeOS shell: slim top, centered shelf launcher ---- */
+body[data-os="chrome"][data-version="2"] #ve-topbar { height: 26px; font-size: 11px; }
+body[data-os="chrome"][data-version="2"] #ve-taskbar .ve-start { border-radius: 50%; }
+body[data-os="chrome"] .ve-window { border-radius: 12px; }
+
+/* ---- Boot screen (loading bar) ---- */
+#ve-boot { position: fixed; inset: 0; z-index: 100000; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; color: #dfe7ff; background: radial-gradient(circle at 50% 38%, #0b1024, #05060c 70%); }
+.ve-boot-logo { font-size: 52px; filter: drop-shadow(0 0 22px var(--v2-accent, #4de8ff)); animation: vebootpulse 1.6s ease-in-out infinite; }
+.ve-boot-name { font: 700 20px "Space Grotesk", system-ui, sans-serif; letter-spacing: 0.2em; }
+.ve-boot-barwrap { width: 220px; height: 6px; border-radius: 6px; background: rgba(255, 255, 255, 0.1); overflow: hidden; }
+.ve-boot-bar { height: 100%; width: 0; background: linear-gradient(90deg, #4de8ff, #8e6cff); animation: vebootbar 2.1s ease forwards; }
+.ve-boot-tip { font: 500 12px system-ui, sans-serif; opacity: 0.68; letter-spacing: 0.08em; }
+@keyframes vebootbar { from { width: 0; } to { width: 100%; } }
+@keyframes vebootpulse { 0%, 100% { transform: scale(1); opacity: 0.85; } 50% { transform: scale(1.08); opacity: 1; } }
+
+/* ---- Boot cutscene (OS "power on") ---- */
+#ve-bootcut { position: fixed; inset: 0; z-index: 100000; overflow: hidden; display: flex; align-items: center; justify-content: center; background: #05060c; animation: v2fadein 0.3s ease both; }
+#ve-bootcut .ve-bc-grid { position: absolute; inset: -20%; opacity: 0; background-image: linear-gradient(rgba(77, 232, 255, 0.18) 1px, transparent 1px), linear-gradient(90deg, rgba(77, 232, 255, 0.18) 1px, transparent 1px); background-size: 42px 42px; transform: perspective(620px) rotateX(62deg) translateY(18%); animation: vebcgrid 3s ease-out both; }
+#ve-bootcut .ve-bc-ring { position: absolute; width: 120px; height: 120px; border-radius: 50%; border: 2px solid var(--v2-accent, #4de8ff); opacity: 0; animation: vebcring 3s ease-out both; }
+#ve-bootcut .ve-bc-logo { font-size: 66px; color: #fff; opacity: 0; filter: drop-shadow(0 0 30px var(--v2-accent, #4de8ff)); animation: vebclogo 3s ease-out both; }
+#ve-bootcut .ve-bc-flash { position: absolute; width: 10px; height: 10px; border-radius: 50%; background: radial-gradient(circle, #fff, transparent 70%); opacity: 0; animation: vebcflash 3s ease-in both; }
+#ve-bootcut.reveal { animation: v2out 0.9s ease forwards; }
+@keyframes vebcgrid { 0% { opacity: 0; } 40% { opacity: 0.6; } 100% { opacity: 0.85; } }
+@keyframes vebcring { 0% { opacity: 0; transform: scale(0.3); } 50% { opacity: 0.9; transform: scale(1); } 100% { opacity: 0; transform: scale(2.4); } }
+@keyframes vebclogo { 0% { opacity: 0; transform: scale(0.5); } 55% { opacity: 1; transform: scale(1); } 100% { opacity: 1; transform: scale(1.05); } }
+@keyframes vebcflash { 0%, 70% { opacity: 0; transform: scale(1); } 90% { opacity: 0.95; transform: scale(42); } 100% { opacity: 1; transform: scale(82); } }
+
+@media (max-width: 720px) {
+  body[data-os="mac"][data-version="2"] #ve-taskbar { left: 8px; right: 8px; transform: none; width: auto; }
+  #ve-taskbar .ve-tb-mode { display: none; }
+  .ve-launch-grid { grid-template-columns: repeat(3, 1fr); }
+}
