@@ -86,6 +86,8 @@ const state = {
   micClaimed: false, // once a mode grabs the mic, switching modes needs a refresh
   stageView: "orb",
   lastError: null, // most recent API/generation failure, for the network_issue tool
+  version: localStorage.getItem("ui_version") === "2" ? "2" : "1", // "1" classic, "2" web-OS
+  windows: JSON.parse(localStorage.getItem("ve_windows") || "{}"), // v2 window geometry by artifact id
 };
 
 // Mic noise gate for realtime barge-in: the local RMS a sound must exceed (while
@@ -276,6 +278,9 @@ const SOUND_FILES = {
   messageReceive: "sounds/7_MessageReceive.ogg",
   messageSend: "sounds/8_MessageSend.ogg",
   connect: "sounds/9_Connect.ogg",
+  // Dedicated cinematic cue for the v2 upgrade (climax ~4.5s). If the file isn't
+  // present the engine just skips it and the transition falls back to convoStart.
+  v2Upgrade: "sounds/10_Upgrade.ogg",
 };
 
 const sound = {
@@ -445,6 +450,14 @@ function bindEvents() {
   wireFlag("flagSaveToDisk", "saveToDisk");
   wireFlag("flagAllowShell", "allowShell");
   el.pickWorkspace?.addEventListener("click", pickWorkspaceFolder);
+  // Version pill — always present so users can enter/leave v2 without the agent.
+  el.versionBtn = document.createElement("button");
+  el.versionBtn.id = "versionToggle";
+  el.versionBtn.type = "button";
+  el.versionBtn.className = "button ghost small";
+  el.versionBtn.addEventListener("click", () => setUiVersion(state.version === "2" ? "1" : "2", { animate: true }));
+  document.querySelector(".account-strip")?.prepend(el.versionBtn);
+  updateVersionButton();
   renderDesktopStatus();
   window.addEventListener("message", handleWidgetMessage);
   el.navButtons.forEach((button) => { if (button.dataset.drawer) button.addEventListener("click", () => toggleDrawer(button.dataset.drawer)); });
@@ -691,6 +704,9 @@ function applyPresets() {
   document.body.dataset.theme = value("themePreset") || "aurora";
   document.body.dataset.layout = value("layoutPreset") || "focus";
   document.body.dataset.personality = value("personalityPreset") || "operator";
+  document.body.dataset.version = state.version || "1";
+  const accent = localStorage.getItem("v2_accent");
+  if (accent) document.documentElement.style.setProperty("--v2-accent", accent);
 }
 
 async function checkKeyHealth() {
@@ -1413,6 +1429,8 @@ async function runTool(name, args, realtimeCallId) {
     else if (name === "web_search") result = await webSearch(args.query || args.q || args.prompt || "", toolId);
     else if (name === "network_issue" || name === "networkissue" || name === "diagnose_error" || name === "network_error") result = await diagnoseError();
     else if (name === "open_generator") result = await openGenerator(args.kind || args.type || "image");
+    else if (name === "set_version" || name === "upgrade_version" || name === "set_ui_version" || name === "upgrade" || /upgrade.*version|version\s*2|web\s*os/i.test(name)) result = setVersionTool(args);
+    else if (name === "morph_ui" || name === "morph" || name === "reshape_ui") result = morphUi(args);
     else if (name === "create_movie" || name === "make_movie" || name === "movie_maker") result = await createMovie(args, (m) => updateToolEvent(toolId, "running", m));
     else if (name === "build_widget") result = await buildWidget(args, toolId);
     else if (name === "edit_widget") result = await editWidget(args, toolId);
@@ -2255,6 +2273,24 @@ function toolDefinitions() {
         required: ["ids", "prompt", "purpose"],
       },
     },
+    {
+      name: "set_version",
+      description: "Switch the whole app UI between version 1 (classic) and version 2 — \"VoiceEnable OS\", a reimagined desktop where every widget/artifact becomes its own movable, minimizable window (many open at once) and the entire interface can morph. Call with {\"version\":\"2\"} when the user says things like \"upgrade me to version 2\", \"turn on v2\", \"give me the web OS\"; call {\"version\":\"1\"} to go back. Upgrading plays a cinematic reveal. The user can always return to v1.",
+      parameters: { type: "object", properties: { version: { type: "string", enum: ["1", "2"], description: "Target UI version" } }, required: ["version"] },
+    },
+    {
+      name: "morph_ui",
+      description: "(Version 2 / Web OS) Reshape the live interface to fit the moment: set the color theme, layout density, accent color, and/or rearrange the open windows. Use when the user asks the UI to change look/mood/arrangement, or proactively to suit the task (cinematic dark theme for movie work, bright focused theme for writing, tile the windows to compare them). If the app is still on v1, this upgrades to v2 first.",
+      parameters: {
+        type: "object",
+        properties: {
+          theme: { type: "string", enum: ["aurora", "obsidian", "studio", "paper"], description: "Color theme" },
+          layout: { type: "string", enum: ["focus", "canvas", "compact"], description: "Layout density" },
+          accent: { type: "string", description: "Accent color as any CSS color (e.g. #4de8ff, violet, #ff4fd8)" },
+          arrange: { type: "string", enum: ["tile", "cascade", "stack"], description: "Rearrange the open windows" },
+        },
+      },
+    },
   ];
   if (flag("endConversation")) {
     tools.push({
@@ -2303,7 +2339,7 @@ function objectParams(properties, required) {
 }
 
 function systemPrompt() {
-  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. For plain informational structure, call show_workspace with layout note, table, metrics, or code (real structured data, not prose). For ANYTHING interactive or visual — charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, custom visualizations — call build_widget, which generates a live sandboxed widget on the canvas. Widgets can persist their own data (a WidgetStore the user keeps) and embed the user's saved gallery media. To make a widget that shows or uses saved media (a slideshow, image gallery, moodboard, audio/video player), call build_widget with galleryFilter set to the kind ("image"/"video"/"audio"/"all") — the recent matching items are attached automatically, so you do NOT need exact ids; only pass galleryIds when you already have specific ones. To fix, restyle, or extend a widget the user already has, call edit_widget with the change; call save_widget to keep one in their library. To show source code or markup, use layout "code". This app works identically whether the user TALKS OR TYPES — many users have no microphone, so you must be fully capable over text chat, including image editing. IMAGE EDITING / IMAGE-TO-VIDEO: to edit, restyle, fix, or vary an existing or user-uploaded image, call create_image with sourceImageIds set to that image's gallery id and put the change in prompt — this is a one-step edit. To animate an image into a video, call create_video with sourceImageIds. The user can upload images directly in chat; uploads are auto-saved to the gallery, so if you are unsure of an id, call list_gallery first to find it (newest entries are the recently uploaded ones). Only when no usable image exists yet (none uploaded and none in the gallery) call request_source_images to collect one. use_gallery_sources is an alternative when working from several gallery selections. Call create_image with no sourceImageIds for a brand-new image. If the user would rather drive generation themselves, call open_generator to place an interactive Image, Video, or Movie generator widget on the canvas (e.g. "open the image generator"). To produce a multi-scene film that continues shot-to-shot, call create_movie (or open_generator 'movie' for the hands-on Movie Maker). You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink; ask the human's consent first unless they already requested it. You have a persistent long-term memory across sessions: call remember to store a durable fact about the user and forget to remove one — only durable things, not one-off chatter. You can manage the user's saved media with manage_gallery. If any tool returns an error, a generation fails, or the user says something "failed", "isn't working", or "hung", call network_issue to read the actual server error and a live connectivity check, then explain the cause and the fix in plain language and offer to retry — don't silently ignore failures. Note that failed generations already retry up to 3 times automatically and then stop to avoid wasting the user's Pollen; do not spam more generations after a hard failure. Only end the live session (end_conversation) when the user explicitly asks to stop, end, or hang up — never on your own initiative. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery."${nativeNote()}${memoryPromptSection()}`;
+  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. For plain informational structure, call show_workspace with layout note, table, metrics, or code (real structured data, not prose). For ANYTHING interactive or visual — charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, custom visualizations — call build_widget, which generates a live sandboxed widget on the canvas. Widgets can persist their own data (a WidgetStore the user keeps) and embed the user's saved gallery media. To make a widget that shows or uses saved media (a slideshow, image gallery, moodboard, audio/video player), call build_widget with galleryFilter set to the kind ("image"/"video"/"audio"/"all") — the recent matching items are attached automatically, so you do NOT need exact ids; only pass galleryIds when you already have specific ones. To fix, restyle, or extend a widget the user already has, call edit_widget with the change; call save_widget to keep one in their library. To show source code or markup, use layout "code". This app works identically whether the user TALKS OR TYPES — many users have no microphone, so you must be fully capable over text chat, including image editing. IMAGE EDITING / IMAGE-TO-VIDEO: to edit, restyle, fix, or vary an existing or user-uploaded image, call create_image with sourceImageIds set to that image's gallery id and put the change in prompt — this is a one-step edit. To animate an image into a video, call create_video with sourceImageIds. The user can upload images directly in chat; uploads are auto-saved to the gallery, so if you are unsure of an id, call list_gallery first to find it (newest entries are the recently uploaded ones). Only when no usable image exists yet (none uploaded and none in the gallery) call request_source_images to collect one. use_gallery_sources is an alternative when working from several gallery selections. Call create_image with no sourceImageIds for a brand-new image. If the user would rather drive generation themselves, call open_generator to place an interactive Image, Video, or Movie generator widget on the canvas (e.g. "open the image generator"). To produce a multi-scene film that continues shot-to-shot, call create_movie (or open_generator 'movie' for the hands-on Movie Maker). You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink; ask the human's consent first unless they already requested it. You have a persistent long-term memory across sessions: call remember to store a durable fact about the user and forget to remove one — only durable things, not one-off chatter. You can manage the user's saved media with manage_gallery. If any tool returns an error, a generation fails, or the user says something "failed", "isn't working", or "hung", call network_issue to read the actual server error and a live connectivity check, then explain the cause and the fix in plain language and offer to retry — don't silently ignore failures. Note that failed generations already retry up to 3 times automatically and then stop to avoid wasting the user's Pollen; do not spam more generations after a hard failure. Only end the live session (end_conversation) when the user explicitly asks to stop, end, or hang up — never on your own initiative. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery." The app has two UI versions: v1 (classic) and v2 — "VoiceEnable OS", a reimagined desktop where every widget/artifact becomes its own movable window (many at once) and the whole interface can morph to fit the setup. If the user asks to "upgrade to version 2", turn on the web OS, or go back to v1, call set_version (upgrading plays a cinematic reveal). In v2 you can call morph_ui to change the theme, layout, or accent color, or to tile/cascade/stack the open windows to suit the task. Users can always return to v1 from the version button, so reassure them it's reversible.${nativeNote()}${memoryPromptSection()}`;
 }
 
 // Extra system guidance only present in the desktop build, where the filesystem and
@@ -2725,6 +2761,8 @@ function labelForTool(name) {
     web_search: "Web search",
     open_generator: "Generator widget",
     create_movie: "Movie maker",
+    set_version: "UI version",
+    morph_ui: "Morph UI",
     network_issue: "Error diagnosis",
     call_mcp_server: "MCP tool call",
     manage_gallery: "Gallery management",
@@ -2760,6 +2798,8 @@ function summarizeToolResult(name, result) {
   if (name === "web_search") return "Web search results returned.";
   if (name === "network_issue") return result?.apiReachable ? "Diagnosed — API reachable." : "Diagnosed — connectivity problem.";
   if (name === "open_generator") return `Opened the ${result?.generator || "image"} generator on the canvas.`;
+  if (name === "set_version") return result?.version === "2" ? "Upgraded to VoiceEnable OS (v2)." : "Switched back to the classic UI (v1).";
+  if (name === "morph_ui") return result?.note || "UI reshaped.";
   if (name === "create_movie") return result?.movieGalleryId ? "Movie stitched and saved to the gallery." : "Movie scenes saved to the gallery.";
   if (name === "build_widget") return "Custom widget added to the canvas.";
   if (name === "edit_widget") return "Widget updated on the canvas.";
@@ -2914,6 +2954,8 @@ function saveWorkspace() {
 // its own internal scroll, and prev/next to cycle. This fixes tall widgets being
 // cut off and stacked widgets pushing each other offscreen.
 function renderWorkspace() {
+  if (state.version === "2") { renderWorkspaceV2(); return; }
+  el.adaptiveWorkspace.classList.remove("ve-desktop");
   el.adaptiveWorkspace.innerHTML = "";
   const items = state.workspace;
   const count = items.length;
@@ -2977,6 +3019,250 @@ function pageWorkspace(direction) {
   if (count < 2) return;
   state.workspaceIndex = (state.workspaceIndex + direction + count) % count;
   renderWorkspace();
+}
+
+// ===========================================================================
+// VERSION 2 — "VoiceEnable OS". A reimagined, morphable desktop where every
+// workspace artifact (widgets included) is its own movable/minimizable window,
+// many at once. Fully additive: v1 is untouched; everything here only runs when
+// state.version === "2". Reversible at any time (setUiVersion / the version pill).
+// ===========================================================================
+let veTopZ = 20; // running top z-index for window focus
+
+function setUiVersion(version, opts = {}) {
+  const target = version === "2" ? "2" : "1";
+  const changing = state.version !== target;
+  const goingUp = target === "2" && changing;
+  state.version = target;
+  localStorage.setItem("ui_version", target);
+  const finish = () => { document.body.dataset.version = target; renderWorkspace(); updateVersionButton(); };
+  if (opts.animate && goingUp) playV2Transition(finish);
+  else if (opts.animate && target === "1" && changing) playV1Transition(finish);
+  else finish();
+}
+
+// The cinematic upgrade: dark → morphing flow → rise (3.5s) → climax (4.5s) → the
+// new UI shines through. Choreographed to the upgrade earcon (climax at ~4.5s); the
+// UI is swapped behind the flash at 4.45s, then the overlay fades to reveal it.
+function playV2Transition(done) {
+  const overlay = document.createElement("div");
+  overlay.id = "v2-overlay";
+  overlay.innerHTML = "<div class='v2-stars'></div><div class='v2-morph'></div><div class='v2-flash'></div><div class='v2-caption'>Upgrading to VoiceEnable OS</div>";
+  document.body.append(overlay);
+  playSound(sound.buffers.v2Upgrade ? "v2Upgrade" : "convoStart");
+  setTimeout(() => { try { done && done(); } catch { /* ignore */ } }, 4450);
+  setTimeout(() => overlay.classList.add("v2-reveal"), 4560);
+  setTimeout(() => overlay.remove(), 5500);
+}
+
+// Quick reverse wipe back to v1.
+function playV1Transition(done) {
+  const overlay = document.createElement("div");
+  overlay.id = "v2-overlay";
+  overlay.className = "downgrade";
+  document.body.append(overlay);
+  playSound("convoEnd");
+  setTimeout(() => { try { done && done(); } catch { /* ignore */ } }, 320);
+  setTimeout(() => { overlay.classList.add("v2-reveal"); }, 340);
+  setTimeout(() => overlay.remove(), 780);
+}
+
+function updateVersionButton() {
+  if (!el.versionBtn) return;
+  const v2 = state.version === "2";
+  el.versionBtn.textContent = v2 ? "↩ Exit v2" : "✨ v2";
+  el.versionBtn.title = v2 ? "Return to the classic v1 UI" : "Upgrade to VoiceEnable OS (v2)";
+  el.versionBtn.setAttribute("aria-pressed", v2 ? "true" : "false");
+}
+
+// Per-window geometry (persisted). Falls back to a cascade for new windows.
+function windowState(id, idx = 0) {
+  if (!state.windows[id]) {
+    state.windows[id] = { x: 22 + (idx % 6) * 30, y: 16 + (idx % 6) * 30, w: 380, z: ++veTopZ, minimized: false };
+  }
+  return state.windows[id];
+}
+
+function saveWindows() {
+  try { localStorage.setItem("ve_windows", JSON.stringify(state.windows)); } catch { /* quota */ }
+}
+
+function renderWorkspaceV2() {
+  const host = el.adaptiveWorkspace;
+  host.classList.remove("paged");
+  host.classList.add("ve-desktop");
+  host.innerHTML = "";
+  const items = state.workspace;
+  // Prune geometry for artifacts that no longer exist so state.windows can't grow forever.
+  const liveIds = new Set(items.map((a) => a.id));
+  Object.keys(state.windows).forEach((k) => { if (!liveIds.has(k)) delete state.windows[k]; });
+  // Keep z-counter above any restored value.
+  items.forEach((a) => { const s = state.windows[a.id]; if (s && s.z > veTopZ) veTopZ = s.z; });
+  el.workspaceMode.textContent = items.length ? `Web OS · ${items.length} window${items.length > 1 ? "s" : ""}` : "VoiceEnable OS";
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "ve-desktop-empty";
+    empty.innerHTML = "<span>VoiceEnable OS</span><strong>Your windows live here.</strong><p>Ask for a widget, chart, generator, or media — each opens as its own movable window. Ask me to “morph the UI” to reshape everything.</p>";
+    host.append(empty);
+    saveWindows();
+    return;
+  }
+  items.forEach((artifact, idx) => host.append(makeWindow(artifact, idx)));
+  host.append(renderDock());
+  saveWindows();
+}
+
+function mkWinBtn(glyph, title, onClick) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "ve-winbtn";
+  b.textContent = glyph;
+  b.title = title;
+  b.setAttribute("aria-label", title);
+  b.addEventListener("click", (e) => { e.stopPropagation(); onClick(); });
+  return b;
+}
+
+function makeWindow(artifact, idx) {
+  const st = windowState(artifact.id, idx);
+  const win = document.createElement("section");
+  win.className = "ve-window" + (st.minimized ? " minimized" : "");
+  win.dataset.winId = artifact.id;
+  win.style.left = `${st.x}px`;
+  win.style.top = `${st.y}px`;
+  if (st.w) win.style.width = `${st.w}px`;
+  win.style.zIndex = String(st.z || 1);
+
+  const bar = document.createElement("header");
+  bar.className = "ve-titlebar";
+  const title = document.createElement("span");
+  title.className = "ve-title";
+  title.textContent = artifact.title || artifact.layout;
+  const btns = document.createElement("div");
+  btns.className = "ve-winbtns";
+  btns.append(
+    mkWinBtn("—", "Minimize", () => minimizeWindow(artifact.id)),
+    mkWinBtn("✕", "Close", () => removeWorkspace({ id: artifact.id })),
+  );
+  bar.append(title, btns);
+
+  const body = document.createElement("div");
+  body.className = "ve-winbody";
+  body.append(renderArtifact(artifact));
+
+  win.append(bar, body);
+  win.addEventListener("pointerdown", () => focusWindow(artifact.id), true);
+  enableWindowDrag(win, bar, artifact.id);
+  return win;
+}
+
+function focusWindow(id) {
+  const s = windowState(id);
+  veTopZ += 1;
+  s.z = veTopZ;
+  const win = el.adaptiveWorkspace.querySelector(`[data-win-id="${CSS.escape(id)}"]`);
+  if (win) win.style.zIndex = String(veTopZ);
+  saveWindows();
+}
+
+function minimizeWindow(id) { windowState(id).minimized = true; saveWindows(); renderWorkspace(); }
+function restoreWindow(id) { const s = windowState(id); s.minimized = false; veTopZ += 1; s.z = veTopZ; saveWindows(); renderWorkspace(); }
+
+// Drag a window by its titlebar. Uses pointer capture so it keeps tracking outside
+// the bar, and clamps to the desktop so a window can't be lost off-screen.
+function enableWindowDrag(win, handle, id) {
+  handle.addEventListener("pointerdown", (e) => {
+    if (e.target.closest(".ve-winbtns")) return;
+    e.preventDefault();
+    focusWindow(id);
+    const host = el.adaptiveWorkspace.getBoundingClientRect();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const ox = win.offsetLeft;
+    const oy = win.offsetTop;
+    try { handle.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    const move = (ev) => {
+      const nx = Math.max(0, Math.min(ox + (ev.clientX - startX), host.width - 64));
+      const ny = Math.max(0, Math.min(oy + (ev.clientY - startY), host.height - 30));
+      win.style.left = `${nx}px`;
+      win.style.top = `${ny}px`;
+    };
+    const up = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      const s = windowState(id);
+      s.x = win.offsetLeft;
+      s.y = win.offsetTop;
+      saveWindows();
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+  });
+}
+
+function renderDock() {
+  const dock = document.createElement("div");
+  dock.className = "ve-dock";
+  state.workspace.forEach((a) => {
+    const s = windowState(a.id);
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "ve-dock-chip" + (s.minimized ? " min" : "");
+    chip.textContent = a.title || a.layout;
+    chip.title = s.minimized ? "Restore" : "Bring to front";
+    chip.addEventListener("click", () => (s.minimized ? restoreWindow(a.id) : focusWindow(a.id)));
+    dock.append(chip);
+  });
+  return dock;
+}
+
+// Rearrange open windows (tile / cascade / stack). Used by morph_ui.
+function arrangeWindows(mode) {
+  const ids = state.workspace.map((a) => a.id);
+  const width = el.adaptiveWorkspace.clientWidth || 800;
+  if (mode === "tile") {
+    const n = ids.length || 1;
+    const cols = Math.ceil(Math.sqrt(n));
+    const cw = Math.max(220, Math.floor((width - 16) / cols));
+    ids.forEach((id, i) => { const s = windowState(id); s.minimized = false; s.x = 8 + (i % cols) * cw; s.y = 8 + Math.floor(i / cols) * 230; s.w = cw - 12; });
+  } else if (mode === "stack") {
+    ids.forEach((id) => { const s = windowState(id); s.minimized = false; s.x = 24; s.y = 16; });
+  } else { // cascade (default)
+    ids.forEach((id, i) => { const s = windowState(id); s.minimized = false; s.x = 22 + i * 30; s.y = 16 + i * 30; s.w = 380; });
+  }
+  saveWindows();
+  if (state.version === "2") renderWorkspace();
+}
+
+// The agent-driven UI morph (v2): retheme, relayout, recolor, rearrange.
+function morphUi(args = {}) {
+  const changed = [];
+  const setSel = (id, val) => { const s = document.querySelector(`#${id}`); if (s && Array.from(s.options).some((o) => o.value === val)) { s.value = val; return true; } return false; };
+  if (args.theme && setSel("themePreset", args.theme)) changed.push(`theme ${args.theme}`);
+  if (args.layout && setSel("layoutPreset", args.layout)) changed.push(`layout ${args.layout}`);
+  if (changed.length) { saveSettings(); applyPresets(); }
+  if (args.accent) {
+    const c = String(args.accent).trim().slice(0, 40);
+    document.documentElement.style.setProperty("--v2-accent", c);
+    localStorage.setItem("v2_accent", c);
+    changed.push("accent");
+  }
+  if (args.arrange) { arrangeWindows(args.arrange); changed.push(`windows ${args.arrange}`); }
+  if (state.version !== "2") setUiVersion("2", { animate: true });
+  return { ok: true, changed, note: changed.length ? `UI morphed: ${changed.join(", ")}.` : "Nothing to change was specified." };
+}
+
+function setVersionTool(args = {}) {
+  const wantV1 = args.version === "1" || args.version === 1 || args.to === "1" || args.downgrade === true;
+  const v = wantV1 ? "1" : "2";
+  setUiVersion(v, { animate: true });
+  return {
+    ok: true,
+    version: v,
+    note: v === "2"
+      ? "Upgraded to VoiceEnable OS (v2): widgets are now movable windows and the UI can morph. The user can return to v1 anytime with the version button or by asking."
+      : "Reverted to the classic v1 UI.",
+  };
 }
 
 function renderArtifact(artifact) {

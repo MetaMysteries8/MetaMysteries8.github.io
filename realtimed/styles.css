@@ -2180,3 +2180,68 @@ body[data-stageview="chat"] .stage.panel.generating {
 /* Desktop download button (web build only) */
 #desktopDownload { display: inline-flex; align-items: center; gap: 6px; width: fit-content; margin: 2px 0 12px; text-decoration: none; }
 #desktopDownload.hidden { display: none; }
+
+/* =====================================================================
+   VERSION 2 — "VoiceEnable OS": reimagined morphable desktop + windows.
+   Purely additive; only active under body[data-version="2"]. v1 is untouched.
+   ===================================================================== */
+
+/* Version pill in the header (present in both versions). */
+#versionToggle { border: 1px solid var(--v2-accent, #4de8ff); }
+body[data-version="2"] #versionToggle { background: var(--v2-accent, #4de8ff); color: #04122a; border-color: transparent; }
+
+/* --- The cinematic upgrade / downgrade overlay --- */
+#v2-overlay { position: fixed; inset: 0; z-index: 99999; background: #05060c; display: flex; align-items: center; justify-content: center; overflow: hidden; animation: v2fadein 0.4s ease both; }
+#v2-overlay .v2-stars { position: absolute; inset: 0; opacity: 0; background-image: radial-gradient(1.5px 1.5px at 20% 30%, #fff, transparent), radial-gradient(1.5px 1.5px at 80% 25%, #cfefff, transparent), radial-gradient(1px 1px at 65% 70%, #fff, transparent), radial-gradient(1.5px 1.5px at 35% 80%, #e5d4ff, transparent), radial-gradient(1px 1px at 50% 50%, #fff, transparent); animation: v2stars 4.6s ease-in both; }
+#v2-overlay .v2-morph { position: absolute; inset: -25%; filter: blur(46px) saturate(1.35); animation: v2morph 4.6s ease-in-out both; background: radial-gradient(closest-side at 32% 40%, rgba(77, 232, 255, 0.55), transparent 62%), radial-gradient(closest-side at 68% 62%, rgba(142, 108, 255, 0.55), transparent 62%), radial-gradient(closest-side at 52% 48%, rgba(255, 79, 216, 0.45), transparent 60%); }
+#v2-overlay .v2-flash { position: absolute; width: 12px; height: 12px; border-radius: 50%; opacity: 0; background: radial-gradient(circle, #fff, rgba(255, 255, 255, 0.65) 42%, transparent 70%); box-shadow: 0 0 90px 46px rgba(255, 255, 255, 0.55); animation: v2flash 4.6s cubic-bezier(0.7, 0, 0.3, 1) both; }
+#v2-overlay .v2-caption { position: absolute; bottom: 13%; color: #dfe7ff; font: 600 13px/1.5 "Space Grotesk", system-ui, sans-serif; letter-spacing: 0.22em; text-transform: uppercase; opacity: 0; animation: v2cap 4.6s ease both; }
+#v2-overlay.v2-reveal { animation: v2out 0.8s ease forwards; }
+#v2-overlay.downgrade { background: #05060c; }
+@keyframes v2fadein { from { opacity: 0; } to { opacity: 1; } }
+@keyframes v2out { from { opacity: 1; } to { opacity: 0; visibility: hidden; } }
+@keyframes v2morph { 0% { transform: scale(0.55) rotate(0deg); opacity: 0.2; } 55% { transform: scale(1) rotate(60deg); opacity: 0.9; } 76% { transform: scale(1.15) rotate(92deg); opacity: 1; } 100% { transform: scale(1.3) rotate(124deg); opacity: 0.9; } }
+@keyframes v2stars { 0% { opacity: 0; transform: scale(1); } 60% { opacity: 0.5; } 100% { opacity: 0.9; transform: scale(1.12); } }
+@keyframes v2flash { 0%, 58% { opacity: 0; transform: scale(1); } 76% { opacity: 0.22; transform: scale(6); } 95% { opacity: 1; transform: scale(64); } 100% { opacity: 1; transform: scale(96); } }
+@keyframes v2cap { 0%, 20% { opacity: 0; } 55% { opacity: 0.85; } 82% { opacity: 0.9; } 100% { opacity: 0; } }
+
+/* --- v2 ambient background + chrome glow --- */
+body[data-version="2"] { --v2-accent: #4de8ff; }
+body[data-version="2"]::before { content: ""; position: fixed; inset: 0; z-index: -2; pointer-events: none; background: radial-gradient(1200px 820px at 14% 8%, rgba(77, 232, 255, 0.10), transparent 60%), radial-gradient(1000px 720px at 86% 92%, rgba(142, 108, 255, 0.12), transparent 60%), linear-gradient(158deg, #05060e, #080a18 58%, #0b0720); }
+body[data-version="2"]::after { content: ""; position: fixed; inset: -30%; z-index: -1; pointer-events: none; background: conic-gradient(from 0deg at 50% 50%, transparent, rgba(77, 232, 255, 0.045), transparent 30%, rgba(255, 79, 216, 0.05), transparent 62%, rgba(142, 108, 255, 0.045), transparent); animation: v2spin 70s linear infinite; }
+@keyframes v2spin { to { transform: rotate(360deg); } }
+body[data-version="2"] .app-header { background: rgba(12, 16, 32, 0.6); backdrop-filter: blur(18px); border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 18px; margin: 10px; box-shadow: 0 14px 44px rgba(0, 0, 0, 0.42); }
+body[data-version="2"] .brand-mark { background: var(--v2-accent); box-shadow: 0 0 22px var(--v2-accent); }
+body[data-version="2"] .nav-button.active { box-shadow: 0 0 18px -4px var(--v2-accent); border-color: var(--v2-accent); }
+body[data-version="2"] .button.primary { box-shadow: 0 0 20px -6px var(--v2-accent); }
+body[data-version="2"] .orb { filter: drop-shadow(0 0 32px rgba(77, 232, 255, 0.28)); }
+body[data-version="2"] .stage.panel { background: rgba(9, 12, 24, 0.34); border: 1px solid rgba(255, 255, 255, 0.07); }
+
+/* --- The desktop surface + windows --- */
+body[data-version="2"] .adaptive-workspace.ve-desktop { position: relative; min-height: 64vh; overflow: hidden; padding: 0; border-radius: 16px; background: rgba(8, 10, 22, 0.35); border: 1px solid rgba(255, 255, 255, 0.06); }
+body[data-version="2"] .ve-desktop-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 6px; padding: 20px; color: var(--muted, #9aa6c9); }
+body[data-version="2"] .ve-desktop-empty span { letter-spacing: 0.22em; text-transform: uppercase; font-size: 12px; color: var(--v2-accent); }
+body[data-version="2"] .ve-desktop-empty strong { font: 700 18px "Space Grotesk", system-ui, sans-serif; color: #eaf0ff; }
+body[data-version="2"] .ve-desktop-empty p { max-width: 420px; font-size: 13px; line-height: 1.5; }
+
+.ve-window { position: absolute; width: 380px; max-width: calc(100% - 16px); max-height: 80%; display: flex; flex-direction: column; background: rgba(14, 18, 34, 0.88); backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 14px; box-shadow: 0 18px 52px rgba(0, 0, 0, 0.5); overflow: hidden; }
+.ve-window.minimized { display: none; }
+.ve-titlebar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; cursor: grab; user-select: none; touch-action: none; background: linear-gradient(180deg, rgba(255, 255, 255, 0.07), transparent); border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
+.ve-titlebar:active { cursor: grabbing; }
+.ve-title { flex: 1 1 auto; min-width: 0; font: 600 13px "Space Grotesk", system-ui, sans-serif; color: #eaf0ff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ve-winbtns { display: flex; gap: 6px; flex: 0 0 auto; }
+.ve-winbtn { width: 22px; height: 22px; border-radius: 7px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(255, 255, 255, 0.05); color: #cdd8f5; cursor: pointer; font-size: 12px; line-height: 1; display: flex; align-items: center; justify-content: center; }
+.ve-winbtn:hover { background: var(--v2-accent, #4de8ff); color: #04122a; border-color: transparent; }
+.ve-winbody { flex: 1 1 auto; overflow: auto; padding: 10px; }
+.ve-window .workspace-card { background: transparent; border: 0; padding: 0; margin: 0; box-shadow: none; }
+.ve-window .workspace-card > header { display: none; }
+
+.ve-dock { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); z-index: 40; display: flex; gap: 8px; max-width: calc(100% - 24px); overflow-x: auto; padding: 6px; background: rgba(10, 14, 28, 0.72); backdrop-filter: blur(14px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 14px; }
+.ve-dock:empty { display: none; }
+.ve-dock-chip { white-space: nowrap; font: 600 12px system-ui, sans-serif; color: #dfe7ff; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 10px; padding: 6px 10px; cursor: pointer; }
+.ve-dock-chip.min { opacity: 0.55; }
+.ve-dock-chip:hover { border-color: var(--v2-accent, #4de8ff); color: #fff; }
+
+@media (max-width: 720px) {
+  .ve-window { width: calc(100% - 16px) !important; left: 8px !important; }
+}
