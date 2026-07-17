@@ -90,7 +90,10 @@ const state = {
   windows: JSON.parse(localStorage.getItem("ve_windows") || "{}"), // v2 window geometry by artifact id
   os: ["mac", "win", "chrome"].includes(localStorage.getItem("ve_os")) ? localStorage.getItem("ve_os") : "mac", // v2 desktop-environment shell
   osStyle: ["mixed", "glass", "neu", "studio"].includes(localStorage.getItem("ve_style")) ? localStorage.getItem("ve_style") : "mixed", // v2 surface style
+  wallpaper: localStorage.getItem("ve_wallpaper") || "aurora", // v2 desktop wallpaper
 };
+
+const WALLPAPERS = ["aurora", "nebula", "grid", "mesh", "void"];
 
 // Mic noise gate for realtime barge-in: the local RMS a sound must exceed (while
 // the model is speaking) to count as the user interrupting. User-tunable.
@@ -713,6 +716,7 @@ function applyPresets() {
   document.body.dataset.version = state.version || "1";
   document.body.dataset.os = state.os;
   document.body.dataset.style = state.osStyle;
+  document.body.dataset.wallpaper = state.wallpaper;
   const accent = localStorage.getItem("v2_accent");
   if (accent) document.documentElement.style.setProperty("--v2-accent", accent);
 }
@@ -2299,6 +2303,7 @@ function toolDefinitions() {
           theme: { type: "string", enum: ["aurora", "obsidian", "studio", "paper"], description: "Color theme" },
           layout: { type: "string", enum: ["focus", "canvas", "compact"], description: "Layout density" },
           accent: { type: "string", description: "Accent color as any CSS color (e.g. #4de8ff, violet, #ff4fd8)" },
+          wallpaper: { type: "string", enum: ["aurora", "nebula", "grid", "mesh", "void"], description: "Desktop wallpaper" },
           arrange: { type: "string", enum: ["tile", "cascade", "stack"], description: "Rearrange the open windows" },
         },
       },
@@ -3152,6 +3157,7 @@ function makeWindow(artifact, idx) {
     win.style.left = `${st.x}px`;
     win.style.top = `${st.y}px`;
     if (st.w) win.style.width = `${st.w}px`;
+    if (st.h) { win.style.height = `${st.h}px`; win.classList.add("sized"); }
   }
   win.style.zIndex = String(st.z || 1);
 
@@ -3176,13 +3182,45 @@ function makeWindow(artifact, idx) {
   body.append(renderArtifact(artifact));
 
   win.append(bar, body);
+  if (!st.max) {
+    const grip = document.createElement("div");
+    grip.className = "ve-resize";
+    win.append(grip);
+    enableWindowResize(win, grip, artifact.id);
+  }
   win.addEventListener("pointerdown", () => focusWindow(artifact.id), true);
   bar.addEventListener("dblclick", () => toggleMaximize(artifact.id));
   if (!st.max) enableWindowDrag(win, bar, artifact.id);
   return win;
 }
 
-function toggleMaximize(id) { const s = windowState(id); s.max = !s.max; saveWindows(); renderWorkspace(); }
+function toggleMaximize(id) { const s = windowState(id); s.max = !s.max; if (s.max) s.snap = ""; saveWindows(); renderWorkspace(); }
+
+// Drag the bottom-right grip to resize (min sizes keep a window usable).
+function enableWindowResize(win, grip, id) {
+  grip.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    focusWindow(id);
+    const sx = e.clientX; const sy = e.clientY;
+    const ow = win.offsetWidth; const oh = win.offsetHeight;
+    try { grip.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    const move = (ev) => {
+      win.style.width = `${Math.max(240, ow + (ev.clientX - sx))}px`;
+      win.style.height = `${Math.max(160, oh + (ev.clientY - sy))}px`;
+      win.classList.add("sized");
+    };
+    const up = () => {
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", up);
+      const s = windowState(id);
+      s.w = win.offsetWidth; s.h = win.offsetHeight; s.snap = "";
+      saveWindows();
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up);
+  });
+}
 
 function focusWindow(id) {
   const s = windowState(id);
@@ -3219,13 +3257,32 @@ function enableWindowDrag(win, handle, id) {
       handle.removeEventListener("pointermove", move);
       handle.removeEventListener("pointerup", up);
       const s = windowState(id);
-      s.x = win.offsetLeft;
-      s.y = win.offsetTop;
-      saveWindows();
+      const left = win.offsetLeft;
+      const top = win.offsetTop;
+      const right = left + win.offsetWidth;
+      // Edge snapping (OS-style): top → maximize, left/right edge → half-tile.
+      if (top <= 6) { s.max = true; s.snap = "max"; saveWindows(); renderWorkspace(); return; }
+      if (left <= 6) { snapWindow(id, "left", host); return; }
+      if (right >= host.width - 6) { snapWindow(id, "right", host); return; }
+      s.x = left; s.y = top; s.snap = ""; saveWindows();
     };
     handle.addEventListener("pointermove", move);
     handle.addEventListener("pointerup", up);
   });
+}
+
+// Half-tile a window to the left or right edge of the desktop.
+function snapWindow(id, side, host) {
+  const rect = host || el.adaptiveWorkspace.getBoundingClientRect();
+  const s = windowState(id);
+  s.max = false;
+  s.snap = side;
+  s.w = Math.floor(rect.width / 2) - 8;
+  s.h = Math.floor(rect.height) - 12;
+  s.y = 6;
+  s.x = side === "right" ? Math.ceil(rect.width / 2) + 2 : 6;
+  saveWindows();
+  renderWorkspace();
 }
 
 function renderDock() {
@@ -3277,6 +3334,7 @@ function morphUi(args = {}) {
   }
   if (args.os) { setOs(args.os); changed.push(`desktop ${state.os}`); }
   if (args.style) { setDesktopStyle(args.style); changed.push(`style ${state.osStyle}`); }
+  if (args.wallpaper) { setWallpaper(args.wallpaper); changed.push(`wallpaper ${state.wallpaper}`); }
   if (args.arrange) { arrangeWindows(args.arrange); changed.push(`windows ${args.arrange}`); }
   if (state.version !== "2") setUiVersion("2", { animate: true });
   else refreshOsChrome();
@@ -3315,6 +3373,43 @@ function setDesktopStyle(styleName) {
   localStorage.setItem("ve_style", state.osStyle);
   document.body.dataset.style = state.osStyle;
 }
+
+function setWallpaper(name) {
+  state.wallpaper = WALLPAPERS.includes(name) ? name : "aurora";
+  localStorage.setItem("ve_wallpaper", state.wallpaper);
+  document.body.dataset.wallpaper = state.wallpaper;
+  refreshOsChrome();
+}
+
+function nextIn(list, current) { const i = list.indexOf(current); return list[(i + 1) % list.length]; }
+
+// Desktop right-click menu — because the WHOLE desktop is now usable.
+function showDesktopMenu(x, y) {
+  closeDesktopMenu();
+  const menu = document.createElement("div");
+  menu.className = "ve-ctx";
+  const add = (label, fn) => { const b = document.createElement("button"); b.className = "ve-ctx-item"; b.textContent = label; b.addEventListener("click", () => { closeDesktopMenu(); fn(); }); menu.append(b); };
+  const sep = () => { const d = document.createElement("div"); d.className = "ve-ctx-sep"; menu.append(d); };
+  add("🎨  New image generator", () => openGenerator("image"));
+  add("🎬  New video generator", () => openGenerator("video"));
+  add("🎥  New movie maker", () => openGenerator("movie"));
+  sep();
+  add("▦  Tile windows", () => arrangeWindows("tile"));
+  add("▤  Cascade windows", () => arrangeWindows("cascade"));
+  add("▣  Stack windows", () => arrangeWindows("stack"));
+  sep();
+  add(`🖥  Desktop: ${state.os} → ${nextIn(["mac", "win", "chrome"], state.os)}`, () => setOs(nextIn(["mac", "win", "chrome"], state.os)));
+  add(`✨  Style: ${state.osStyle} → ${nextIn(["mixed", "glass", "neu", "studio"], state.osStyle)}`, () => setDesktopStyle(nextIn(["mixed", "glass", "neu", "studio"], state.osStyle)));
+  add(`🌌  Wallpaper: ${nextIn(WALLPAPERS, state.wallpaper)}`, () => setWallpaper(nextIn(WALLPAPERS, state.wallpaper)));
+  sep();
+  add("↩  Exit to classic (v1)", () => setUiVersion("1", { animate: true }));
+  document.body.append(menu);
+  menu.style.left = `${Math.min(x, window.innerWidth - menu.offsetWidth - 8)}px`;
+  menu.style.top = `${Math.min(y, window.innerHeight - menu.offsetHeight - 8)}px`;
+  setTimeout(() => document.addEventListener("pointerdown", closeDesktopMenu, { once: true }), 0);
+}
+
+function closeDesktopMenu() { document.querySelectorAll(".ve-ctx").forEach((m) => m.remove()); }
 
 function ensureOsChrome() {
   if (el.osChromeBuilt) return;
@@ -3385,13 +3480,76 @@ function buildOsChrome() {
     "<div class='ve-seg' data-seg='style'><span>Style</span>" +
       "<button data-style='mixed'>Mixed</button><button data-style='glass'>Glass</button><button data-style='neu'>Neu</button><button data-style='studio'>Studio</button></div>" +
     "<div class='ve-seg' data-seg='arrange'><span>Windows</span>" +
-      "<button data-arrange='tile'>Tile</button><button data-arrange='cascade'>Cascade</button><button data-arrange='stack'>Stack</button></div>";
+      "<button data-arrange='tile'>Tile</button><button data-arrange='cascade'>Cascade</button><button data-arrange='stack'>Stack</button></div>" +
+    "<div class='ve-seg' data-seg='wall'><span>Wallpaper</span>" +
+      "<button data-wall='aurora'>Aurora</button><button data-wall='nebula'>Nebula</button><button data-wall='grid'>Grid</button><button data-wall='mesh'>Mesh</button><button data-wall='void'>Void</button></div>";
   launcher.append(grid, shelf);
 
-  document.body.append(top, bar, launcher);
-  el.osTopbar = top; el.osTaskbar = bar; el.osLauncher = launcher;
+  // The new reactive visualizer — a floating "assistant" puck (canvas), a fresh look
+  // that replaces the old SVG orb but reuses the same audio analyser + viz loop.
+  const viz2 = document.createElement("canvas");
+  viz2.id = "ve-viz";
+  viz2.width = 132; viz2.height = 132;
+  viz2.title = "Assistant — click to chat";
+
+  document.body.append(top, bar, launcher, viz2);
+  el.osTopbar = top; el.osTaskbar = bar; el.osLauncher = launcher; el.osViz = viz2;
+  viz2.addEventListener("click", () => setStageView(state.stageView === "chat" ? "orb" : "chat"));
   wireOsChrome();
   refreshOsChrome();
+}
+
+// Draw the v2 assistant visualizer: a reactive ring of frequency bars around a soft
+// pulsing core. Fed by viz.level / viz.state / viz.burst from the shared viz loop.
+function drawOsViz() {
+  const cv = el.osViz;
+  if (!cv || state.version !== "2" || document.hidden) return;
+  const ctx = cv.getContext("2d");
+  const W = cv.width; const H = cv.height;
+  const cx = W / 2; const cy = H / 2;
+  ctx.clearRect(0, 0, W, H);
+  const accent = (getComputedStyle(document.body).getPropertyValue("--v2-accent").trim()) || "#4de8ff";
+  const level = viz.level;
+  const burst = viz.burst;
+  // Frequency spectrum (falls back to a synthesized idle shimmer when no audio).
+  let freq = null;
+  if (viz.analyser) {
+    if (!viz.freq || viz.freq.length !== viz.analyser.frequencyBinCount) viz.freq = new Uint8Array(viz.analyser.frequencyBinCount);
+    viz.analyser.getByteFrequencyData(viz.freq);
+    freq = viz.freq;
+  }
+  const N = 48;
+  const rBase = 30 + level * 6;
+  ctx.lineCap = "round";
+  for (let i = 0; i < N; i += 1) {
+    const a = (i / N) * Math.PI * 2 - Math.PI / 2 + viz.spin * 0.3;
+    let mag;
+    if (freq) { const idx = Math.floor((i / N) * freq.length * 0.55); mag = freq[idx] / 255; }
+    else { mag = 0.18 + 0.5 * level * (0.5 + 0.5 * Math.sin(viz.phase * 2 + i * 0.5)); }
+    const len = 4 + mag * 22 + burst * 12;
+    const x0 = cx + Math.cos(a) * rBase;
+    const y0 = cy + Math.sin(a) * rBase;
+    const x1 = cx + Math.cos(a) * (rBase + len);
+    const y1 = cy + Math.sin(a) * (rBase + len);
+    ctx.strokeStyle = accent;
+    ctx.globalAlpha = 0.35 + 0.6 * mag;
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x1, y1);
+    ctx.stroke();
+  }
+  // Soft core.
+  ctx.globalAlpha = 1;
+  const coreR = 16 + level * 8 + burst * 6;
+  const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreR);
+  grad.addColorStop(0, "rgba(255,255,255,0.95)");
+  grad.addColorStop(0.5, accent);
+  grad.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(cx, cy, coreR, 0, Math.PI * 2);
+  ctx.fill();
 }
 
 function wireOsChrome() {
@@ -3406,6 +3564,8 @@ function wireOsChrome() {
   launcher.querySelectorAll("[data-os]").forEach((b) => b.addEventListener("click", () => { setOs(b.dataset.os); refreshOsChrome(); }));
   launcher.querySelectorAll("[data-style]").forEach((b) => b.addEventListener("click", () => { setDesktopStyle(b.dataset.style); refreshOsChrome(); }));
   launcher.querySelectorAll("[data-arrange]").forEach((b) => b.addEventListener("click", () => { arrangeWindows(b.dataset.arrange); toggleLauncher(false); }));
+  launcher.querySelectorAll("[data-wall]").forEach((b) => b.addEventListener("click", () => { setWallpaper(b.dataset.wall); }));
+  el.adaptiveWorkspace.addEventListener("contextmenu", (e) => { if (state.version !== "2") return; e.preventDefault(); showDesktopMenu(e.clientX, e.clientY); });
   // Click-away closes the launcher.
   document.addEventListener("pointerdown", (e) => {
     if (!el.osLauncher || el.osLauncher.classList.contains("hidden")) return;
@@ -3447,6 +3607,7 @@ function refreshOsChrome() {
   // Selected desktop + style highlights in the launcher.
   el.osLauncher.querySelectorAll("[data-os]").forEach((b) => b.classList.toggle("on", b.dataset.os === state.os));
   el.osLauncher.querySelectorAll("[data-style]").forEach((b) => b.classList.toggle("on", b.dataset.style === state.osStyle));
+  el.osLauncher.querySelectorAll("[data-wall]").forEach((b) => b.classList.toggle("on", b.dataset.wall === state.wallpaper));
 }
 
 // Window chips in the taskbar dock (open/minimized). Replaces the in-desktop dock.
@@ -3471,36 +3632,48 @@ function syncTaskbarWindows() {
 // cutscene (same upgrade sound) that "powers on" the OS and reveals the desktop.
 // Click anywhere to skip. The upgrade cutscene (v1→v2) is separate (playV2Transition).
 // ---------------------------------------------------------------------------
+// The boot sequence needs a click first: browsers block autoplay audio until a user
+// gesture, so we present a "Power on" gate (which also unlocks the boot sound) plus a
+// Skip for anyone who just wants straight in.
 function startBootSequence() {
-  const boot = document.createElement("div");
-  boot.id = "ve-boot";
-  boot.innerHTML =
+  const gate = document.createElement("div");
+  gate.id = "ve-boot";
+  gate.innerHTML =
+    "<div class='ve-boot-logo'>◈</div>" +
+    "<div class='ve-boot-name'>VoiceEnable OS</div>" +
+    "<div class='ve-boot-actions'>" +
+      "<button class='ve-boot-start'>▶ Power on</button>" +
+      "<button class='ve-boot-skip'>Skip intro</button>" +
+    "</div>" +
+    "<div class='ve-boot-tip'>Click to boot — sound needs one tap to start.</div>";
+  document.body.append(gate);
+  gate.querySelector(".ve-boot-skip").addEventListener("click", (e) => { e.stopPropagation(); gate.remove(); });
+  const power = (e) => { if (e) e.stopPropagation(); runBootLoader(gate); };
+  gate.querySelector(".ve-boot-start").addEventListener("click", power);
+  gate.addEventListener("click", power); // clicking anywhere on the gate powers on
+}
+
+function runBootLoader(gate) {
+  if (gate.dataset.on) return;
+  gate.dataset.on = "1";
+  gate.innerHTML =
     "<div class='ve-boot-logo'>◈</div>" +
     "<div class='ve-boot-name'>VoiceEnable OS</div>" +
     "<div class='ve-boot-barwrap'><div class='ve-boot-bar'></div></div>" +
-    "<div class='ve-boot-tip'>Starting your desktop…</div>";
-  document.body.append(boot);
-  let advanced = false;
-  const advance = () => {
-    if (advanced) return; advanced = true;
-    boot.remove();
-    document.removeEventListener("pointerdown", skip);
-    document.removeEventListener("keydown", skip);
-    playBootCutscene();
-  };
-  const skip = () => { advanced = true; boot.remove(); document.getElementById("ve-bootcut")?.remove(); document.removeEventListener("pointerdown", skip); document.removeEventListener("keydown", skip); };
-  document.addEventListener("pointerdown", skip, { once: true });
-  document.addEventListener("keydown", skip, { once: true });
-  setTimeout(advance, 2200);
+    "<div class='ve-boot-tip'>Starting your desktop…</div>" +
+    "<button class='ve-boot-skip small'>Skip</button>";
+  gate.querySelector(".ve-boot-skip").addEventListener("click", (e) => { e.stopPropagation(); gate.remove(); document.getElementById("ve-bootcut")?.remove(); });
+  setTimeout(() => { if (document.body.contains(gate)) { gate.remove(); playBootCutscene(); } }, 2000);
 }
 
 function playBootCutscene() {
   const cut = document.createElement("div");
   cut.id = "ve-bootcut";
-  cut.innerHTML = "<div class='ve-bc-grid'></div><div class='ve-bc-ring'></div><div class='ve-bc-logo'>◈</div><div class='ve-bc-flash'></div>";
+  cut.innerHTML = "<div class='ve-bc-grid'></div><div class='ve-bc-ring'></div><div class='ve-bc-logo'>◈</div><div class='ve-bc-flash'></div><button class='ve-bc-skip'>Skip</button>";
   document.body.append(cut);
   playSound(sound.buffers.v2Upgrade ? "v2Upgrade" : "convoStart");
   const done = () => cut.remove();
+  cut.querySelector(".ve-bc-skip").addEventListener("click", (e) => { e.stopPropagation(); done(); });
   cut.addEventListener("pointerdown", done, { once: true });
   setTimeout(() => cut.classList.add("reveal"), 3000);
   setTimeout(done, 3900);
@@ -4761,6 +4934,9 @@ function renderVizFrame() {
       el.orbDots.innerHTML = dots;
     }
   }
+
+  // The v2 assistant puck rides the same loop.
+  drawOsViz();
 }
 
 // Catmull-Rom → cubic bezier for a smooth closed blob.

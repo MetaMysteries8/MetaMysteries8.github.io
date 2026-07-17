@@ -2288,15 +2288,24 @@ body[data-version="2"][data-style="neu"]::after,
 body[data-version="2"][data-style="studio"]::after { display: none; }
 body[data-version="2"][data-style="studio"]::before { background: linear-gradient(160deg, #090c16, #0b0e1c); }
 
-/* Full-screen OS: hide the v1 chrome, let the desktop own the viewport. */
+/* Full-screen OS: the desktop OWNS the whole viewport (fixed, edge-to-edge), so the
+   old constrained shell/stage column is completely replaced — not just restyled. */
+body[data-version="2"] { overflow: hidden; }
 body[data-version="2"] .app-header,
 body[data-version="2"] .controls,
 body[data-version="2"] .stage-topbar,
 body[data-version="2"] .realtime-status,
 body[data-version="2"] .orb { display: none !important; }
 body[data-version="2"] .app-shell { display: block; padding: 0; gap: 0; max-width: none; }
-body[data-version="2"] .stage.panel { margin: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; padding: calc(var(--os-top-h) + 10px) 12px calc(var(--os-bar-h) + 16px); min-height: 100vh; }
-body[data-version="2"] .adaptive-workspace.ve-desktop { min-height: calc(100vh - var(--os-top-h) - var(--os-bar-h) - 40px); }
+body[data-version="2"] .stage.panel { margin: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; padding: 0; min-height: 0; }
+body[data-version="2"] .adaptive-workspace.ve-desktop {
+  position: fixed; left: 0; right: 0; top: var(--os-top-h); bottom: var(--os-bar-h);
+  width: auto; height: auto; min-height: 0; margin: 0; padding: 0; border: 0; border-radius: 0;
+  overflow: hidden; z-index: 1; background: transparent;
+}
+/* macOS floats its dock, so the desktop can run to the very bottom behind it. */
+body[data-os="mac"][data-version="2"] .adaptive-workspace.ve-desktop { bottom: 0; }
+body[data-version="2"] #mediaDock { position: fixed; right: 12px; bottom: calc(var(--os-bar-h) + 12px); width: min(320px, 80vw); z-index: 950; }
 body[data-version="2"] .inline-chat { position: fixed; left: 12px; bottom: calc(var(--os-bar-h) + 12px); width: min(420px, 82vw); max-height: 52vh; z-index: 900; border-radius: 16px; background: var(--os-surface); border: var(--os-border); box-shadow: var(--os-shadow); backdrop-filter: var(--os-blur); }
 
 /* Windows read the style variables. */
@@ -2396,3 +2405,35 @@ body[data-os="chrome"] .ve-window { border-radius: 12px; }
   #ve-taskbar .ve-tb-mode { display: none; }
   .ve-launch-grid { grid-template-columns: repeat(3, 1fr); }
 }
+
+/* ---- New reactive visualizer (floating assistant puck) ---- */
+#ve-viz { display: none; }
+body[data-version="2"] #ve-viz { display: block; position: fixed; right: 16px; bottom: calc(var(--os-bar-h) + 16px); width: 66px; height: 66px; z-index: 1200; cursor: pointer; filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.5)); transition: transform 0.15s ease; }
+body[data-version="2"] #ve-viz:hover { transform: scale(1.08); }
+body[data-os="mac"][data-version="2"] #ve-viz { bottom: calc(var(--os-bar-h) + 24px); }
+
+/* ---- Window resize grip + free-sizing ---- */
+.ve-resize { position: absolute; right: 0; bottom: 0; width: 18px; height: 18px; cursor: nwse-resize; z-index: 4; touch-action: none; }
+.ve-resize::after { content: ""; position: absolute; right: 3px; bottom: 3px; width: 8px; height: 8px; border-right: 2px solid rgba(255, 255, 255, 0.4); border-bottom: 2px solid rgba(255, 255, 255, 0.4); border-bottom-right-radius: 3px; }
+.ve-window.sized { max-height: none; }
+
+/* ---- Desktop right-click context menu ---- */
+.ve-ctx { position: fixed; z-index: 3000; min-width: 224px; padding: 6px; border-radius: 12px; color: var(--os-text, #eaf0ff); background: var(--os-surface, rgba(18, 22, 40, 0.92)); border: var(--os-border, 1px solid rgba(255, 255, 255, 0.1)); box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5); backdrop-filter: var(--os-blur, blur(14px)); }
+.ve-ctx-item { display: block; width: 100%; text-align: left; background: none; border: 0; color: inherit; font: 500 12.5px system-ui, sans-serif; padding: 8px 10px; border-radius: 8px; cursor: pointer; white-space: nowrap; }
+.ve-ctx-item:hover { background: var(--v2-accent, #4de8ff); color: #04122a; }
+.ve-ctx-sep { height: 1px; margin: 5px 6px; background: rgba(255, 255, 255, 0.1); }
+
+/* ---- Boot gate buttons ---- */
+.ve-boot-actions { display: flex; gap: 10px; margin-top: 4px; }
+.ve-boot-start { background: linear-gradient(135deg, #4de8ff, #8e6cff); color: #04122a; border: 0; border-radius: 12px; padding: 11px 22px; font: 700 14px "Space Grotesk", system-ui, sans-serif; cursor: pointer; box-shadow: 0 0 26px -6px #4de8ff; }
+.ve-boot-skip { background: rgba(255, 255, 255, 0.08); color: #dfe7ff; border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 12px; padding: 11px 18px; font: 600 13px system-ui, sans-serif; cursor: pointer; }
+.ve-boot-skip.small { padding: 6px 14px; font-size: 12px; margin-top: 8px; }
+.ve-bc-skip { position: fixed; right: 18px; bottom: 18px; z-index: 5; background: rgba(255, 255, 255, 0.1); color: #fff; border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 10px; padding: 7px 14px; font: 600 12px system-ui, sans-serif; cursor: pointer; }
+
+/* ---- Wallpapers (desktop is transparent; body::before is the wallpaper) ---- */
+body[data-version="2"][data-wallpaper="aurora"]::before { background: radial-gradient(1200px 820px at 14% 8%, rgba(77, 232, 255, 0.12), transparent 60%), radial-gradient(1000px 720px at 86% 92%, rgba(142, 108, 255, 0.14), transparent 60%), linear-gradient(158deg, #05060e, #080a18 58%, #0b0720); }
+body[data-version="2"][data-wallpaper="nebula"]::before { background: radial-gradient(900px 700px at 25% 20%, rgba(255, 79, 216, 0.18), transparent 60%), radial-gradient(1000px 800px at 80% 75%, rgba(120, 90, 255, 0.22), transparent 62%), radial-gradient(700px 600px at 60% 40%, rgba(77, 232, 255, 0.12), transparent 60%), linear-gradient(160deg, #0a0616, #0c0820 60%, #160726); }
+body[data-version="2"][data-wallpaper="grid"]::before { background: linear-gradient(160deg, #070a16, #0a0e1e), linear-gradient(rgba(120, 150, 255, 0.07) 1px, transparent 1px), linear-gradient(90deg, rgba(120, 150, 255, 0.07) 1px, transparent 1px); background-size: cover, 44px 44px, 44px 44px; }
+body[data-version="2"][data-wallpaper="mesh"]::before { background: radial-gradient(600px 500px at 15% 25%, rgba(77, 232, 255, 0.18), transparent 60%), radial-gradient(600px 500px at 85% 20%, rgba(255, 79, 216, 0.16), transparent 60%), radial-gradient(700px 600px at 30% 85%, rgba(123, 255, 175, 0.14), transparent 60%), radial-gradient(700px 600px at 80% 80%, rgba(142, 108, 255, 0.18), transparent 60%), #06070f; }
+body[data-version="2"][data-wallpaper="void"]::before { background: radial-gradient(1200px 900px at 50% 40%, #0b0d18, #04040a 75%); }
+body[data-version="2"][data-wallpaper="void"]::after, body[data-version="2"][data-wallpaper="grid"]::after { display: none; }
