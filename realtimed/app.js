@@ -1391,7 +1391,8 @@ async function runTool(name, args, realtimeCallId) {
       if (Array.isArray(wanted) && wanted.length && !sources.length) {
         result = { error: "None of those sourceImageIds matched an image in the gallery. Call list_gallery for valid ids, or call request_source_images to have the user upload the image to edit." };
       } else {
-        result = await generateMedia("image", args.prompt, value("imageModel"), toolId, sources.length ? { ...args, images: sources } : args);
+        const model = (typeof args.model === "string" && args.model.trim()) || value("imageModel");
+        result = await generateMedia("image", args.prompt, model, toolId, sources.length ? { ...args, images: sources } : args);
       }
     }
     else if (name === "create_video") {
@@ -1400,7 +1401,8 @@ async function runTool(name, args, realtimeCallId) {
       if (Array.isArray(wanted) && wanted.length && !sources.length) {
         result = { error: "None of those sourceImageIds matched an image in the gallery. Call list_gallery for valid ids, or call request_source_images to collect the image to animate." };
       } else {
-        result = await generateMedia("video", args.prompt, value("videoModel"), toolId, sources.length ? { ...args, images: sources } : args);
+        const model = (typeof args.model === "string" && args.model.trim()) || value("videoModel");
+        result = await generateMedia("video", args.prompt, model, toolId, sources.length ? { ...args, images: sources } : args);
       }
     }
     else if (name === "create_audio") {
@@ -1469,7 +1471,10 @@ async function generateMedia(kind, prompt, model, toolId, options = {}) {
 function generationCount(kind, options) {
   const requested = Number(options.count || options.variations);
   const fallback = Number(value(kind === "image" ? "imageCount" : kind === "video" ? "videoCount" : "audioCount")) || 1;
-  const max = kind === "image" ? 4 : kind === "video" ? 2 : 3;
+  // No artificial per-request cap — the agent/user decides how many. The generation
+  // queue only runs 2 at a time regardless, so a big batch drains gently rather than
+  // hammering the API. A high safety ceiling just prevents a runaway typo (count:9999).
+  const max = kind === "image" ? 50 : kind === "video" ? 20 : 20;
   return Math.max(1, Math.min(max, requested || fallback));
 }
 
@@ -1528,7 +1533,14 @@ async function runMediaGeneration(kind, prompt, model, toolId, options = {}) {
   // shows elapsed seconds; the dock job is ALWAYS ended so the loop is released.
   // Transient failures retry up to MAX_TRIES; deterministic ones (copyright/policy,
   // auth, out-of-Pollen) stop immediately — retrying them just burns Pollen.
-  const timeoutMs = kind === "video" ? 240000 : kind === "audio" ? 150000 : 90000;
+  // Timeouts scale with requested length so a long clip isn't aborted mid-render:
+  // video ≈ 20s of budget per requested second (min 4min), audio ≈ 1s per second.
+  const reqDuration = Number(options.duration) || 0;
+  const timeoutMs = kind === "video"
+    ? Math.max(240000, reqDuration * 20000)
+    : kind === "audio"
+      ? Math.max(150000, reqDuration * 1500)
+      : 90000;
   const MAX_TRIES = 3;
   const startedAt = Date.now();
   const ticker = setInterval(() => {
@@ -1596,6 +1608,23 @@ async function runMediaGeneration(kind, prompt, model, toolId, options = {}) {
   }
 }
 
+// Turn any "W:H" (or "WxH") aspect ratio into concrete pixel dimensions, targeting
+// ~720 on the short side. Lets the user/agent pass ANY ratio (21:9, 1:1, 4:5, …)
+// instead of being limited to two hardcoded shapes.
+function videoDimensions(aspect) {
+  const m = /^\s*(\d+)\s*[:x]\s*(\d+)\s*$/.exec(String(aspect || ""));
+  const w = m ? Number(m[1]) || 16 : 16;
+  const h = m ? Number(m[2]) || 9 : 9;
+  const ratio = w / h;
+  let width;
+  let height;
+  if (ratio >= 1) { height = 720; width = Math.round(720 * ratio); }
+  else { width = 720; height = Math.round(720 / ratio); }
+  width -= width % 2;
+  height -= height % 2;
+  return { width, height, aspect: `${w}:${h}` };
+}
+
 function mediaParams(kind, loaderKind, model, options = {}) {
   const params = new URLSearchParams({ model });
   if (kind === "image") {
@@ -1606,12 +1635,12 @@ function mediaParams(kind, loaderKind, model, options = {}) {
     if (options.images?.length) params.set("image", options.images.join("|"));
   }
   if (kind === "video") {
-    const aspect = options.aspectRatio || value("videoAspect") || "16:9";
-    const [width, height] = aspect === "9:16" ? ["720", "1280"] : ["1280", "720"];
-    params.set("width", width);
-    params.set("height", height);
-    params.set("aspectRatio", aspect);
-    params.set("duration", String(options.duration || value("videoDuration") || "6"));
+    const dims = videoDimensions(options.aspectRatio || value("videoAspect") || "16:9");
+    params.set("width", String(dims.width));
+    params.set("height", String(dims.height));
+    params.set("aspectRatio", dims.aspect);
+    const duration = Number(options.duration || value("videoDuration") || 6);
+    params.set("duration", String(duration > 0 ? duration : 6));
     params.set("audio", String(options.withAudio ?? value("videoAudio") ?? "false"));
     if (options.images?.length) params.set("image", options.images.join("|"));
   }
@@ -2053,7 +2082,8 @@ function toolDefinitions() {
         type: "object",
         properties: {
           prompt: { type: "string", description: "Detailed image prompt. When editing, describe the change to apply to the source image(s)." },
-          count: { type: "integer", minimum: 1, maximum: 4, description: "Number of variations/images" },
+          count: { type: "integer", minimum: 1, description: "How many variations/images to make. You decide based on the request — no fixed cap." },
+          model: { type: "string", description: "Optional exact image model id to use (from the live image model list). Omit to use the user's selected/default model, or a source-capable one when editing." },
           sourceImageIds: { type: "array", items: { type: "string" }, description: "Gallery item ids of image(s) to EDIT or use as visual reference. Provide these to edit/restyle an existing or user-uploaded image (uploads are auto-saved to the gallery — call list_gallery for ids). Omit for a brand-new image. A source-capable image model is selected automatically." },
         },
         required: ["prompt"],
@@ -2066,9 +2096,10 @@ function toolDefinitions() {
         type: "object",
         properties: {
           prompt: { type: "string", description: "Detailed video prompt" },
-          count: { type: "integer", minimum: 1, maximum: 2, description: "Number of videos" },
-          duration: { type: "integer", minimum: 1, maximum: 120, description: "Duration in seconds, model-dependent" },
-          aspectRatio: { type: "string", enum: ["16:9", "9:16"], description: "Video aspect ratio" },
+          count: { type: "integer", minimum: 1, description: "How many videos to make. You decide — no fixed cap." },
+          duration: { type: "integer", minimum: 1, description: "Length in seconds. You and the user choose freely; the actual maximum is whatever the chosen model supports." },
+          aspectRatio: { type: "string", description: "Any aspect ratio as \"W:H\" (e.g. 16:9, 9:16, 1:1, 21:9, 4:5)." },
+          model: { type: "string", description: "Optional exact video model id to use (from the live video model list). Omit to use the user's selected/default model, or a source-capable one for image-to-video." },
           withAudio: { type: "boolean", description: "Whether to request video audio when the model supports it" },
           sourceImageIds: { type: "array", items: { type: "string" }, description: "Gallery item ids of image(s) to animate into video (image-to-video). Call list_gallery for ids; uploaded images are auto-saved there. A source-capable video model is selected automatically." },
         },
@@ -2082,8 +2113,8 @@ function toolDefinitions() {
         type: "object",
         properties: {
           prompt: { type: "string", description: "For TTS: exact text to speak. For music/sound: music or sound prompt." },
-          count: { type: "integer", minimum: 1, maximum: 3, description: "Number of audio variations" },
-          duration: { type: "integer", minimum: 1, maximum: 300, description: "Music/sound duration in seconds" },
+          count: { type: "integer", minimum: 1, description: "How many audio variations to make. You decide — no fixed cap." },
+          duration: { type: "integer", minimum: 1, description: "Music/sound length in seconds. Choose freely; the real limit is what the model supports." },
         },
         required: ["prompt"],
       },
@@ -2091,7 +2122,7 @@ function toolDefinitions() {
     { name: "web_search", description: "Search the live web for current, factual, or time-sensitive information (news, prices, docs, events, anything past your training cutoff) and get a concise answer with cited sources. Returns { answer } with inline [n] citations and a Sources list.", parameters: objectParams({ query: "The search query" }, ["query"]) },
     { name: "network_issue", description: "Diagnose the most recent API or generation error. Returns what failed, the exact status/message the server returned, plus a LIVE connectivity check (is the API reachable, are we online, is a key connected). Call this whenever a tool returns an error, a generation fails, or the user says something 'failed', 'isn't working', or 'hung' — then read the result and help the user fix it (rephrase for copyright/policy blocks, reconnect for auth, top up for balance, retry for a transient network/timeout).", parameters: { type: "object", properties: {} } },
     { name: "open_generator", description: "Open an interactive generator WIDGET on the canvas so the user can drive it themselves instead of asking you each time. Kinds: 'image' (prompt + optional gallery source images; auto-picks generate vs edit and the right model), 'video' (prompt + optional start image for image-to-video), 'movie' (the multi-scene Movie Maker). Call this when the user says things like 'open the image generator', 'give me a video maker', or 'open movie maker'.", parameters: { type: "object", properties: { kind: { type: "string", enum: ["image", "video", "movie"], description: "Which generator to open" } }, required: ["kind"] } },
-    { name: "create_movie", description: "Produce a multi-scene MOVIE directly: generates each scene as a short video, seeds each scene from the PREVIOUS scene's last frame with an AI-written continuation prompt (persisting story context), stitches all scenes into one clip, and saves it to the gallery. Use for 'make a movie/film about ...'. For a hands-on UI instead, use open_generator kind 'movie'.", parameters: { type: "object", properties: { description: { type: "string", description: "What the movie is about / the overall story across scenes" }, scenes: { type: "integer", minimum: 1, maximum: 8, description: "Number of scenes (default 3)" }, sceneSeconds: { type: "integer", minimum: 2, maximum: 15, description: "Seconds per scene (default 5)" }, aspectRatio: { type: "string", enum: ["16:9", "9:16"], description: "Movie shape" }, model: { type: "string", description: "Optional specific video model to use" }, startFrameGalleryId: { type: "string", description: "Optional gallery image id to open the movie on" } }, required: ["description"] } },
+    { name: "create_movie", description: "Produce a multi-scene MOVIE directly: generates each scene as a short video, seeds each scene from the PREVIOUS scene's last frame with an AI-written continuation prompt (persisting story context), stitches all scenes into one clip, and saves it to the gallery. Use for 'make a movie/film about ...'. For a hands-on UI instead, use open_generator kind 'movie'.", parameters: { type: "object", properties: { description: { type: "string", description: "What the movie is about / the overall story across scenes" }, scenes: { type: "integer", minimum: 1, description: "Number of scenes (default 3). You choose based on the story." }, sceneSeconds: { type: "integer", minimum: 1, description: "Seconds per scene (default 5). Choose freely up to what the model supports." }, aspectRatio: { type: "string", description: "Any aspect ratio as \"W:H\" (e.g. 16:9, 9:16, 1:1, 21:9)." }, model: { type: "string", description: "Optional specific video model to use" }, startFrameGalleryId: { type: "string", description: "Optional gallery image id to open the movie on" } }, required: ["description"] } },
     {
       name: "build_widget",
       description: "Build a CUSTOM interactive widget/mini-app on the adaptive canvas by delegating to the coder model. This is the DEFAULT for anything visual or interactive that isn't plain info: charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, bespoke visualizations, and media galleries/slideshows/players. The widget is sandboxed HTML rendered live, can persist its own data (a WidgetStore the user keeps across reloads/saves/downloads), and can embed saved gallery media. To USE saved images/video/audio in a widget (slideshow, gallery, moodboard, player), set galleryFilter to the kind ('image'/'video'/'audio'/'all') — the most recent matching items are attached automatically as WidgetStore.assets; OR pass specific galleryIds if you already know them. Reserve show_workspace for plain note/table/metrics/code; use build_widget whenever interactivity, charts, custom design, or showing saved media helps.",
@@ -3276,9 +3307,11 @@ async function handleWidgetRequest(source, message) {
 // ---------------------------------------------------------------------------
 async function createMovie(p, progress) {
   const report = (m) => { try { progress && progress(m); } catch { /* ignore */ } };
-  const scenes = Math.max(1, Math.min(8, Number(p.scenes) || 3));
-  const seconds = Math.max(2, Math.min(15, Number(p.sceneSeconds || p.seconds) || 5));
-  const aspectRatio = p.aspectRatio === "9:16" ? "9:16" : "16:9";
+  // Generous safety ceilings only (a stitched movie is a lot of sequential renders);
+  // within them the agent/user pick freely.
+  const scenes = Math.max(1, Math.min(30, Number(p.scenes) || 3));
+  const seconds = Math.max(1, Math.min(60, Number(p.sceneSeconds || p.seconds) || 5));
+  const aspectRatio = videoDimensions(p.aspectRatio || "16:9").aspect;
   const description = String(p.description || p.prompt || "").trim() || "A short cinematic sequence.";
   const baseModel = p.model || value("videoModel");
   const overallJob = genJobStart({ kind: "video", title: "Movie maker", status: "active", detail: `0/${scenes} scenes` });
@@ -3442,7 +3475,8 @@ async function widgetGenerate(p, progress) {
   const images = await resolveGallerySourceUrls(p.sourceImageIds || []);
   if (!prompt && !images.length) return { error: "Enter a prompt (or pick a source image)." };
   if (progress) progress(`Generating ${kind}${images.length ? " (with source)" : ""}…`);
-  const model = kind === "video" ? value("videoModel") : kind === "audio" ? value("audioModel") : value("imageModel");
+  const chosen = typeof p.model === "string" ? p.model.trim() : "";
+  const model = chosen || (kind === "video" ? value("videoModel") : kind === "audio" ? value("audioModel") : value("imageModel"));
   const opts = {};
   if (p.count) opts.count = p.count;
   if (p.duration) opts.duration = p.duration;
@@ -3460,11 +3494,11 @@ async function widgetGenerate(p, progress) {
 // Shared styling for the built-in generator widgets (dark; the host also enforces dark).
 const GEN_WIDGET_CSS = "body{padding:14px;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#eef1ff}h3{margin:0 0 10px;font-size:15px}label{display:block;margin:10px 0 4px;color:#9aa6c9;font-size:12px}textarea,select,input{width:100%;background:#141a2e;color:#eef1ff;border:1px solid #2a3050;border-radius:8px;padding:8px;font:inherit}textarea{min-height:58px;resize:vertical}.row{display:flex;gap:8px}.row>*{flex:1}button{margin-top:12px;background:linear-gradient(135deg,#4de8ff,#8e6cff);color:#04122a;border:0;border-radius:10px;padding:10px 14px;font-weight:700;cursor:pointer;width:100%}button.sec{background:#1c2340;color:#cde1ff;font-weight:600}.thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(60px,1fr));gap:6px;margin-top:8px}.thumbs img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px;border:2px solid transparent;cursor:pointer}.thumbs img.sel{border-color:#4de8ff}.out{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-top:12px}.out img,.out video{width:100%;border-radius:8px}.hint{color:#7bffaf;font-size:12px;margin-top:6px}.status{color:#9aa6c9;font-size:13px;margin-top:8px;min-height:18px}";
 
-const IMAGE_GEN_HTML = "<!doctype html><html><head><meta charset=\"utf-8\"><style>" + GEN_WIDGET_CSS + "</style></head><body><h3>\u{1F5BC} Image generator</h3><label>Prompt</label><textarea id=prompt placeholder=\"Describe the image...\"></textarea><label>Source images (optional — turns this into an edit)</label><button class=sec id=pick>Pick from gallery</button><div class=thumbs id=thumbs></div><div class=hint id=mode>Mode: generate a new image.</div><label>Count</label><select id=count><option>1</option><option>2</option><option>3</option><option>4</option></select><button id=go>Generate</button><div class=status id=status></div><div class=out id=out></div><script>var selected=[],el=function(i){return document.getElementById(i)};function mode(){el('mode').textContent=selected.length?('Mode: edit '+selected.length+' source image(s) — an edit-capable model is picked automatically.'):'Mode: generate a new image.'}el('pick').onclick=async function(){el('status').textContent='Loading gallery...';try{var items=await WidgetStore.listGallery({kind:'image'});el('status').textContent='';el('thumbs').innerHTML='';if(!items.length){el('status').textContent='No images saved yet.';return}items.forEach(function(it){var img=new Image();img.src=it.url;img.title=it.prompt||'';img.onclick=function(){var k=selected.indexOf(it.id);if(k>=0){selected.splice(k,1);img.className=''}else{selected.push(it.id);img.className='sel'}mode()};el('thumbs').appendChild(img)})}catch(e){el('status').textContent='Error: '+e.message}};el('go').onclick=async function(){var p=el('prompt').value.trim();if(!p&&!selected.length){el('status').textContent='Enter a prompt.';return}el('status').textContent='Generating...';el('out').innerHTML='';try{var r=await WidgetStore.generate({kind:'image',prompt:p,sourceImageIds:selected,count:parseInt(el('count').value,10)},function(m){el('status').textContent=m});el('status').textContent='Done — saved to your gallery.';(r.items||[]).forEach(function(it){var img=new Image();img.src=it.url;el('out').appendChild(img)})}catch(e){el('status').textContent='Error: '+e.message}}<\/script></body></html>";
+const IMAGE_GEN_HTML = "<!doctype html><html><head><meta charset=\"utf-8\"><style>" + GEN_WIDGET_CSS + "</style></head><body><h3>\u{1F5BC} Image generator</h3><label>Model</label><select id=model><option value=\"\">Auto (pick for me)</option></select><label>Prompt</label><textarea id=prompt placeholder=\"Describe the image...\"></textarea><label>Source images (optional — turns this into an edit)</label><button class=sec id=pick>Pick from gallery</button><div class=thumbs id=thumbs></div><div class=hint id=mode>Mode: generate a new image.</div><label>Count</label><input id=count type=number min=1 value=1><button id=go>Generate</button><div class=status id=status></div><div class=out id=out></div><script>var selected=[],el=function(i){return document.getElementById(i)};function mode(){el('mode').textContent=selected.length?('Mode: edit '+selected.length+' source image(s) — an edit-capable model is picked automatically.'):'Mode: generate a new image.'}(async function(){try{var m=await WidgetStore.models('image');(m||[]).forEach(function(n){var o=document.createElement('option');o.value=n;o.textContent=n;el('model').appendChild(o)})}catch(e){}})();el('pick').onclick=async function(){el('status').textContent='Loading gallery...';try{var items=await WidgetStore.listGallery({kind:'image'});el('status').textContent='';el('thumbs').innerHTML='';if(!items.length){el('status').textContent='No images saved yet.';return}items.forEach(function(it){var img=new Image();img.src=it.url;img.title=it.prompt||'';img.onclick=function(){var k=selected.indexOf(it.id);if(k>=0){selected.splice(k,1);img.className=''}else{selected.push(it.id);img.className='sel'}mode()};el('thumbs').appendChild(img)})}catch(e){el('status').textContent='Error: '+e.message}};el('go').onclick=async function(){var p=el('prompt').value.trim();if(!p&&!selected.length){el('status').textContent='Enter a prompt.';return}el('status').textContent='Generating...';el('out').innerHTML='';try{var r=await WidgetStore.generate({kind:'image',prompt:p,model:el('model').value,sourceImageIds:selected,count:parseInt(el('count').value,10)},function(m){el('status').textContent=m});el('status').textContent='Done — saved to your gallery.';(r.items||[]).forEach(function(it){var img=new Image();img.src=it.url;el('out').appendChild(img)})}catch(e){el('status').textContent='Error: '+e.message}}<\/script></body></html>";
 
-const VIDEO_GEN_HTML = "<!doctype html><html><head><meta charset=\"utf-8\"><style>" + GEN_WIDGET_CSS + "</style></head><body><h3>\u{1F3AC} Video generator</h3><label>Prompt</label><textarea id=prompt placeholder=\"Describe the video...\"></textarea><label>Start image (optional — image-to-video)</label><button class=sec id=pick>Pick a source image</button><div class=thumbs id=thumbs></div><div class=hint id=mode>Mode: text-to-video.</div><div class=row><div><label>Seconds</label><select id=secs><option>4</option><option selected>6</option><option>8</option><option>10</option></select></div><div><label>Shape</label><select id=aspect><option value=\"16:9\">16:9</option><option value=\"9:16\">9:16</option></select></div></div><button id=go>Generate video</button><div class=status id=status></div><div class=out id=out></div><script>var sel=null,el=function(i){return document.getElementById(i)};el('pick').onclick=async function(){el('status').textContent='Loading gallery...';try{var items=await WidgetStore.listGallery({kind:'image'});el('status').textContent='';el('thumbs').innerHTML='';if(!items.length){el('status').textContent='No images saved yet.';return}items.forEach(function(it){var img=new Image();img.src=it.url;img.onclick=function(){sel=(sel===it.id)?null:it.id;[].forEach.call(el('thumbs').children,function(c){c.className=''});if(sel)img.className='sel';el('mode').textContent=sel?'Mode: image-to-video (an i2v-capable model is picked).':'Mode: text-to-video.'};el('thumbs').appendChild(img)})}catch(e){el('status').textContent='Error: '+e.message}};el('go').onclick=async function(){var p=el('prompt').value.trim();if(!p&&!sel){el('status').textContent='Enter a prompt.';return}el('status').textContent='Generating video (this can take a bit)...';el('out').innerHTML='';try{var r=await WidgetStore.generate({kind:'video',prompt:p,sourceImageIds:sel?[sel]:[],duration:parseInt(el('secs').value,10),aspectRatio:el('aspect').value},function(m){el('status').textContent=m});el('status').textContent='Done — saved to your gallery.';(r.items||[]).forEach(function(it){var v=document.createElement('video');v.src=it.url;v.controls=true;el('out').appendChild(v)})}catch(e){el('status').textContent='Error: '+e.message}}<\/script></body></html>";
+const VIDEO_GEN_HTML = "<!doctype html><html><head><meta charset=\"utf-8\"><style>" + GEN_WIDGET_CSS + "</style></head><body><h3>\u{1F3AC} Video generator</h3><label>Model</label><select id=model><option value=\"\">Auto (pick for me)</option></select><label>Prompt</label><textarea id=prompt placeholder=\"Describe the video...\"></textarea><label>Start image (optional — image-to-video)</label><button class=sec id=pick>Pick a source image</button><div class=thumbs id=thumbs></div><div class=hint id=mode>Mode: text-to-video.</div><div class=row><div><label>Seconds</label><input id=secs type=number min=1 value=6></div><div><label>Aspect (W:H)</label><input id=aspect type=text value=\"16:9\" placeholder=\"16:9\"></div></div><button id=go>Generate video</button><div class=status id=status></div><div class=out id=out></div><script>var sel=null,el=function(i){return document.getElementById(i)};(async function(){try{var m=await WidgetStore.models('video');(m||[]).forEach(function(n){var o=document.createElement('option');o.value=n;o.textContent=n;el('model').appendChild(o)})}catch(e){}})();el('pick').onclick=async function(){el('status').textContent='Loading gallery...';try{var items=await WidgetStore.listGallery({kind:'image'});el('status').textContent='';el('thumbs').innerHTML='';if(!items.length){el('status').textContent='No images saved yet.';return}items.forEach(function(it){var img=new Image();img.src=it.url;img.onclick=function(){sel=(sel===it.id)?null:it.id;[].forEach.call(el('thumbs').children,function(c){c.className=''});if(sel)img.className='sel';el('mode').textContent=sel?'Mode: image-to-video (an i2v-capable model is picked).':'Mode: text-to-video.'};el('thumbs').appendChild(img)})}catch(e){el('status').textContent='Error: '+e.message}};el('go').onclick=async function(){var p=el('prompt').value.trim();if(!p&&!sel){el('status').textContent='Enter a prompt.';return}el('status').textContent='Generating video (this can take a bit)...';el('out').innerHTML='';try{var r=await WidgetStore.generate({kind:'video',prompt:p,model:el('model').value,sourceImageIds:sel?[sel]:[],duration:parseInt(el('secs').value,10),aspectRatio:el('aspect').value},function(m){el('status').textContent=m});el('status').textContent='Done — saved to your gallery.';(r.items||[]).forEach(function(it){var v=document.createElement('video');v.src=it.url;v.controls=true;el('out').appendChild(v)})}catch(e){el('status').textContent='Error: '+e.message}}<\/script></body></html>";
 
-const MOVIE_MAKER_HTML = "<!doctype html><html><head><meta charset=\"utf-8\"><style>" + GEN_WIDGET_CSS + "</style></head><body><h3>\u{1F3A5} Movie maker</h3><label>Video model</label><select id=model></select><label>What happens in the movie</label><textarea id=desc placeholder=\"Describe the story / what should happen across the scenes...\"></textarea><div class=row><div><label>Scenes</label><select id=scenes><option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option></select></div><div><label>Sec / scene</label><select id=secs><option>4</option><option selected>5</option><option>6</option><option>8</option></select></div><div><label>Shape</label><select id=aspect><option value=\"16:9\">16:9</option><option value=\"9:16\">9:16</option></select></div></div><label>Starting frame (optional)</label><button class=sec id=pick>Pick a start image</button><div class=thumbs id=thumbs></div><button id=go>Make movie</button><div class=status id=status></div><div class=out id=out></div><script>var start=null,el=function(i){return document.getElementById(i)};(async function(){try{var m=await WidgetStore.models('video');(m||[]).forEach(function(n){var o=document.createElement('option');o.value=n;o.textContent=n;el('model').appendChild(o)})}catch(e){}})();el('pick').onclick=async function(){el('status').textContent='Loading gallery...';try{var items=await WidgetStore.listGallery({kind:'image'});el('status').textContent='';el('thumbs').innerHTML='';items.forEach(function(it){var img=new Image();img.src=it.url;img.onclick=function(){start=(start===it.id)?null:it.id;[].forEach.call(el('thumbs').children,function(c){c.className=''});if(start)img.className='sel'};el('thumbs').appendChild(img)})}catch(e){el('status').textContent='Error: '+e.message}};el('go').onclick=async function(){var d=el('desc').value.trim();if(!d){el('status').textContent='Describe the movie first.';return}el('go').disabled=true;el('status').textContent='Starting...';el('out').innerHTML='';try{var r=await WidgetStore.makeMovie({model:el('model').value,description:d,scenes:parseInt(el('scenes').value,10),sceneSeconds:parseInt(el('secs').value,10),aspectRatio:el('aspect').value,startFrameGalleryId:start},function(m){el('status').textContent=m});el('status').textContent=r.note||'Movie ready — check your gallery.'}catch(e){el('status').textContent='Error: '+e.message}el('go').disabled=false}<\/script></body></html>";
+const MOVIE_MAKER_HTML = "<!doctype html><html><head><meta charset=\"utf-8\"><style>" + GEN_WIDGET_CSS + "</style></head><body><h3>\u{1F3A5} Movie maker</h3><label>Video model</label><select id=model></select><label>What happens in the movie</label><textarea id=desc placeholder=\"Describe the story / what should happen across the scenes...\"></textarea><div class=row><div><label>Scenes</label><input id=scenes type=number min=1 value=3></div><div><label>Sec / scene</label><input id=secs type=number min=1 value=5></div><div><label>Aspect (W:H)</label><input id=aspect type=text value=\"16:9\" placeholder=\"16:9\"></div></div><label>Starting frame (optional)</label><button class=sec id=pick>Pick a start image</button><div class=thumbs id=thumbs></div><button id=go>Make movie</button><div class=status id=status></div><div class=out id=out></div><script>var start=null,el=function(i){return document.getElementById(i)};(async function(){try{var m=await WidgetStore.models('video');(m||[]).forEach(function(n){var o=document.createElement('option');o.value=n;o.textContent=n;el('model').appendChild(o)})}catch(e){}})();el('pick').onclick=async function(){el('status').textContent='Loading gallery...';try{var items=await WidgetStore.listGallery({kind:'image'});el('status').textContent='';el('thumbs').innerHTML='';items.forEach(function(it){var img=new Image();img.src=it.url;img.onclick=function(){start=(start===it.id)?null:it.id;[].forEach.call(el('thumbs').children,function(c){c.className=''});if(start)img.className='sel'};el('thumbs').appendChild(img)})}catch(e){el('status').textContent='Error: '+e.message}};el('go').onclick=async function(){var d=el('desc').value.trim();if(!d){el('status').textContent='Describe the movie first.';return}el('go').disabled=true;el('status').textContent='Starting...';el('out').innerHTML='';try{var r=await WidgetStore.makeMovie({model:el('model').value,description:d,scenes:parseInt(el('scenes').value,10),sceneSeconds:parseInt(el('secs').value,10),aspectRatio:el('aspect').value,startFrameGalleryId:start},function(m){el('status').textContent=m});el('status').textContent=r.note||'Movie ready — check your gallery.'}catch(e){el('status').textContent='Error: '+e.message}el('go').disabled=false}<\/script></body></html>";
 
 // Open one of the built-in interactive generator widgets on the canvas.
 async function openGenerator(kind) {
