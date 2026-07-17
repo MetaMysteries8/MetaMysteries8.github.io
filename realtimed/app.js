@@ -468,6 +468,8 @@ function bindEvents() {
   buildOsChrome();
   setInterval(refreshOsChrome, 1000);
   renderDesktopStatus();
+  // Keep v2 windows on-screen when the viewport changes (WinBox bounds can lag a resize).
+  window.addEventListener("resize", () => { if (state.version === "2") clampWinboxes(); });
   window.addEventListener("message", handleWidgetMessage);
   el.navButtons.forEach((button) => { if (button.dataset.drawer) button.addEventListener("click", () => toggleDrawer(button.dataset.drawer)); });
   el.drawerCloses.forEach((button) => button.addEventListener("click", closeDrawers));
@@ -3189,6 +3191,37 @@ function closeAllWinboxes() {
   wbClosing.clear();
 }
 
+// Free desktop area = viewport minus the reserved top bar + taskbar. Single source of
+// truth for both initial placement and the defensive clamp below.
+function osFreeArea() {
+  const cs = getComputedStyle(document.body);
+  const topH = parseInt(cs.getPropertyValue("--os-top-h"), 10) || 34;
+  const barH = (parseInt(cs.getPropertyValue("--os-bar-h"), 10) || 58) + (state.os === "mac" ? 16 : 6);
+  return { topH, barH, vw: window.innerWidth, vh: window.innerHeight };
+}
+
+// Pull one WinBox back inside the free area. Belt-and-suspenders for cases where WinBox's
+// own top/right/bottom/left bounds don't fully hold (custom root, viewport resize) so a
+// window's titlebar can never end up off-screen. Guarded against onmove/onresize recursion.
+function clampWinbox(wb) {
+  if (!wb || !wb.dom || wb._clamping || wb.max || wb.min) return;
+  const { topH, barH, vw, vh } = osFreeArea();
+  const w = wb.dom.offsetWidth || wb.width || 480;
+  const h = wb.dom.offsetHeight || wb.height || 400;
+  const nw = Math.min(w, vw - 12);
+  const nh = Math.min(h, vh - topH - barH - 8);
+  const nx = Math.max(6, Math.min(wb.x, vw - nw - 6));
+  const ny = Math.max(topH + 4, Math.min(wb.y, vh - barH - nh - 4));
+  wb._clamping = true;
+  try {
+    if (nw !== w || nh !== h) wb.resize(nw, nh);
+    if (nx !== wb.x || ny !== wb.y) wb.move(nx, ny);
+  } catch { /* older api */ }
+  wb._clamping = false;
+}
+
+function clampWinboxes() { for (const wb of winboxes.values()) clampWinbox(wb); }
+
 function reconcileWinboxes() {
   const liveIds = new Set(state.workspace.map((a) => a.id));
   for (const [id, wb] of winboxes) {
@@ -3238,8 +3271,8 @@ function createWinbox(artifact, idx) {
       wbClosing.delete(artifact.id);
       return false;
     },
-    onmove(x2, y2) { const s = windowState(artifact.id); s.x = x2; s.y = y2; s.snap = ""; saveWindowsThrottled(); },
-    onresize(w, h) { const s = windowState(artifact.id); if (w) s.w = w; if (h) s.h = h; saveWindowsThrottled(); },
+    onmove(x2, y2) { if (wb._clamping) return; const s = windowState(artifact.id); s.x = x2; s.y = y2; s.snap = ""; clampWinbox(wb); saveWindowsThrottled(); },
+    onresize(w, h) { if (wb._clamping) return; const s = windowState(artifact.id); if (w) s.w = w; if (h) s.h = h; clampWinbox(wb); saveWindowsThrottled(); },
   });
   winboxes.set(artifact.id, wb);
   if (st.max) { try { wb.maximize(true); } catch { /* older api */ } }

@@ -2218,7 +2218,9 @@ body[data-version="2"] .orb { filter: drop-shadow(0 0 32px rgba(77, 232, 255, 0.
 body[data-version="2"] .stage.panel { background: rgba(9, 12, 24, 0.34); border: 1px solid rgba(255, 255, 255, 0.07); }
 
 /* --- The desktop surface + windows --- */
-body[data-version="2"] .adaptive-workspace.ve-desktop { position: relative; min-height: 64vh; overflow: hidden; padding: 0; border-radius: 16px; background: rgba(8, 10, 22, 0.35); border: 1px solid rgba(255, 255, 255, 0.06); }
+/* The full-viewport .ve-desktop rule lives further down (position:fixed; inset:0).
+   The v1 static placeholder is hidden in v2 so it can't bleed through behind windows. */
+body[data-version="2"] .empty-workspace { display: none !important; }
 body[data-version="2"] .ve-desktop-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 6px; padding: 20px; color: var(--muted, #9aa6c9); }
 body[data-version="2"] .ve-desktop-empty span { letter-spacing: 0.22em; text-transform: uppercase; font-size: 12px; color: var(--v2-accent); }
 body[data-version="2"] .ve-desktop-empty strong { font: 700 18px "Space Grotesk", system-ui, sans-serif; color: #eaf0ff; }
