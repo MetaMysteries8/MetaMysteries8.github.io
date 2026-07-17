@@ -3234,6 +3234,8 @@ function injectWidgetBridge(html, { id, data, assets }) {
     generate: function(opts, onProgress){ return request("generate", opts, onProgress); },
     listGallery: function(opts){ return request("listGallery", opts||{}); },
     models: function(kind){ return request("models", {kind:kind}); },
+    planMovie: function(opts){ return request("planMovie", opts||{}); },
+    rewriteScene: function(opts){ return request("rewriteScene", opts||{}); },
     makeMovie: function(opts, onProgress){ return request("makeMovie", opts, onProgress); }
   };
   document.addEventListener("DOMContentLoaded", function(){ post("ready",{}); });
@@ -3290,8 +3292,17 @@ async function handleWidgetRequest(source, message) {
     } else if (message.type === "generate") {
       const res = await widgetGenerate(p, progress);
       reply(res.error ? { error: res.error } : { result: res });
+    } else if (message.type === "planMovie") {
+      const res = await planMovieStoryboard(p);
+      reply(res.error ? { error: res.error } : { result: res });
+    } else if (message.type === "rewriteScene") {
+      const res = await rewriteMovieScene(p);
+      reply({ result: res });
     } else if (message.type === "makeMovie") {
-      const res = await createMovie(p, progress);
+      // Movie progress is structured (per-scene status + thumbs); forward the whole
+      // payload so the widget can drive its storyboard/progress UI.
+      const movieProgress = (text, data) => { try { source && source.postMessage({ __widgetProgress: true, reqId: message.reqId, message: data ? Object.assign({ text }, data) : text }, "*"); } catch { /* frame gone */ } };
+      const res = await createMovie(Object.assign({}, p, { wantPreview: true }), movieProgress);
       reply(res.error ? { error: res.error } : { result: res });
     }
   } catch (error) {
@@ -3306,7 +3317,9 @@ async function handleWidgetRequest(source, message) {
 // into one clip (canvas + MediaRecorder — no ffmpeg) and saved to the gallery.
 // ---------------------------------------------------------------------------
 async function createMovie(p, progress) {
-  const report = (m) => { try { progress && progress(m); } catch { /* ignore */ } };
+  // progress(text, data?) — text drives the tool-event/gen-dock line; the optional
+  // data object carries structured per-scene state the movie widget renders live.
+  const report = (text, data) => { try { progress && progress(text, data); } catch { /* ignore */ } };
   // Generous safety ceilings only (a stitched movie is a lot of sequential renders);
   // within them the agent/user pick freely.
   const scenes = Math.max(1, Math.min(30, Number(p.scenes) || 3));
@@ -3314,6 +3327,8 @@ async function createMovie(p, progress) {
   const aspectRatio = videoDimensions(p.aspectRatio || "16:9").aspect;
   const description = String(p.description || p.prompt || "").trim() || "A short cinematic sequence.";
   const baseModel = p.model || value("videoModel");
+  // Optional pre-written storyboard (from the widget). When absent we plan each shot on the fly.
+  const board = Array.isArray(p.storyboard) ? p.storyboard.map((s) => String(s || "").trim()) : [];
   const overallJob = genJobStart({ kind: "video", title: "Movie maker", status: "active", detail: `0/${scenes} scenes` });
 
   let sourceFrameUrl = null;
@@ -3325,57 +3340,120 @@ async function createMovie(p, progress) {
 
   const sceneIds = [];
   const sceneBlobs = [];
+  const failed = [];
   let story = description;
+  const scenePct = (i) => Math.round(((i + 1) / scenes) * 88);
   try {
     for (let i = 0; i < scenes; i += 1) {
       genJobDetail(overallJob, `Scene ${i + 1}/${scenes}: writing…`);
-      report(`Scene ${i + 1}/${scenes}: writing the shot…`);
-      const scenePrompt = await movieScenePrompt(description, story, i + 1, scenes, i === 0);
+      report(`Scene ${i + 1}/${scenes}: writing the shot…`, { scene: i + 1, total: scenes, status: "active", pct: Math.round((i / scenes) * 88) });
+      const scenePrompt = (board[i] && board[i].length) ? board[i] : await movieScenePrompt(description, story, i + 1, scenes, i === 0);
       genJobDetail(overallJob, `Scene ${i + 1}/${scenes}: generating…`);
-      report(`Scene ${i + 1}/${scenes}: generating video…`);
+      report(`Scene ${i + 1}/${scenes}: generating video…`, { scene: i + 1, total: scenes, status: "active", pct: Math.round((i / scenes) * 88) });
       const opts = { duration: seconds, aspectRatio, count: 1 };
       let model = baseModel;
       if (sourceFrameUrl) { opts.images = [sourceFrameUrl]; model = sourceCapableModel("video") || baseModel; }
       const res = await runMediaGeneration("video", scenePrompt, model, null, opts);
-      if (res.error || !res.galleryId) { genJobEnd(overallJob, "Movie failed."); return { error: `Scene ${i + 1} failed: ${res.error || "no video returned"}` }; }
+      story += ` Scene ${i + 1}: ${scenePrompt}`;
+      // Resilience: a single scene failing no longer discards the whole movie — record
+      // it, keep the last good continuity frame, and press on with the rest.
+      if (res.error || !res.galleryId) {
+        failed.push(i + 1);
+        report(`Scene ${i + 1}/${scenes} failed — continuing with the rest.`, { scene: i + 1, total: scenes, status: "failed", pct: scenePct(i) });
+        continue;
+      }
       sceneIds.push(res.galleryId);
       const items = await getGalleryItems().catch(() => []);
       const blob = items.find((x) => x.id === res.galleryId)?.blob;
       if (blob) sceneBlobs.push(blob);
-      story += ` Scene ${i + 1}: ${scenePrompt}`;
-      // Seed the next scene from this scene's final frame.
-      if (i < scenes - 1 && blob) {
-        report(`Scene ${i + 1}/${scenes}: capturing last frame…`);
+      // This scene's final frame: a preview thumb for the widget, and (unless it's the
+      // last scene) the seed image for the next scene's continuity.
+      let thumb = "";
+      if (blob) {
         const frameBlob = await extractLastFrame(blob).catch(() => null);
         if (frameBlob) {
-          const frameItem = await saveGalleryItem({ kind: "image", prompt: `Movie continuity frame (after scene ${i + 1})`, model: "frame-capture", blob: frameBlob });
-          try { sourceFrameUrl = await ensureGalleryRemoteUrl(frameItem); } catch { sourceFrameUrl = null; }
+          thumb = await imageBlobToThumb(frameBlob, 220).catch(() => "");
+          if (i < scenes - 1) {
+            const frameItem = await saveGalleryItem({ kind: "image", prompt: `Movie continuity frame (after scene ${i + 1})`, model: "frame-capture", blob: frameBlob });
+            try { sourceFrameUrl = await ensureGalleryRemoteUrl(frameItem); } catch { sourceFrameUrl = null; }
+          }
         }
       }
+      report(`Scene ${i + 1}/${scenes} done.`, { scene: i + 1, total: scenes, status: "done", thumb, pct: scenePct(i) });
     }
 
-    report("Stitching scenes into one movie…");
+    if (!sceneBlobs.length) {
+      genJobEnd(overallJob, "Movie failed.");
+      return { error: `All ${scenes} scenes failed to generate. ${state.lastError ? "Ask me to diagnose the API error." : ""}`.trim(), scenes: sceneIds, failed };
+    }
+
+    report("Stitching scenes into one movie…", { phase: "stitch", status: "active", pct: 93 });
     genJobDetail(overallJob, "Stitching…");
     let movieGalleryId = null;
+    let movieBlob = null;
     const stitched = sceneBlobs.length > 1 ? await stitchMovie(sceneBlobs, aspectRatio).catch(() => null) : sceneBlobs[0];
     if (stitched) {
+      movieBlob = stitched;
       const item = await saveGalleryItem({ kind: "video", prompt: `Movie: ${description}`, model: baseModel, blob: stitched });
       movieGalleryId = item.id;
     }
     genJobEnd(overallJob, movieGalleryId ? "Movie saved to gallery." : "Scenes saved to gallery.");
+
+    // Inline preview for the widget (data URL so it loads in the opaque-origin frame).
+    // Skipped for the AI tool path and for very large movies to keep results light.
+    let movieUrl = "";
+    if (p.wantPreview && movieBlob && movieBlob.size <= 45 * 1024 * 1024) {
+      movieUrl = await blobToDataUrl(movieBlob).catch(() => "");
+    }
+
+    const madeCount = sceneBlobs.length;
+    const note = movieGalleryId
+      ? `Movie saved to your gallery (${madeCount}/${scenes} scenes${failed.length ? `, ${failed.length} failed` : ""}), plus each scene individually.`
+      : "Scenes saved to your gallery, but stitching failed — you can play them in sequence.";
+    report(note, { phase: "done", status: "done", pct: 100, finalUrl: movieUrl });
     return {
       ok: true,
       movieGalleryId,
+      movieUrl,
       scenes: sceneIds,
-      stitched: !!movieGalleryId && sceneBlobs.length > 1,
-      note: movieGalleryId
-        ? `Movie (${scenes} scenes) saved to your gallery, plus each scene individually.`
-        : "Each scene was saved to your gallery, but stitching failed — you can play them in sequence.",
+      failed,
+      stitched: !!movieGalleryId && madeCount > 1,
+      note,
     };
   } catch (error) {
     genJobEnd(overallJob, "Movie failed.");
     return { error: `Movie maker error: ${(error && error.message) || error}`, scenes: sceneIds };
   }
+}
+
+// Plan the whole storyboard up front (text-only, fast) so the user can review/edit
+// each shot before spending Pollen on renders. Returns [{ n, prompt }].
+async function planMovieStoryboard(p) {
+  const scenes = Math.max(1, Math.min(30, Number(p.scenes) || 3));
+  const description = String(p.description || p.prompt || "").trim();
+  if (!description) return { error: "Describe the movie first." };
+  const out = [];
+  let story = description;
+  for (let i = 0; i < scenes; i += 1) {
+    let prompt = description;
+    try { prompt = await movieScenePrompt(description, story, i + 1, scenes, i === 0); } catch { /* keep fallback */ }
+    out.push({ n: i + 1, prompt });
+    story += ` Scene ${i + 1}: ${prompt}`;
+  }
+  return { scenes: out, count: scenes };
+}
+
+// Rewrite a single shot in the storyboard, keeping continuity with the shots before it.
+async function rewriteMovieScene(p) {
+  const description = String(p.description || "").trim();
+  const board = Array.isArray(p.board) ? p.board.map((s) => String(s || "")) : [];
+  const index = Math.max(0, Number(p.index) || 0);
+  const total = Math.max(board.length, index + 1);
+  let story = description;
+  for (let i = 0; i < index; i += 1) { if (board[i]) story += ` Scene ${i + 1}: ${board[i]}`; }
+  let prompt = board[index] || description;
+  try { prompt = await movieScenePrompt(description, story, index + 1, total, index === 0); } catch { /* keep fallback */ }
+  return { index, prompt };
 }
 
 // Ask the text model for one concise, continuous shot description.
@@ -3409,6 +3487,28 @@ function extractLastFrame(blob) {
       try { video.currentTime = target; } catch (e) { fail(e); }
     }, { once: true });
     video.addEventListener("error", () => fail(new Error("video decode failed")), { once: true });
+  });
+}
+
+// Downscale an image blob to a small JPEG data URL for scene-preview chips in the
+// movie widget (keeps progress messages light instead of shipping full frames).
+function imageBlobToThumb(blob, max) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const scale = Math.min(1, (max || 200) / Math.max(img.width || 1, img.height || 1));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round((img.width || 1) * scale));
+        canvas.height = Math.max(1, Math.round((img.height || 1) * scale));
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+        URL.revokeObjectURL(url);
+        resolve(canvas.toDataURL("image/jpeg", 0.7));
+      } catch (e) { URL.revokeObjectURL(url); reject(e); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("thumb decode failed")); };
+    img.src = url;
   });
 }
 
@@ -3494,11 +3594,51 @@ async function widgetGenerate(p, progress) {
 // Shared styling for the built-in generator widgets (dark; the host also enforces dark).
 const GEN_WIDGET_CSS = "body{padding:14px;font:14px system-ui,-apple-system,Segoe UI,sans-serif;color:#eef1ff}h3{margin:0 0 10px;font-size:15px}label{display:block;margin:10px 0 4px;color:#9aa6c9;font-size:12px}textarea,select,input{width:100%;background:#141a2e;color:#eef1ff;border:1px solid #2a3050;border-radius:8px;padding:8px;font:inherit}textarea{min-height:58px;resize:vertical}.row{display:flex;gap:8px}.row>*{flex:1}button{margin-top:12px;background:linear-gradient(135deg,#4de8ff,#8e6cff);color:#04122a;border:0;border-radius:10px;padding:10px 14px;font-weight:700;cursor:pointer;width:100%}button.sec{background:#1c2340;color:#cde1ff;font-weight:600}.thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(60px,1fr));gap:6px;margin-top:8px}.thumbs img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px;border:2px solid transparent;cursor:pointer}.thumbs img.sel{border-color:#4de8ff}.out{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-top:12px}.out img,.out video{width:100%;border-radius:8px}.hint{color:#7bffaf;font-size:12px;margin-top:6px}.status{color:#9aa6c9;font-size:13px;margin-top:8px;min-height:18px}";
 
+// Extra styles for the Movie Maker's storyboard cards, progress bar, and scene chips.
+const MOVIE_CSS = ".mini{width:auto;margin:0;padding:5px 10px;font-size:11px;border-radius:7px}.bhead{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:2px 0 4px}.bhead .meta{color:#7bffaf;font-size:12px;text-align:right}.card{background:#0f1428;border:1px solid #262c48;border-radius:9px;padding:9px;margin-top:8px}.chd{display:flex;justify-content:space-between;align-items:center;color:#9aa6c9;font-size:12px;margin-bottom:5px}.card textarea{min-height:46px}.progress{height:9px;background:#171d33;border-radius:6px;overflow:hidden;margin-top:8px}.progress .bar{height:100%;width:0;background:linear-gradient(90deg,#4de8ff,#8e6cff);transition:width .4s}.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}.chip{width:44px;height:44px;border-radius:8px;background:#171d33;border:1px solid #2a3050;display:flex;align-items:center;justify-content:center;color:#9aa6c9;font-size:12px;background-size:cover;background-position:center}.chip.active{border-color:#4de8ff;color:#4de8ff}.chip.done{border-color:#7bffaf}.chip.failed{border-color:#ff6b8b;color:#ff6b8b}.chip.has{color:transparent}.final{margin-top:12px}.final video{width:100%;border-radius:10px}";
+
 const IMAGE_GEN_HTML = "<!doctype html><html><head><meta charset=\"utf-8\"><style>" + GEN_WIDGET_CSS + "</style></head><body><h3>\u{1F5BC} Image generator</h3><label>Model</label><select id=model><option value=\"\">Auto (pick for me)</option></select><label>Prompt</label><textarea id=prompt placeholder=\"Describe the image...\"></textarea><label>Source images (optional — turns this into an edit)</label><button class=sec id=pick>Pick from gallery</button><div class=thumbs id=thumbs></div><div class=hint id=mode>Mode: generate a new image.</div><label>Count</label><input id=count type=number min=1 value=1><button id=go>Generate</button><div class=status id=status></div><div class=out id=out></div><script>var selected=[],el=function(i){return document.getElementById(i)};function mode(){el('mode').textContent=selected.length?('Mode: edit '+selected.length+' source image(s) — an edit-capable model is picked automatically.'):'Mode: generate a new image.'}(async function(){try{var m=await WidgetStore.models('image');(m||[]).forEach(function(n){var o=document.createElement('option');o.value=n;o.textContent=n;el('model').appendChild(o)})}catch(e){}})();el('pick').onclick=async function(){el('status').textContent='Loading gallery...';try{var items=await WidgetStore.listGallery({kind:'image'});el('status').textContent='';el('thumbs').innerHTML='';if(!items.length){el('status').textContent='No images saved yet.';return}items.forEach(function(it){var img=new Image();img.src=it.url;img.title=it.prompt||'';img.onclick=function(){var k=selected.indexOf(it.id);if(k>=0){selected.splice(k,1);img.className=''}else{selected.push(it.id);img.className='sel'}mode()};el('thumbs').appendChild(img)})}catch(e){el('status').textContent='Error: '+e.message}};el('go').onclick=async function(){var p=el('prompt').value.trim();if(!p&&!selected.length){el('status').textContent='Enter a prompt.';return}el('status').textContent='Generating...';el('out').innerHTML='';try{var r=await WidgetStore.generate({kind:'image',prompt:p,model:el('model').value,sourceImageIds:selected,count:parseInt(el('count').value,10)},function(m){el('status').textContent=m});el('status').textContent='Done — saved to your gallery.';(r.items||[]).forEach(function(it){var img=new Image();img.src=it.url;el('out').appendChild(img)})}catch(e){el('status').textContent='Error: '+e.message}}<\/script></body></html>";
 
 const VIDEO_GEN_HTML = "<!doctype html><html><head><meta charset=\"utf-8\"><style>" + GEN_WIDGET_CSS + "</style></head><body><h3>\u{1F3AC} Video generator</h3><label>Model</label><select id=model><option value=\"\">Auto (pick for me)</option></select><label>Prompt</label><textarea id=prompt placeholder=\"Describe the video...\"></textarea><label>Start image (optional — image-to-video)</label><button class=sec id=pick>Pick a source image</button><div class=thumbs id=thumbs></div><div class=hint id=mode>Mode: text-to-video.</div><div class=row><div><label>Seconds</label><input id=secs type=number min=1 value=6></div><div><label>Aspect (W:H)</label><input id=aspect type=text value=\"16:9\" placeholder=\"16:9\"></div></div><button id=go>Generate video</button><div class=status id=status></div><div class=out id=out></div><script>var sel=null,el=function(i){return document.getElementById(i)};(async function(){try{var m=await WidgetStore.models('video');(m||[]).forEach(function(n){var o=document.createElement('option');o.value=n;o.textContent=n;el('model').appendChild(o)})}catch(e){}})();el('pick').onclick=async function(){el('status').textContent='Loading gallery...';try{var items=await WidgetStore.listGallery({kind:'image'});el('status').textContent='';el('thumbs').innerHTML='';if(!items.length){el('status').textContent='No images saved yet.';return}items.forEach(function(it){var img=new Image();img.src=it.url;img.onclick=function(){sel=(sel===it.id)?null:it.id;[].forEach.call(el('thumbs').children,function(c){c.className=''});if(sel)img.className='sel';el('mode').textContent=sel?'Mode: image-to-video (an i2v-capable model is picked).':'Mode: text-to-video.'};el('thumbs').appendChild(img)})}catch(e){el('status').textContent='Error: '+e.message}};el('go').onclick=async function(){var p=el('prompt').value.trim();if(!p&&!sel){el('status').textContent='Enter a prompt.';return}el('status').textContent='Generating video (this can take a bit)...';el('out').innerHTML='';try{var r=await WidgetStore.generate({kind:'video',prompt:p,model:el('model').value,sourceImageIds:sel?[sel]:[],duration:parseInt(el('secs').value,10),aspectRatio:el('aspect').value},function(m){el('status').textContent=m});el('status').textContent='Done — saved to your gallery.';(r.items||[]).forEach(function(it){var v=document.createElement('video');v.src=it.url;v.controls=true;el('out').appendChild(v)})}catch(e){el('status').textContent='Error: '+e.message}}<\/script></body></html>";
 
-const MOVIE_MAKER_HTML = "<!doctype html><html><head><meta charset=\"utf-8\"><style>" + GEN_WIDGET_CSS + "</style></head><body><h3>\u{1F3A5} Movie maker</h3><label>Video model</label><select id=model></select><label>What happens in the movie</label><textarea id=desc placeholder=\"Describe the story / what should happen across the scenes...\"></textarea><div class=row><div><label>Scenes</label><input id=scenes type=number min=1 value=3></div><div><label>Sec / scene</label><input id=secs type=number min=1 value=5></div><div><label>Aspect (W:H)</label><input id=aspect type=text value=\"16:9\" placeholder=\"16:9\"></div></div><label>Starting frame (optional)</label><button class=sec id=pick>Pick a start image</button><div class=thumbs id=thumbs></div><button id=go>Make movie</button><div class=status id=status></div><div class=out id=out></div><script>var start=null,el=function(i){return document.getElementById(i)};(async function(){try{var m=await WidgetStore.models('video');(m||[]).forEach(function(n){var o=document.createElement('option');o.value=n;o.textContent=n;el('model').appendChild(o)})}catch(e){}})();el('pick').onclick=async function(){el('status').textContent='Loading gallery...';try{var items=await WidgetStore.listGallery({kind:'image'});el('status').textContent='';el('thumbs').innerHTML='';items.forEach(function(it){var img=new Image();img.src=it.url;img.onclick=function(){start=(start===it.id)?null:it.id;[].forEach.call(el('thumbs').children,function(c){c.className=''});if(start)img.className='sel'};el('thumbs').appendChild(img)})}catch(e){el('status').textContent='Error: '+e.message}};el('go').onclick=async function(){var d=el('desc').value.trim();if(!d){el('status').textContent='Describe the movie first.';return}el('go').disabled=true;el('status').textContent='Starting...';el('out').innerHTML='';try{var r=await WidgetStore.makeMovie({model:el('model').value,description:d,scenes:parseInt(el('scenes').value,10),sceneSeconds:parseInt(el('secs').value,10),aspectRatio:el('aspect').value,startFrameGalleryId:start},function(m){el('status').textContent=m});el('status').textContent=r.note||'Movie ready — check your gallery.'}catch(e){el('status').textContent='Error: '+e.message}el('go').disabled=false}<\/script></body></html>";
+const MOVIE_MAKER_HTML = "<!doctype html><html><head><meta charset=\"utf-8\"><style>" + GEN_WIDGET_CSS + MOVIE_CSS + "</style></head><body>"
+  + "<h3>\u{1F3A5} Movie maker</h3>"
+  + "<div id=v-setup>"
+  +   "<label>Video model</label><select id=model><option value=\"\">Auto (pick for me)</option></select>"
+  +   "<label>What happens in the movie</label><textarea id=desc placeholder=\"Describe the story / what should happen across the scenes...\"></textarea>"
+  +   "<div class=row><div><label>Scenes</label><input id=scenes type=number min=1 value=3></div><div><label>Sec / scene</label><input id=secs type=number min=1 value=5></div><div><label>Aspect (W:H)</label><input id=aspect type=text value=\"16:9\" placeholder=\"16:9\"></div></div>"
+  +   "<label>Starting frame (optional)</label><button class=sec id=pick>Pick a start image</button><div class=thumbs id=thumbs></div>"
+  +   "<button id=plan>Plan storyboard →</button><div class=status id=sstatus></div>"
+  + "</div>"
+  + "<div id=v-board style=\"display:none\">"
+  +   "<div class=bhead><button class=\"sec mini\" id=back>← Settings</button><span class=meta id=bmeta></span></div>"
+  +   "<div id=cards></div>"
+  +   "<button class=sec id=addScene>+ Add scene</button>"
+  +   "<button id=render>Render movie \u{1F3AC}</button>"
+  + "</div>"
+  + "<div id=v-render style=\"display:none\">"
+  +   "<div class=progress><div class=bar id=bar></div></div>"
+  +   "<div class=chips id=chips></div>"
+  +   "<div class=status id=rstatus></div>"
+  +   "<div class=final id=final></div>"
+  +   "<button class=\"sec mini\" id=again style=\"display:none;margin-top:10px\">← Edit storyboard</button>"
+  + "</div>"
+  + "<script>"
+  + "var start=null,board=[],cfg={},el=function(i){return document.getElementById(i)};"
+  + "function show(v){['setup','board','render'].forEach(function(s){var n=el('v-'+s);if(n)n.style.display=(s===v)?'block':'none'})}"
+  + "(async function(){try{var m=await WidgetStore.models('video');(m||[]).forEach(function(n){var o=document.createElement('option');o.value=n;o.textContent=n;el('model').appendChild(o)})}catch(e){}})();"
+  + "el('pick').onclick=async function(){el('sstatus').textContent='Loading gallery...';try{var items=await WidgetStore.listGallery({kind:'image'});el('sstatus').textContent='';el('thumbs').innerHTML='';if(!items.length){el('sstatus').textContent='No images saved yet.';return}items.forEach(function(it){var img=new Image();img.src=it.url;img.title=it.prompt||'';img.onclick=function(){start=(start===it.id)?null:it.id;[].forEach.call(el('thumbs').children,function(c){c.className=''});if(start)img.className='sel'};el('thumbs').appendChild(img)})}catch(e){el('sstatus').textContent='Error: '+e.message}};"
+  + "function readCfg(){return{model:el('model').value,description:el('desc').value.trim(),scenes:parseInt(el('scenes').value,10)||3,sceneSeconds:parseInt(el('secs').value,10)||5,aspectRatio:el('aspect').value||'16:9',startFrameGalleryId:start}}"
+  + "el('plan').onclick=async function(){var d=el('desc').value.trim();if(!d){el('sstatus').textContent='Describe the movie first.';return}cfg=readCfg();el('plan').disabled=true;el('sstatus').textContent='Writing the storyboard...';try{var r=await WidgetStore.planMovie(cfg);board=(r.scenes||[]).map(function(s){return s.prompt});renderBoard();show('board')}catch(e){el('sstatus').textContent='Error: '+e.message}el('plan').disabled=false};"
+  + "function renderBoard(){el('bmeta').textContent=board.length+' scenes · '+cfg.sceneSeconds+'s · '+cfg.aspectRatio+(cfg.model?(' · '+cfg.model):'');var host=el('cards');host.innerHTML='';board.forEach(function(pr,idx){var card=document.createElement('div');card.className='card';var hd=document.createElement('div');hd.className='chd';var t=document.createElement('span');t.textContent='Scene '+(idx+1);var grp=document.createElement('span');var rw=document.createElement('button');rw.className='mini sec';rw.textContent='Rewrite';var rm=document.createElement('button');rm.className='mini sec';rm.textContent='✕';rm.style.marginLeft='6px';var ta=document.createElement('textarea');ta.value=pr;ta.oninput=function(){board[idx]=ta.value};rw.onclick=async function(){rw.disabled=true;var old=rw.textContent;rw.textContent='...';try{var r=await WidgetStore.rewriteScene({description:cfg.description,board:board,index:idx});board[idx]=r.prompt;ta.value=r.prompt}catch(e){}rw.textContent=old;rw.disabled=false};rm.onclick=function(){board.splice(idx,1);renderBoard()};grp.appendChild(rw);grp.appendChild(rm);hd.appendChild(t);hd.appendChild(grp);card.appendChild(hd);card.appendChild(ta);host.appendChild(card)})}"
+  + "el('addScene').onclick=function(){board.push('A continuing shot.');renderBoard()};"
+  + "el('back').onclick=function(){show('setup')};"
+  + "el('again').onclick=function(){show('board')};"
+  + "el('render').onclick=async function(){if(!board.length){el('sstatus').textContent='Add at least one scene.';return}show('render');el('bar').style.width='0%';el('final').innerHTML='';el('again').style.display='none';el('rstatus').textContent='Starting render...';buildChips(board.length);try{var r=await WidgetStore.makeMovie({model:cfg.model,description:cfg.description,aspectRatio:cfg.aspectRatio,sceneSeconds:cfg.sceneSeconds,scenes:board.length,startFrameGalleryId:cfg.startFrameGalleryId,storyboard:board},onProg);el('rstatus').textContent=r.note||'Movie ready — check your gallery.';if(r.movieUrl){var v=document.createElement('video');v.src=r.movieUrl;v.controls=true;el('final').appendChild(v)}}catch(e){el('rstatus').textContent='Error: '+e.message}el('again').style.display='inline-block'};"
+  + "function buildChips(n){var host=el('chips');host.innerHTML='';for(var i=1;i<=n;i++){var c=document.createElement('div');c.className='chip';c.setAttribute('data-chip',i);c.textContent=i;host.appendChild(c)}}"
+  + "function onProg(m){if(typeof m==='string'){el('rstatus').textContent=m;return}if(m.text)el('rstatus').textContent=m.text;if(typeof m.pct==='number')el('bar').style.width=m.pct+'%';if(typeof m.scene==='number'){var chip=document.querySelector('[data-chip=\"'+m.scene+'\"]');if(chip){var cls='chip '+(m.status||'');if(m.thumb){chip.style.backgroundImage='url('+m.thumb+')';chip.textContent='';cls+=' has'}chip.className=cls}}}"
+  + "show('setup');"
+  + "<\/script></body></html>";
 
 // Open one of the built-in interactive generator widgets on the canvas.
 async function openGenerator(kind) {
