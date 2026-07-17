@@ -2978,6 +2978,7 @@ function saveWorkspace() {
 // cut off and stacked widgets pushing each other offscreen.
 function renderWorkspace() {
   if (state.version === "2") { renderWorkspaceV2(); return; }
+  if (winboxes.size) closeAllWinboxes(); // leaving v2: tear down any live WinBox windows
   el.adaptiveWorkspace.classList.remove("ve-desktop");
   el.adaptiveWorkspace.innerHTML = "";
   const items = state.workspace;
@@ -3101,7 +3102,7 @@ function updateVersionButton() {
 // Per-window geometry (persisted). Falls back to a cascade for new windows.
 function windowState(id, idx = 0) {
   if (!state.windows[id]) {
-    state.windows[id] = { x: 22 + (idx % 6) * 30, y: 16 + (idx % 6) * 30, w: 380, z: ++veTopZ, minimized: false };
+    state.windows[id] = { x: 22 + (idx % 6) * 30, y: 16 + (idx % 6) * 30, w: 380, h: 360, z: ++veTopZ, minimized: false };
   }
   return state.windows[id];
 }
@@ -3109,32 +3110,121 @@ function windowState(id, idx = 0) {
 function saveWindows() {
   try { localStorage.setItem("ve_windows", JSON.stringify(state.windows)); } catch { /* quota */ }
 }
+let saveWinTimer = 0;
+function saveWindowsThrottled() { clearTimeout(saveWinTimer); saveWinTimer = setTimeout(saveWindows, 400); }
+
+// --- WinBox.js: a single-file, dependency-free window manager, lazy-loaded from a
+// CDN ONLY in v2 (the ggwave precedent). If it can't load (offline/blocked) we fall
+// back to the hand-rolled window manager below, so v2 always works. ---
+const WINBOX_CDN = "https://cdn.jsdelivr.net/npm/winbox@0.2.82/dist/winbox.bundle.min.js";
+const winboxes = new Map();     // artifact id -> WinBox instance
+const wbClosing = new Set();    // ids we're closing programmatically (don't re-remove)
+let winboxReady = false;
+let winboxLoading = null;
+
+function loadWinbox() {
+  if (window.WinBox) { winboxReady = true; return Promise.resolve(); }
+  if (winboxLoading) return winboxLoading;
+  winboxLoading = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = WINBOX_CDN;
+    script.async = true;
+    script.onload = () => (window.WinBox ? resolve() : reject(new Error("WinBox missing after load")));
+    script.onerror = () => { winboxLoading = null; reject(new Error("WinBox failed to load (offline/blocked)")); };
+    document.head.append(script);
+  });
+  return winboxLoading;
+}
+
+// Kick off loading once; when ready, re-render so the fallback windows are replaced.
+function ensureWinbox() {
+  if (winboxReady || winboxLoading) return;
+  loadWinbox().then(() => { winboxReady = true; if (state.version === "2") renderWorkspace(); }).catch(() => { /* stay on fallback */ });
+}
+
+function showDesktopEmpty(host) {
+  host.querySelectorAll(":scope > .ve-desktop-empty").forEach((n) => n.remove());
+  const empty = document.createElement("div");
+  empty.className = "ve-desktop-empty";
+  empty.innerHTML = "<span>VoiceEnable OS</span><strong>Your desktop is ready.</strong><p>Ask for a widget, chart, generator, or media — each opens as its own window. Right-click the desktop, or say “switch to the Windows desktop”, “make it neumorphic”, or “morph the UI”.</p>";
+  host.append(empty);
+}
 
 function renderWorkspaceV2() {
   ensureOsChrome();
   const host = el.adaptiveWorkspace;
   host.classList.remove("paged");
   host.classList.add("ve-desktop");
-  host.innerHTML = "";
   const items = state.workspace;
   // Prune geometry for artifacts that no longer exist so state.windows can't grow forever.
   const liveIds = new Set(items.map((a) => a.id));
   Object.keys(state.windows).forEach((k) => { if (!liveIds.has(k)) delete state.windows[k]; });
-  // Keep z-counter above any restored value.
   items.forEach((a) => { const s = state.windows[a.id]; if (s && s.z > veTopZ) veTopZ = s.z; });
   el.workspaceMode.textContent = items.length ? `Web OS · ${items.length} window${items.length > 1 ? "s" : ""}` : "VoiceEnable OS";
-  if (!items.length) {
-    const empty = document.createElement("div");
-    empty.className = "ve-desktop-empty";
-    empty.innerHTML = "<span>VoiceEnable OS</span><strong>Your desktop is ready.</strong><p>Ask for a widget, chart, generator, or media — each opens as its own window. Say “switch to the Windows desktop”, “make it neumorphic”, or “morph the UI” and I’ll reshape everything.</p>";
-    host.append(empty);
+
+  if (winboxReady && typeof window.WinBox === "function") {
+    // Real WinBox windows. Reconcile instead of full re-render so windows (and their
+    // widget iframes) stay alive and keep their position/size across state changes.
+    host.querySelectorAll(":scope > .ve-window, :scope > .ve-desktop-empty").forEach((n) => n.remove());
+    if (!items.length) { closeAllWinboxes(); showDesktopEmpty(host); syncTaskbarWindows(); saveWindows(); return; }
+    reconcileWinboxes();
     syncTaskbarWindows();
     saveWindows();
     return;
   }
+
+  // Fallback (WinBox not loaded yet or unavailable): hand-rolled window manager.
+  ensureWinbox();
+  host.innerHTML = "";
+  if (!items.length) { showDesktopEmpty(host); syncTaskbarWindows(); saveWindows(); return; }
   items.forEach((artifact, idx) => host.append(makeWindow(artifact, idx)));
   syncTaskbarWindows();
   saveWindows();
+}
+
+function closeAllWinboxes() {
+  for (const [id, wb] of winboxes) { wbClosing.add(id); try { wb.close(); } catch { /* gone */ } }
+  winboxes.clear();
+  wbClosing.clear();
+}
+
+function reconcileWinboxes() {
+  const liveIds = new Set(state.workspace.map((a) => a.id));
+  for (const [id, wb] of winboxes) {
+    if (!liveIds.has(id)) { wbClosing.add(id); try { wb.close(); } catch { /* gone */ } winboxes.delete(id); }
+  }
+  state.workspace.forEach((a, idx) => { if (!winboxes.has(a.id)) createWinbox(a, idx); });
+}
+
+function createWinbox(artifact, idx) {
+  const st = windowState(artifact.id, idx);
+  const mount = document.createElement("div");
+  mount.className = "ve-winmount";
+  mount.append(renderArtifact(artifact));
+  const host = el.adaptiveWorkspace;
+  const wb = new window.WinBox({
+    title: artifact.title || artifact.layout,
+    root: host,
+    mount,
+    x: Math.max(0, st.x || 24),
+    y: Math.max(0, st.y || 20),
+    width: st.w || 400,
+    height: st.h || 360,
+    minwidth: 240,
+    background: "#12172b",
+    class: ["ve-wb", "no-full"],
+    onclose() {
+      winboxes.delete(artifact.id);
+      if (!wbClosing.has(artifact.id)) removeWorkspace({ id: artifact.id });
+      wbClosing.delete(artifact.id);
+      return false;
+    },
+    onmove(x, y) { const s = windowState(artifact.id); s.x = x; s.y = y; s.snap = ""; saveWindowsThrottled(); },
+    onresize(w, h) { const s = windowState(artifact.id); if (w) s.w = w; if (h) s.h = h; saveWindowsThrottled(); },
+  });
+  winboxes.set(artifact.id, wb);
+  if (st.max) { try { wb.maximize(true); } catch { /* older api */ } }
+  if (st.minimized) { try { wb.minimize(true); } catch { /* older api */ } }
 }
 
 function mkWinBtn(glyph, title, onClick, extra) {
@@ -3223,6 +3313,8 @@ function enableWindowResize(win, grip, id) {
 }
 
 function focusWindow(id) {
+  const wb = winboxes.get(id);
+  if (wb) { try { wb.minimize(false); wb.focus(); } catch { /* ignore */ } return; }
   const s = windowState(id);
   veTopZ += 1;
   s.z = veTopZ;
@@ -3231,8 +3323,16 @@ function focusWindow(id) {
   saveWindows();
 }
 
-function minimizeWindow(id) { windowState(id).minimized = true; saveWindows(); renderWorkspace(); }
-function restoreWindow(id) { const s = windowState(id); s.minimized = false; veTopZ += 1; s.z = veTopZ; saveWindows(); renderWorkspace(); }
+function minimizeWindow(id) {
+  const wb = winboxes.get(id);
+  if (wb) { windowState(id).minimized = true; try { wb.minimize(true); } catch { /* ignore */ } saveWindows(); syncTaskbarWindows(); return; }
+  windowState(id).minimized = true; saveWindows(); renderWorkspace();
+}
+function restoreWindow(id) {
+  const wb = winboxes.get(id);
+  if (wb) { windowState(id).minimized = false; try { wb.minimize(false); wb.focus(); } catch { /* ignore */ } saveWindows(); syncTaskbarWindows(); return; }
+  const s = windowState(id); s.minimized = false; veTopZ += 1; s.z = veTopZ; saveWindows(); renderWorkspace();
+}
 
 // Drag a window by its titlebar. Uses pointer capture so it keeps tracking outside
 // the bar, and clamps to the desktop so a window can't be lost off-screen.
@@ -3313,10 +3413,16 @@ function arrangeWindows(mode) {
   } else if (mode === "stack") {
     ids.forEach((id) => { const s = windowState(id); s.minimized = false; s.x = 24; s.y = 16; });
   } else { // cascade (default)
-    ids.forEach((id, i) => { const s = windowState(id); s.minimized = false; s.x = 22 + i * 30; s.y = 16 + i * 30; s.w = 380; });
+    ids.forEach((id, i) => { const s = windowState(id); s.minimized = false; s.x = 22 + i * 30; s.y = 16 + i * 30; s.w = 380; s.h = 360; });
   }
   saveWindows();
-  if (state.version === "2") renderWorkspace();
+  // Apply to live WinBox instances if present; otherwise re-render the fallback windows.
+  if (winboxReady && winboxes.size) {
+    ids.forEach((id) => { const wb = winboxes.get(id); const s = state.windows[id]; if (wb && s) { try { wb.minimize(false); wb.resize(s.w || 380, s.h || 320); wb.move(s.x, s.y); } catch { /* ignore */ } } });
+    syncTaskbarWindows();
+  } else if (state.version === "2") {
+    renderWorkspace();
+  }
 }
 
 // The agent-driven UI morph (v2): retheme, relayout, recolor, rearrange.

@@ -2437,3 +2437,12 @@ body[data-version="2"][data-wallpaper="grid"]::before { background: linear-gradi
 body[data-version="2"][data-wallpaper="mesh"]::before { background: radial-gradient(600px 500px at 15% 25%, rgba(77, 232, 255, 0.18), transparent 60%), radial-gradient(600px 500px at 85% 20%, rgba(255, 79, 216, 0.16), transparent 60%), radial-gradient(700px 600px at 30% 85%, rgba(123, 255, 175, 0.14), transparent 60%), radial-gradient(700px 600px at 80% 80%, rgba(142, 108, 255, 0.18), transparent 60%), #06070f; }
 body[data-version="2"][data-wallpaper="void"]::before { background: radial-gradient(1200px 900px at 50% 40%, #0b0d18, #04040a 75%); }
 body[data-version="2"][data-wallpaper="void"]::after, body[data-version="2"][data-wallpaper="grid"]::after { display: none; }
+
+/* ---- WinBox.js windows themed to the active v2 surface style ---- */
+.winbox.ve-wb { background: var(--os-surface, rgba(18, 22, 40, 0.9)) !important; border-radius: var(--os-radius, 14px); box-shadow: var(--os-shadow, 0 18px 52px rgba(0, 0, 0, 0.5)); backdrop-filter: var(--os-blur, blur(14px)); }
+.winbox.ve-wb .wb-header { background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent); }
+.winbox.ve-wb .wb-title { color: var(--os-text, #eaf0ff); font: 600 13px "Space Grotesk", system-ui, sans-serif; }
+.winbox.ve-wb .wb-body { background: transparent; color: var(--os-text, #eaf0ff); }
+.winbox.ve-wb .wb-body .ve-winmount { padding: 10px; }
+.winbox.ve-wb .wb-body .workspace-card { background: transparent; border: 0; padding: 0; margin: 0; box-shadow: none; }
+.winbox.ve-wb .wb-body .workspace-card > header { display: none; }
