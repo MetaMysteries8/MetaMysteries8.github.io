@@ -75,6 +75,7 @@ const state = {
   stoppingRealtime: false,
   messages: JSON.parse(localStorage.getItem("conversation") || "[]"),
   memory: JSON.parse(localStorage.getItem("agent_memory") || "[]"),
+  savedWidgetIndex: [], // lightweight {id,title,spec} cache of the saved-widget library, refreshed by renderSavedWidgets (IndexedDB is the source of truth)
   workspace: JSON.parse(localStorage.getItem("workspace") || "[]"),
   settings: JSON.parse(localStorage.getItem("settings") || "{}"),
   mcps: JSON.parse(localStorage.getItem("mcp_servers") || "[]"),
@@ -1463,6 +1464,7 @@ async function runTool(name, args, realtimeCallId) {
     else if (name === "build_widget") result = await buildWidget(args, toolId);
     else if (name === "edit_widget") result = await editWidget(args, toolId);
     else if (name === "save_widget") result = await saveWidgetTool(args);
+    else if (name === "open_saved_widget") result = await openSavedWidgetTool(args);
     else if (name === "end_conversation") result = endConversationTool();
     else if (name === "ask_coder_model") result = await askCoder(args.task || args.prompt || "", toolId);
     else if (name === "call_mcp_server") result = await callMcp(args.server, args.tool, args.arguments || {}, toolId);
@@ -2209,6 +2211,17 @@ function toolDefinitions() {
         },
       },
     },
+    {
+      name: "open_saved_widget",
+      description: "Reopen one of the user's SAVED widgets (see the 'SAVED WIDGETS' list in your context) onto the canvas WITHOUT rebuilding it. Call this when the user asks for a widget that matches a saved one and confirms they want it opened. Prefer the exact id from the list; otherwise pass a title/keyword query.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "The saved widget's id from the SAVED WIDGETS list in context. Preferred when known." },
+          query: { type: "string", description: "Title or keywords to match a saved widget when you don't have the exact id." },
+        },
+      },
+    },
     { name: "ask_coder_model", description: "Delegate a coding task to the coder model. On the DESKTOP app the coder is autonomous: it writes real files to the workspace and CHAINS shell commands itself (install, build, test, run), iterating on errors until it works, then returns a { summary }. Use this for ANY task that needs commands run or a real project built — you do not run the commands yourself. On the web build it returns code/HTML saved to the gallery ({ projectGalleryId } or { codeGalleryId, filename, language }). Tell the user where the result is rather than reading code aloud.", parameters: objectParams({ task: "Full coding task: what to build, languages/stack, and how to verify it (e.g. 'build and run a Flask todo API, test that GET /todos returns 200')." }, ["task"]) },
     { name: "call_mcp_server", description: "Call a configured HTTP MCP gateway tool.", parameters: objectParams({ server: "Configured server name", tool: "MCP tool name", arguments: "Tool arguments object" }, ["server", "tool"]) },
     { name: "start_gibberlink", description: "Start Gibberlink (also spelled Jibberlink): a data-over-sound link (ggwave audio tones) for talking to ANOTHER AI agent instead of a human. YOU decide to call this — invoke it as soon as you recognize the other party is an AI agent and a reliable machine-to-machine exchange is warranted (e.g. the user says 'start gibberlink/jibberlink' or another agent proposes it). Same-agent peers auto-negotiate a faster protocol. Optionally include an opening message to transmit to the peer.", parameters: objectParams({ message: "Optional opening message to transmit to the peer agent" }, []) },
@@ -2375,7 +2388,7 @@ function objectParams(properties, required) {
 }
 
 function systemPrompt() {
-  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. For plain informational structure, call show_workspace with layout note, table, metrics, or code (real structured data, not prose). For ANYTHING interactive or visual — charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, custom visualizations — call build_widget, which generates a live sandboxed widget on the canvas. Widgets can persist their own data (a WidgetStore the user keeps) and embed the user's saved gallery media. To make a widget that shows or uses saved media (a slideshow, image gallery, moodboard, audio/video player), call build_widget with galleryFilter set to the kind ("image"/"video"/"audio"/"all") — the recent matching items are attached automatically, so you do NOT need exact ids; only pass galleryIds when you already have specific ones. To fix, restyle, or extend a widget the user already has, call edit_widget with the change; call save_widget to keep one in their library. To show source code or markup, use layout "code". This app works identically whether the user TALKS OR TYPES — many users have no microphone, so you must be fully capable over text chat, including image editing. IMAGE EDITING / IMAGE-TO-VIDEO: to edit, restyle, fix, or vary an existing or user-uploaded image, call create_image with sourceImageIds set to that image's gallery id and put the change in prompt — this is a one-step edit. To animate an image into a video, call create_video with sourceImageIds. The user can upload images directly in chat; uploads are auto-saved to the gallery, so if you are unsure of an id, call list_gallery first to find it (newest entries are the recently uploaded ones). Only when no usable image exists yet (none uploaded and none in the gallery) call request_source_images to collect one. use_gallery_sources is an alternative when working from several gallery selections. Call create_image with no sourceImageIds for a brand-new image. If the user would rather drive generation themselves, call open_generator to place an interactive Image, Video, or Movie generator widget on the canvas (e.g. "open the image generator"). To produce a multi-scene film that continues shot-to-shot, call create_movie (or open_generator 'movie' for the hands-on Movie Maker). You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink; ask the human's consent first unless they already requested it. You have a persistent long-term memory across sessions: call remember to store a durable fact about the user and forget to remove one — only durable things, not one-off chatter. You can manage the user's saved media with manage_gallery. If any tool returns an error, a generation fails, or the user says something "failed", "isn't working", or "hung", call network_issue to read the actual server error and a live connectivity check, then explain the cause and the fix in plain language and offer to retry — don't silently ignore failures. Note that failed generations already retry up to 3 times automatically and then stop to avoid wasting the user's Pollen; do not spam more generations after a hard failure. Only end the live session (end_conversation) when the user explicitly asks to stop, end, or hang up — never on your own initiative. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery." The app has two UI versions: v1 (classic) and v2 — "VoiceEnable OS", a reimagined desktop where every widget/artifact becomes its own movable window (many at once) and the whole interface can morph to fit the setup. If the user asks to "upgrade to version 2", turn on the web OS, or go back to v1, call set_version (upgrading plays a cinematic reveal). v2 is a full, agentic desktop OS with switchable desktop-environment shells — macOS, Windows, and ChromeOS looks (set_os, or morph_ui os) — and switchable surface styles: mixed, glassmorphic, neumorphic, or studio-flat (morph_ui style). Via morph_ui you can also change the color theme + accent and the layout, and tile/cascade/stack the open windows — so you can reshape the ENTIRE interface to fit the moment (e.g. a Mac desktop in cinematic dark glass for movie work, or a crisp Windows studio look for focused writing). Reloading the page in v2 plays an OS boot sequence. Users can always return to v1 from the version button, so reassure them it's reversible.${nativeNote()}${memoryPromptSection()}`;
+  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. For plain informational structure, call show_workspace with layout note, table, metrics, or code (real structured data, not prose). For ANYTHING interactive or visual — charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, custom visualizations — call build_widget, which generates a live sandboxed widget on the canvas. Widgets can persist their own data (a WidgetStore the user keeps) and embed the user's saved gallery media. To make a widget that shows or uses saved media (a slideshow, image gallery, moodboard, audio/video player), call build_widget with galleryFilter set to the kind ("image"/"video"/"audio"/"all") — the recent matching items are attached automatically, so you do NOT need exact ids; only pass galleryIds when you already have specific ones. To fix, restyle, or extend a widget the user already has, call edit_widget with the change; call save_widget to keep one in their library. To show source code or markup, use layout "code". This app works identically whether the user TALKS OR TYPES — many users have no microphone, so you must be fully capable over text chat, including image editing. IMAGE EDITING / IMAGE-TO-VIDEO: to edit, restyle, fix, or vary an existing or user-uploaded image, call create_image with sourceImageIds set to that image's gallery id and put the change in prompt — this is a one-step edit. To animate an image into a video, call create_video with sourceImageIds. The user can upload images directly in chat; uploads are auto-saved to the gallery, so if you are unsure of an id, call list_gallery first to find it (newest entries are the recently uploaded ones). Only when no usable image exists yet (none uploaded and none in the gallery) call request_source_images to collect one. use_gallery_sources is an alternative when working from several gallery selections. Call create_image with no sourceImageIds for a brand-new image. If the user would rather drive generation themselves, call open_generator to place an interactive Image, Video, or Movie generator widget on the canvas (e.g. "open the image generator"). To produce a multi-scene film that continues shot-to-shot, call create_movie (or open_generator 'movie' for the hands-on Movie Maker). You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink; ask the human's consent first unless they already requested it. You have a persistent long-term memory across sessions: call remember to store a durable fact about the user and forget to remove one — only durable things, not one-off chatter. You can manage the user's saved media with manage_gallery. If any tool returns an error, a generation fails, or the user says something "failed", "isn't working", or "hung", call network_issue to read the actual server error and a live connectivity check, then explain the cause and the fix in plain language and offer to retry — don't silently ignore failures. Note that failed generations already retry up to 3 times automatically and then stop to avoid wasting the user's Pollen; do not spam more generations after a hard failure. Only end the live session (end_conversation) when the user explicitly asks to stop, end, or hang up — never on your own initiative. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery." The app has two UI versions: v1 (classic) and v2 — "VoiceEnable OS", a reimagined desktop where every widget/artifact becomes its own movable window (many at once) and the whole interface can morph to fit the setup. If the user asks to "upgrade to version 2", turn on the web OS, or go back to v1, call set_version (upgrading plays a cinematic reveal). v2 is a full, agentic desktop OS with switchable desktop-environment shells — macOS, Windows, and ChromeOS looks (set_os, or morph_ui os) — and switchable surface styles: mixed, glassmorphic, neumorphic, or studio-flat (morph_ui style). Via morph_ui you can also change the color theme + accent and the layout, and tile/cascade/stack the open windows — so you can reshape the ENTIRE interface to fit the moment (e.g. a Mac desktop in cinematic dark glass for movie work, or a crisp Windows studio look for focused writing). Reloading the page in v2 plays an OS boot sequence. Users can always return to v1 from the version button, so reassure them it's reversible.${nativeNote()}${memoryPromptSection()}${savedWidgetsPromptSection()}`;
 }
 
 // Extra system guidance only present in the desktop build, where the filesystem and
@@ -2389,6 +2402,15 @@ function memoryPromptSection() {
   if (!state.memory.length) return "";
   const lines = state.memory.map((entry) => `- ${entry.text}`).join("\n");
   return `\n\nLong-term memory about this user (from past conversations):\n${lines}`;
+}
+
+// Make the agent aware of the user's saved-widget library so it can recognize when a
+// requested widget already exists and offer to reopen it instead of rebuilding.
+function savedWidgetsPromptSection() {
+  const list = state.savedWidgetIndex || [];
+  if (!list.length) return "";
+  const lines = list.slice(0, 40).map((w) => `- "${w.title}"${w.spec ? ` — ${shortPrompt(w.spec)}` : ""} [id: ${w.id}]`).join("\n");
+  return `\n\nThe user has these SAVED WIDGETS in their library (durable mini-apps they can reopen instantly):\n${lines}\nBefore building a NEW widget, check this list: if the user's request closely matches a saved one, do NOT rebuild it — tell them you already have a similar saved widget ("${list[0].title}", etc.), and ASK if they'd like to open that one. If they say yes, call open_saved_widget with its id. Only build fresh when nothing matches or they explicitly want a new one.`;
 }
 
 function personalityInstruction() {
@@ -2794,6 +2816,7 @@ function labelForTool(name) {
     build_widget: "Widget builder",
     edit_widget: "Widget editor",
     save_widget: "Save widget",
+    open_saved_widget: "Open saved widget",
     web_search: "Web search",
     open_generator: "Generator widget",
     create_movie: "Movie maker",
@@ -2841,6 +2864,7 @@ function summarizeToolResult(name, result) {
   if (name === "build_widget") return "Custom widget added to the canvas.";
   if (name === "edit_widget") return "Widget updated on the canvas.";
   if (name === "save_widget") return "Widget saved to your library.";
+  if (name === "open_saved_widget") return result?.opened ? `Reopened saved widget "${result.opened.title}".` : "Opened a saved widget.";
   if (name === "call_mcp_server") return "MCP server returned a result.";
   if (name === "start_gibberlink") return result?.turbo ? "Gibberlink active (turbo channel)." : "Gibberlink active.";
   if (result?.galleryId) return `${capitalize(result.kind)} saved to local gallery.`;
@@ -5134,8 +5158,11 @@ async function updateSavedWidget(id, patch) {
 }
 
 async function renderSavedWidgets() {
-  if (!el.widgetList) return;
   const records = await getWidgetRecords().catch(() => []);
+  // Keep the lightweight cache in sync so systemPrompt() (which is synchronous) can tell
+  // the agent what's already in the library and let it offer to reopen a match.
+  state.savedWidgetIndex = records.map((r) => ({ id: r.id, title: r.title || "Widget", spec: r.spec || "" }));
+  if (!el.widgetList) return;
   el.widgetList.innerHTML = "";
   if (!records.length) {
     const empty = document.createElement("p");
@@ -5186,6 +5213,31 @@ function openSavedWidget(record) {
   const live = state.workspace.find((artifact) => artifact.id === result.workspaceId);
   if (live) { live.savedWidgetId = record.id; live.savedAt = record.createdAt; saveWorkspace(); }
   closeDrawers();
+  return result;
+}
+
+// Agent tool: reopen a saved widget from the library without regenerating it. Matches by
+// exact id first (from the saved-widgets list in context), then by a title/keyword query.
+async function openSavedWidgetTool(args) {
+  const records = await getWidgetRecords().catch(() => []);
+  if (!records.length) return { error: "The saved-widget library is empty. Build one and save it first." };
+  const id = String(args.id || args.savedWidgetId || "").trim();
+  let record = id ? records.find((r) => r.id === id) : null;
+  if (!record) {
+    const q = String(args.query || args.title || args.name || "").toLowerCase().trim();
+    if (q) {
+      record = records.find((r) => (r.title || "").toLowerCase() === q)
+        || records.find((r) => (r.title || "").toLowerCase().includes(q))
+        || records.find((r) => (r.spec || "").toLowerCase().includes(q));
+    }
+  }
+  if (!record && records.length === 1 && !id) record = records[0];
+  if (!record) {
+    return { error: "No saved widget matched.", available: records.map((r) => ({ id: r.id, title: r.title })) };
+  }
+  const result = openSavedWidget(record);
+  addMessage("system", `Opened saved widget "${record.title}".`);
+  return { ok: true, opened: { id: record.id, title: record.title }, workspaceId: result.workspaceId };
 }
 
 async function clearSavedWidgets() {
