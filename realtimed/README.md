@@ -2,13 +2,13 @@
 
 **A real-time, voice-first AI agent that talks, creates, and builds — right in your browser.**
 
-VoiceEnable is powered by `gpt-realtime-2` and wired into image generation, video generation, music, speech, web search, a coding model, and a live adaptive canvas. Have a natural spoken conversation, ask it to make things for you, and watch them appear. No installs, no backend — it runs as a single static page and spends *your* Pollen through bring-your-own-key auth.
+VoiceEnable is powered by `gpt-realtime-2.1` and wired into image generation, video generation, music, speech, web search, a coding model, and a live adaptive canvas. Have a natural spoken conversation, ask it to make things for you, and watch them appear. No installs, no backend — it runs as a single static page and spends *your* Pollen through bring-your-own-key auth.
 
 ---
 
 ## 🎙️ Talk to it, naturally
 
-- **Realtime mode** — a full spoken conversation over `gpt-realtime-2`. It hears you, replies in its own voice, and reacts live. The visualizer pulses to the actual audio so you can *see* it listening and speaking.
+- **Realtime mode** — a full spoken conversation over `gpt-realtime-2.1`. It hears you, replies in its own voice, and reacts live. The visualizer pulses to the actual audio so you can *see* it listening and speaking.
 - **Push2Talk mode** — prefer something cheaper? Switch to push-to-talk: your speech is transcribed by a model of your choice, answered by a normal text model, and optionally spoken back with TTS. Same agent, lighter footprint.
 - **Type instead** — drop a message in the composer any time. Replies render with clean markdown and copyable code blocks.
 

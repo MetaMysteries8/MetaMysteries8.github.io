@@ -2,7 +2,7 @@ const GEN_BASE = "https://gen.pollinations.ai";
 const MEDIA_BASE = "https://media.pollinations.ai";
 const ENTER_BASE = "https://enter.pollinations.ai";
 const CLIENT_ID = "pk_VIepF2clCLKh5xiX";
-const REALTIME_MODEL = "gpt-realtime-2";
+const REALTIME_MODEL = "gpt-realtime-2.1";
 // Seconds of lookahead kept between the playback clock and now, so a late audio
 // delta over a jittery (often mobile) connection can't open an audible gap.
 const PLAYBACK_JITTER = 0.16;
@@ -466,7 +466,7 @@ function bindEvents() {
   document.querySelector(".account-strip")?.prepend(el.versionBtn);
   updateVersionButton();
   buildOsChrome();
-  setInterval(refreshOsChrome, 1000);
+  setInterval(() => { refreshOsChrome(); veDebugHud(); }, 800);
   renderDesktopStatus();
   // Keep v2 windows on-screen when the viewport changes (WinBox bounds can lag a resize).
   window.addEventListener("resize", () => { if (state.version === "2") clampWinboxes(); });
@@ -2348,7 +2348,7 @@ function realtimeSessionConfig(includeVoice) {
     tools: realtimeToolDefinitions(),
   };
   const voice = value("realtimeVoice");
-  // gpt-realtime-2 can emit its own voice; request the selected one when supported.
+  // gpt-realtime-2.1 can emit its own voice; request the selected one when supported.
   // If the proxy rejects it, handleRealtimeEvent retries with includeVoice=false.
   if (includeVoice && voice) session.audio = { output: { voice } };
   return session;
@@ -3153,6 +3153,45 @@ function showDesktopEmpty(host) {
   host.append(empty);
 }
 
+// TEMPORARY diagnostic HUD — dumps live v2 window state on-screen so we can see exactly
+// why windows aren't visible. Toggle with window.__VE_DEBUG (default on in v2 for now).
+function veDebugHud() {
+  if (state.version !== "2" || window.__VE_DEBUG === false) return;
+  let hud = document.getElementById("ve-debug");
+  if (!hud) {
+    hud = document.createElement("div");
+    hud.id = "ve-debug";
+    hud.style.cssText = "position:fixed;left:8px;top:44px;z-index:100002;max-width:52vw;max-height:74vh;overflow:auto;background:rgba(0,0,0,.85);color:#7dffea;font:11px/1.45 monospace;padding:9px 11px;border:1px solid #7dffea;border-radius:8px;white-space:pre;box-shadow:0 8px 30px rgba(0,0,0,.6)";
+    hud.addEventListener("click", () => { window.__VE_DEBUG = false; hud.remove(); });
+    document.body.appendChild(hud);
+  }
+  const L = [];
+  L.push("VE DEBUG (click to hide)");
+  L.push(`version=${document.body.dataset.version} os=${state.os} style=${state.osStyle} wall=${state.wallpaper}`);
+  L.push(`winboxReady=${winboxReady} WinBox=${typeof window.WinBox} loading=${!!winboxLoading}`);
+  L.push(`workspace=${state.workspace.length} ids=[${state.workspace.map((a) => String(a.id).slice(0, 5)).join(",")}]`);
+  L.push(`winboxes.map=${winboxes.size}  .winbox@doc=${document.querySelectorAll(".winbox").length}  .ve-window@doc=${document.querySelectorAll(".ve-window").length}`);
+  const host = el.adaptiveWorkspace;
+  if (host) {
+    const r = host.getBoundingClientRect();
+    const cs = getComputedStyle(host);
+    L.push(`desktop: cls="${host.className}" pos=${cs.position} z=${cs.zIndex} disp=${cs.display} ov=${cs.overflow}`);
+    L.push(`  rect=${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}  kids .winbox=${host.querySelectorAll(":scope > .winbox").length} .ve-window=${host.querySelectorAll(":scope > .ve-window").length}`);
+  }
+  L.push(`viewport=${window.innerWidth}x${window.innerHeight}  docEl=${document.documentElement.clientWidth}x${document.documentElement.clientHeight}`);
+  const boot = ["v2-overlay", "ve-boot", "ve-bootcut"].filter((id) => document.getElementById(id));
+  L.push(`overlays present: ${boot.length ? boot.join(",") : "none"}`);
+  for (const [id, wb] of winboxes) {
+    const d = wb && wb.dom;
+    if (!d) { L.push(`  ${String(id).slice(0, 5)}: NO .dom`); continue; }
+    const r = d.getBoundingClientRect();
+    const cs = getComputedStyle(d);
+    L.push(`  ${String(id).slice(0, 5)}: conn=${d.isConnected} par=${d.parentElement ? (d.parentElement.id || d.parentElement.className || d.parentElement.tagName) : "none"}`);
+    L.push(`     rect=${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)} z=${cs.zIndex} disp=${cs.display} vis=${cs.visibility} op=${cs.opacity} min=${wb.min} max=${wb.max} wbxy=${wb.x},${wb.y} wbwh=${wb.width}x${wb.height}`);
+  }
+  hud.textContent = L.join("\n");
+}
+
 function renderWorkspaceV2() {
   ensureOsChrome();
   const host = el.adaptiveWorkspace;
@@ -3235,11 +3274,15 @@ function createWinbox(artifact, idx) {
   const mount = document.createElement("div");
   mount.className = "ve-winmount";
   mount.append(renderArtifact(artifact));
-  const host = el.adaptiveWorkspace;
-  // Root is the FULL-viewport desktop, so WinBox coords are viewport coords. We reserve
-  // the top bar + taskbar via WinBox's own viewport options (top/bottom/left/right) —
-  // it honors them for move, resize, AND maximize, which keeps titlebars on-screen and
-  // lets windows use the entire free area instead of being boxed.
+  // Root windows on <body>, NOT the desktop element. WinBox windows are position:fixed
+  // (viewport-relative) with contain:layout/size; nesting them inside the desktop (which is
+  // itself position:fixed; z-index:1) traps them in a low stacking context, capping every
+  // window under z-index 1 — so they render but stay hidden below other v2 chrome. Rooting
+  // to <body> puts them in the root stacking context (their focus z-index 11+ sits above the
+  // z-index:1 desktop, below the z-index:1000 top bar / taskbar). WinBox derives its bounds
+  // from document.documentElement (the viewport) regardless of root, so coords still line up
+  // and the top/right/bottom/left options keep reserving the chrome area.
+  const host = document.body;
   const cs = getComputedStyle(document.body);
   const topH = parseInt(cs.getPropertyValue("--os-top-h"), 10) || 34;
   const barH = (parseInt(cs.getPropertyValue("--os-bar-h"), 10) || 58) + (state.os === "mac" ? 16 : 6);
@@ -3252,7 +3295,11 @@ function createWinbox(artifact, idx) {
   let y = st.y != null ? st.y : Math.round(topH + 22 + (idx % 6) * 26);
   x = Math.max(6, Math.min(x, vw - width - 6));
   y = Math.max(topH + 4, Math.min(y, vh - barH - Math.min(height, availH) - 4));
-  const wb = new window.WinBox({
+  // NOTE: `let` + null-guard is deliberate. WinBox invokes onmove/onresize synchronously
+  // from its constructor (initial move/resize), before `wb` is assigned — so the callbacks
+  // MUST tolerate `wb` being null and skip clamping on that first pass.
+  let wb = null;
+  wb = new window.WinBox({
     title: artifact.title || artifact.layout,
     root: host,
     mount,
@@ -3271,8 +3318,8 @@ function createWinbox(artifact, idx) {
       wbClosing.delete(artifact.id);
       return false;
     },
-    onmove(x2, y2) { if (wb._clamping) return; const s = windowState(artifact.id); s.x = x2; s.y = y2; s.snap = ""; clampWinbox(wb); saveWindowsThrottled(); },
-    onresize(w, h) { if (wb._clamping) return; const s = windowState(artifact.id); if (w) s.w = w; if (h) s.h = h; clampWinbox(wb); saveWindowsThrottled(); },
+    onmove(x2, y2) { if (!wb || wb._clamping) return; const s = windowState(artifact.id); s.x = x2; s.y = y2; s.snap = ""; clampWinbox(wb); saveWindowsThrottled(); },
+    onresize(w, h) { if (!wb || wb._clamping) return; const s = windowState(artifact.id); if (w) s.w = w; if (h) s.h = h; clampWinbox(wb); saveWindowsThrottled(); },
   });
   winboxes.set(artifact.id, wb);
   if (st.max) { try { wb.maximize(true); } catch { /* older api */ } }

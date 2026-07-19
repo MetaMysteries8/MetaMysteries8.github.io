@@ -1,6 +1,6 @@
 # VoiceEnable — in brief
 
-A voice-first AI agent in your browser, powered by `gpt-realtime-2`.
+A voice-first AI agent in your browser, powered by `gpt-realtime-2.1`.
 
 **Talk to it.** Have a real spoken conversation in realtime, or use Push2Talk (transcription + a normal model) for a lighter, cheaper setup. You can also just type.
 
