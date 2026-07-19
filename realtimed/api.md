@@ -94,7 +94,7 @@ OpenAI-compatible Realtime WebSocket proxy for voice and multimodal sessions.
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /v1/realtime` | WebSocket Realtime session (`model=gpt-realtime-2`) |
+| `GET /v1/realtime` | WebSocket Realtime session (`model=gpt-realtime-2.1`) |
 
 Requires an API key with positive balance. Server clients can use `Authorization: Bearer <key>`; browser WebSocket clients can use `?key=pk_...`.
 
@@ -107,7 +107,7 @@ import WebSocket from "ws";
 
 // Server: Bearer auth. Browser: append `&key=pk_...` instead (headers aren't settable).
 const ws = new WebSocket(
-    "wss://gen.pollinations.ai/v1/realtime?model=gpt-realtime-2",
+    "wss://gen.pollinations.ai/v1/realtime?model=gpt-realtime-2.1",
     { headers: { Authorization: `Bearer ${process.env.POLLINATIONS_API_KEY}` } },
 );
 
@@ -120,7 +120,7 @@ ws.on("message", (m) => console.log(JSON.parse(m.toString())));
 
 **Browser audio:** play the model's audio through an `<audio>` element (e.g. a Web Audio `MediaStreamDestination` set as the element's `srcObject`), not straight to the Web Audio output. The browser only uses audio-element output as the echo-cancellation reference, so without it the mic re-captures the model's voice and it starts replying to itself. The WebRTC transport handles this automatically; on the WebSocket transport it's the client's responsibility.
 
-**Realtime models:** gpt-realtime-2
+**Realtime models:** gpt-realtime-2.1
 
 ## Audio Generation
 
