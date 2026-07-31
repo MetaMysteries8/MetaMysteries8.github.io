@@ -141,8 +141,18 @@ body {
 #model-select:focus { border-color: rgba(33,150,243,0.55); }
 #model-select option { background: #1a1a2e; color: #fff; }
 #model-select option.paid-model { color: #ffd54f; }
+/* Community models (Pollinations alpha) — 3rd-party backends, visually distinct
+   from first-party models so nobody picks one without noticing. */
+#model-select option.community-model { color: #7ee0c8; }
 
 #model-status { font-size: 11px; white-space: nowrap; color: rgba(255,255,255,0.30); }
+
+/* Chip next to the picker: warns when the chosen model is blind or 3rd-party */
+#model-vision-notice {
+    font-size: 10px; font-weight: 700; letter-spacing: .02em; white-space: nowrap;
+    padding: 2px 6px; border-radius: 999px; cursor: help;
+    color: #ffcf70; background: rgba(255,183,77,0.14); border: 1px solid rgba(255,183,77,0.35);
+}
 
 /* ── Paid toggle ────────────────────────────────────────── */
 .hud-toggle { display: flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; flex-shrink: 0; }
@@ -1325,3 +1335,13 @@ body {
 .rt-cost-img { display: block; width: 100%; border-radius: 10px; margin: 12px 0; border: 1px solid #2a3550; }
 .rt-cost-ok { margin-top: 8px; width: 100%; padding: 11px; border: 0; border-radius: 10px; background: linear-gradient(135deg, #e0a317, #d4790f); color: #1a1206; font-weight: 700; font-size: 14px; cursor: pointer; }
 .rt-cost-ok:hover { filter: brightness(1.08); }
+
+/* RT direction picker inside the cost modal */
+.rt-dir-label { margin: 6px 0 6px; font-size: 13px; color: #9aa6bf; font-weight: 600; }
+.rt-dir-row { display: flex; gap: 10px; margin-bottom: 12px; }
+.rt-dir-btn { flex: 1; display: flex; flex-direction: column; gap: 3px; align-items: flex-start; text-align: left; padding: 11px 13px; border: 1.5px solid #2a3550; border-radius: 10px; background: #161b27; color: #c9d2e4; cursor: pointer; transition: border-color .12s, background .12s; }
+.rt-dir-btn b { font-size: 14px; }
+.rt-dir-btn span { font-size: 11px; color: #8893ab; }
+.rt-dir-btn:hover { border-color: #3c4a6e; background: #1a2030; }
+.rt-dir-btn.active { border-color: #e0a317; background: #251d0b; }
+.rt-dir-btn.active span { color: #c9b07a; }

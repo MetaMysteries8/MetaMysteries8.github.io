@@ -1,6 +1,6 @@
 // ─────────────────────────────────────────────────────────────────────────
 // voice.js — Realtime VOICE ASSISTANT for the SM64-AI app (separate from RT Play).
-// Talk to gpt-realtime-2; it answers in its own voice and CONTROLS THE APP by
+// Talk to gpt-realtime-2.1; it answers in its own voice and CONTROLS THE APP by
 // calling tools (start/stop, set mode, cheater, deep-train, hyper, status).
 // Speech-to-speech; browser SpeechSynthesis is the free text-mode fallback.
 // Push-to-talk, hands-free (server VAD), wake word. Chrome + mic. (RT Play — the
@@ -8,7 +8,8 @@
 // ─────────────────────────────────────────────────────────────────────────
 (function () {
     'use strict';
-    const RT_URL = 'wss://gen.pollinations.ai/v1/realtime?model=gpt-realtime-2';
+    const RT_MODEL = 'gpt-realtime-2.1';   // current realtime model (2.1 / 2.1-mini / 2)
+    const RT_URL = `wss://gen.pollinations.ai/v1/realtime?model=${RT_MODEL}`;
     const SR = 24000;
     const $ = id => document.getElementById(id);
     const B = () => window.sm64Voice || {};
@@ -16,7 +17,8 @@
     let ws = null, connected = false;
     let micStream = null, micCtx = null, micNode = null, micSrc = null, micZero = null, micReady = false;
     let playCtx = null, playHead = 0, liveSources = [], audioMuted = false;
-    let talking = false, mode = 'ptt', speakBack = true, curText = '', sentSamples = 0;
+    let playDest = null, playEl = null;   // <audio> sink — required for echo cancellation
+    let talking = false, mode = 'ptt', speakBack = true, curText = '', sentSamples = 0, responding = false;
     const handledCalls = new Set();
     let recog = null, wakePhrase = 'hey mario';
 
@@ -76,7 +78,7 @@
         if (!key) setStatus('no API key — connect your account first');
         try { ws = new WebSocket(RT_URL + (key ? '&key=' + encodeURIComponent(key) : '')); }
         catch (e) { setStatus('connect failed'); console.warn('[voice]', e); return; }
-        ws.onopen = () => { connected = true; setStatus('connected'); sendSession(); log('sys', 'connected to gpt-realtime-2'); updateButtons(); };
+        ws.onopen = () => { connected = true; setStatus('connected'); sendSession(); log('sys', 'connected to ' + RT_MODEL); updateButtons(); };
         ws.onclose = () => { connected = false; setStatus('disconnected'); updateButtons(); };
         ws.onerror = () => setStatus('socket error');
         ws.onmessage = onMessage;
@@ -103,10 +105,14 @@
     function onMessage(ev) {
         let m; try { m = JSON.parse(ev.data); } catch { return; }
         console.log('[voice] ◀', m.type, m.error ? JSON.stringify(m.error) : '');
-        if (m.type && /\.error$|^error$/.test(m.type)) { const msg = (m.error && (m.error.message || m.error.code)) || JSON.stringify(m.error || m); log('sys', 'ERROR: ' + msg); setStatus('err: ' + msg); return; }
+        if (m.type && /\.error$|^error$/.test(m.type)) {
+            const msg = (m.error && (m.error.message || m.error.code)) || JSON.stringify(m.error || m);
+            if (/no active response/i.test(msg)) { responding = false; return; }   // benign: cancelled with nothing running
+            log('sys', 'ERROR: ' + msg); setStatus('err: ' + msg); return;
+        }
         switch (m.type) {
             case 'session.created': log('sys', 'session ready'); break;
-            case 'response.created': audioMuted = false; setStatus('responding…'); break;
+            case 'response.created': audioMuted = false; responding = true; setStatus('responding…'); break;
             case 'response.audio.delta':
             case 'response.output_audio.delta': if (speakBack && !audioMuted) playPCM(m.delta); break;
             case 'response.audio_transcript.delta':
@@ -116,6 +122,7 @@
             case 'response.function_call_arguments.done':
                 execToolItem({ name: m.name, call_id: m.call_id, arguments: m.arguments }); break;
             case 'response.done': {
+                responding = false;
                 const out = (m.response && m.response.output) || [];
                 for (const it of out) if (it.type === 'function_call') execToolItem(it);
                 if (curText) { if (!speakBack) speakText(curText); finalizeAssistant(); }
@@ -137,14 +144,38 @@
         send({ type: 'response.create' });
     }
 
+    // ── Playback path (echo cancellation) ────────────────────────────────────
+    // The model's voice MUST come out of an <audio> element, not straight out of
+    // playCtx.destination. The browser only uses audio-ELEMENT output as the
+    // reference signal for echo cancellation, so playing to the raw Web Audio
+    // output means the mic re-captures the model's own voice and it starts
+    // answering itself — which is exactly what happens in hands-free/VAD mode.
+    // So: route every buffer into a MediaStreamDestination and hand that stream
+    // to an <audio> element. (The WebRTC transport does this for you; on the
+    // WebSocket transport it's the client's job.)
+    function ensurePlayback() {
+        if (!playCtx) playCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (!playDest) {
+            playDest = playCtx.createMediaStreamDestination();
+            playEl = document.createElement('audio');
+            playEl.autoplay = true;
+            playEl.srcObject = playDest.stream;
+            playEl.style.display = 'none';
+            document.body.appendChild(playEl);
+        }
+        if (playCtx.state === 'suspended') { try { playCtx.resume(); } catch {} }
+        try { playEl.play?.().catch(() => {}); } catch {}
+        return playDest;
+    }
+
     function playPCM(b64) {
         if (!b64) return;
-        if (!playCtx) playCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const dest = ensurePlayback();
         const bin = atob(b64), n = bin.length >> 1, i16 = new Int16Array(n);
         for (let i = 0; i < n; i++) { let v = bin.charCodeAt(i * 2) | (bin.charCodeAt(i * 2 + 1) << 8); i16[i] = v >= 32768 ? v - 65536 : v; }
         const buf = playCtx.createBuffer(1, n, SR), ch = buf.getChannelData(0);
         for (let i = 0; i < n; i++) ch[i] = i16[i] / 32768;
-        const src = playCtx.createBufferSource(); src.buffer = buf; src.connect(playCtx.destination);
+        const src = playCtx.createBufferSource(); src.buffer = buf; src.connect(dest);
         const now = playCtx.currentTime; if (playHead < now) playHead = now;
         src.start(playHead); playHead += buf.duration;
         liveSources.push(src);
@@ -158,7 +189,7 @@
         if (playCtx) playHead = playCtx.currentTime;
         try { speechSynthesis.cancel(); } catch {}
     }
-    function interrupt() { stopAudio(); try { send({ type: 'response.cancel' }); } catch {} curText = ''; }
+    function interrupt() { stopAudio(); if (responding) { try { send({ type: 'response.cancel' }); } catch {} responding = false; } curText = ''; }
     function speakText(t) { try { const u = new SpeechSynthesisUtterance(t); speechSynthesis.speak(u); } catch {} }
 
     async function startMic() {

@@ -348,17 +348,98 @@ function getActiveKey() {
     return pollinationsKey;
 }
 
-async function callChatAPI(messages, opts = {}) {
-    const key   = getActiveKey();
-    if (!key) throw new Error('Not connected to Pollinations — please authorize.');
-    const model = opts.model || getSelectedModel();
-    const req   = activeProvider.buildRequest(messages, model, key, opts);
+// ── Prompt caching (api.txt "Prompt caching") ────────────────
+// Gemini, Claude and Nova can cache a large static prompt prefix, marked with
+// cache_control on a CONTENT BLOCK (not the message). Repeat hits bill at ~10%
+// of the input rate — a big deal for a loop that re-sends the same rulebook
+// every few seconds. Everything before the marker must be byte-identical.
+//
+// Practical caveats we honour here, straight from the docs:
+//  - Claude: all models cache; ≥4096-token prefix (1024 on `claude`/`claude-fable-5`); tools are fine.
+//  - Gemini: ≥2048 tokens (~4096 on Gemini 3) AND requests carrying tools are not
+//    cached at all, so the marker is a no-op on the tool-calling gameplay turns.
+//  - Nova: ≥~1000 tokens, cache creates are free.
+//
+// Reality check: the gameplay rulebook prefix measures ~9.5k chars ≈ 2.4–2.7k
+// tokens. So this actually pays off on `claude`, `claude-fable-5`, `nova` and
+// `nova-fast` (and on gemini-fast/gemini-flash-lite-3.5 only when tools are off).
+// On claude-sonnet-5 / claude-opus-* / gemini-3-* the 4096-token floor is not
+// reached and the marker is simply ignored — harmless, but no saving. The debug
+// HUD (🐞) reports real cache creates/hits so this is observable, not assumed.
+// Anything else (OpenAI, Grok, community endpoints, …) gets a plain string
+// system message — community backends in particular are arbitrary third-party
+// servers that may not accept array-form content at all.
+const _CACHEABLE_MODEL = /^(claude|nova|gemini)/i;
+const _modelCacheSupport = {};   // model -> false once it rejects cache blocks
 
-    const res = await fetch(req.url, {
+function supportsPromptCache(model) {
+    if (!_CACHEABLE_MODEL.test(model || '')) return false;
+    return _modelCacheSupport[model] !== false;
+}
+
+// Build the system message, splitting it so the static rulebook can be cached.
+function buildSystemMessage(staticPrefix, dynamicSuffix = '') {
+    const model = getSelectedModel();
+    if (!supportsPromptCache(model)) {
+        return { role: 'system', content: staticPrefix + (dynamicSuffix ? `\n\n${dynamicSuffix}` : '') };
+    }
+    const content = [{ type: 'text', text: staticPrefix, cache_control: { type: 'ephemeral' } }];
+    if (dynamicSuffix) content.push({ type: 'text', text: dynamicSuffix });
+    return { role: 'system', content };
+}
+
+// Collapse array-form text content back to a plain string, for endpoints that
+// reject content blocks. Image parts are dropped (they can't be stringified).
+function _flattenMessages(messages) {
+    return messages.map(m => {
+        if (!Array.isArray(m.content)) return m;
+        const hasImage = m.content.some(p => p?.type === 'image_url');
+        if (hasImage) return m;   // leave real multimodal messages alone
+        return { ...m, content: m.content.map(p => p?.text || '').join('\n\n') };
+    });
+}
+
+async function _postChat(messages, model, key, opts) {
+    const req = activeProvider.buildRequest(messages, model, key, opts);
+    return await fetch(req.url, {
         method: 'POST',
         headers: req.headers,
         body: JSON.stringify(req.body),
     });
+}
+
+async function callChatAPI(messages, opts = {}) {
+    const key   = getActiveKey();
+    if (!key) throw new Error('Not connected to Pollinations — please authorize.');
+    const model = opts.model || getSelectedModel();
+
+    // Drop response_format for models already known to reject it.
+    if (opts.json && _modelJsonSupport[model] === false) opts = { ...opts, json: false };
+
+    let res = await _postChat(messages, model, key, opts);
+
+    // A 400 on a request carrying cache_control blocks is almost certainly the
+    // model rejecting the block form — remember that and retry once, flattened,
+    // so a caching experiment can never break an otherwise working model.
+    if (res.status === 400 && messages.some(m => Array.isArray(m.content) && m.content.some(p => p?.cache_control))) {
+        const peek = await res.clone().json().catch(() => ({}));
+        console.warn(`[Cache] ${model} rejected cache_control blocks — retrying without:`, peek?.error?.message || '');
+        _modelCacheSupport[model] = false;
+        messages = _flattenMessages(messages);
+        res = await _postChat(messages, model, key, opts);
+    }
+
+    // Same for JSON mode: community backends often don't implement response_format.
+    // Retry once without it; the response parser already tolerates loose output.
+    if (res.status === 400 && opts.json) {
+        const peek = await res.clone().json().catch(() => ({}));
+        const why  = peek?.error?.message || '';
+        if (/response_format|json[_ ]?object|json[_ ]?mode|unsupported|unknown|not supported/i.test(why) || !why) {
+            console.warn(`[JSON] ${model} rejected response_format — retrying without:`, why);
+            _modelJsonSupport[model] = false;
+            res = await _postChat(messages, model, key, { ...opts, json: false });
+        }
+    }
 
     if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -373,6 +454,14 @@ async function callChatAPI(messages, opts = {}) {
             document.getElementById('auth-overlay')?.classList.remove('hidden');
             throw new Error('401 Unauthorized — your Pollinations key expired. Please reconnect.');
         }
+        // 402 = out of pollen. Unlike 403/429/5xx this will NOT fix itself, so
+        // retrying just spins the loop forever on a dead account. Tag it so the
+        // caller stops the AI outright instead of backing off.
+        if (res.status === 402) {
+            const e = new Error(`402 — out of pollen${msg ? `: ${msg}` : ''}. Top up at enter.pollinations.ai/keys, or pick a cheaper/free model.`);
+            e.code = 'INSUFFICIENT_POLLEN';
+            throw e;
+        }
         if (res.status === 403) throw new Error(`403 (blocked this request — rate limit/tier/filter): ${msg || 'try again shortly'}`);
         if (res.status === 429) throw new Error('429 Rate limited — backing off, will retry.');
         if (res.status >= 500)  throw new Error(`Server error ${res.status} — temporary, will retry.`);
@@ -380,9 +469,23 @@ async function callChatAPI(messages, opts = {}) {
     }
 
     const data = await res.json();
+    _noteCacheUsage(model, data.usage);
     // Tool-calling callers need the full assistant message (tool_calls + content)
     if (opts.returnRaw) return data.choices?.[0]?.message || {};
     return data.choices?.[0]?.message?.content || '';
+}
+
+// Track whether caching is actually landing, so the debug HUD can show it rather
+// than us assuming it works. api.txt: creates report `cache_creation_input_tokens`,
+// hits report `prompt_tokens_details.cached_tokens`.
+let _cacheStats = { created: 0, hits: 0, hitTokens: 0, lastModel: null };
+function _noteCacheUsage(model, usage) {
+    if (!usage) return;
+    const created = usage.cache_creation_input_tokens || 0;
+    const cached  = usage.prompt_tokens_details?.cached_tokens || 0;
+    if (created) _cacheStats.created++;
+    if (cached)  { _cacheStats.hits++; _cacheStats.hitTokens += cached; }
+    if (created || cached) _cacheStats.lastModel = model;
 }
 
 // ── Agentic tools (OpenAI/function-calling) ──────────────────
@@ -602,8 +705,24 @@ const _modelToolSupport = {};
 
 function modelMaySupportTools(model) {
     const known = _modelToolSupport[model];
-    return known !== false; // try when true or unknown
+    if (known != null) return known;
+    // The registry states tool support outright — believe it rather than burning
+    // a failed request to discover it. Community endpoints in particular almost
+    // never advertise `tools`, and each blind attempt costs a round trip.
+    const meta = modelInfo(model);
+    if (meta) {
+        if (meta.tools === false) return false;
+        if (meta.tools === true)  return true;
+        if (Array.isArray(meta.capabilities) && isCommunityModel(meta)) {
+            return meta.capabilities.includes('tool_calling');
+        }
+    }
+    return true; // unknown — try once, then remember
 }
+
+// Same idea for JSON mode: `response_format` is an OpenAI extension that many
+// third-party community backends reject outright. Remember per model and drop it.
+const _modelJsonSupport = {};
 
 // Run one chat turn that may use the get_game_state tool.
 // Falls back transparently to a plain call if the provider/model rejects tools.
@@ -658,9 +777,10 @@ async function callChatWithTools(messages, opts = {}) {
 }
 
 
-// The model dropdown only ever lists Pollinations VISION models (image input),
-// so the connected model can always see the screen.
-function providerHasVision() { return true; }
+// Whether the model currently driving the game can actually be sent images.
+// First-party vision models: yes. Community models (alpha) are text-only today,
+// so this is false for them and callers must use the text-only fallback path.
+function providerHasVision() { return modelHasVision(); }
 
 // ────────────────────────────────────────────────────────────
 // 4. AUTH (Pollinations OAuth)
@@ -669,18 +789,118 @@ const getStoredKey   = () => { try { return localStorage.getItem(STORAGE_KEY); }
 const storeKey       = k  => { try { localStorage.setItem(STORAGE_KEY, k); } catch {} };
 const clearStoredKey = () => { try { localStorage.removeItem(STORAGE_KEY); } catch {} };
 
-function buildAuthUrl() {
-    // client_id = our publishable App Key, so the consent screen shows the app
-    // name + author and inference users spend credits developer earnings to us.
+// ── BYOP: OAuth authorization-code flow with PKCE ────────────
+// This is the flow api.txt steers new integrations to. It replaces the legacy
+// fragment redirect, which returned the sk_ key straight in the URL hash with
+// no PKCE and no CSRF check. We still ACCEPT a fragment callback, because an
+// old bookmarked/in-flight redirect would otherwise silently fail — but we
+// never initiate one.
+const PKCE_VERIFIER_KEY = 'sm64_pkce_verifier';
+const PKCE_STATE_KEY    = 'sm64_oauth_state';
+const POLLINATIONS_TOKEN_URL = 'https://enter.pollinations.ai/api/oauth/token';
+
+const _b64url = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes)))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+function _randomUrlSafe(bytes = 32) {
+    return _b64url(crypto.getRandomValues(new Uint8Array(bytes)));
+}
+
+async function _s256(verifier) {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+    return _b64url(digest);
+}
+
+async function buildAuthUrl() {
+    // PKCE needs WebCrypto's SHA-256, which only exists in a secure context
+    // (https:// or localhost). Served over plain http on a LAN IP there is no
+    // crypto.subtle, so fall back to the legacy fragment flow rather than
+    // throwing and leaving the user unable to connect at all.
+    if (!window.isSecureContext || !crypto?.subtle) {
+        console.warn('[Auth] insecure context — falling back to the legacy fragment flow (serve over https for PKCE).');
+        const legacy = new URLSearchParams({
+            client_id:    POLLINATIONS_APP_KEY,
+            redirect_uri: location.href.split('#')[0].split('?')[0],
+            scope:        'usage',
+            state:        String(Math.random()).slice(2),
+        });
+        return `${POLLINATIONS_AUTH_URL}?${legacy}`;
+    }
+
+    // Fresh PKCE verifier + CSRF state per attempt; both stashed for the callback.
+    const verifier = _randomUrlSafe(32);
+    const state    = _randomUrlSafe(16);
+    try {
+        sessionStorage.setItem(PKCE_VERIFIER_KEY, verifier);
+        sessionStorage.setItem(PKCE_STATE_KEY, state);
+    } catch {}
     const params = new URLSearchParams({
-        redirect_uri: location.href.split('#')[0],
-        client_id:    POLLINATIONS_APP_KEY,
+        response_type:         'code',
+        // client_id = our publishable App Key, so the consent screen shows the app
+        // name + author and inference users spend credits developer earnings to us.
+        client_id:             POLLINATIONS_APP_KEY,
+        redirect_uri:          location.href.split('#')[0].split('?')[0],
         // usage scope → lets us read balance + per-request cost for the energy bar
-        scope:        'usage',
+        scope:                 'usage',
+        state,
+        code_challenge:        await _s256(verifier),
+        code_challenge_method: 'S256',
     });
     return `${POLLINATIONS_AUTH_URL}?${params}`;
 }
 
+// Exchange the single-use authorization code for an sk_ key. Public client, so
+// there is no secret — PKCE is what proves this is the same app that started
+// the flow. Returns the key, or null on any failure.
+async function exchangeCodeForKey(code) {
+    let verifier = null;
+    try { verifier = sessionStorage.getItem(PKCE_VERIFIER_KEY); } catch {}
+    if (!verifier) return null;
+    try {
+        const res = await fetch(POLLINATIONS_TOKEN_URL, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body:    new URLSearchParams({
+                grant_type:    'authorization_code',
+                code,
+                client_id:     POLLINATIONS_APP_KEY,
+                redirect_uri:  location.href.split('#')[0].split('?')[0],
+                code_verifier: verifier,
+            }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.access_token) {
+            console.warn('[Auth] token exchange failed:', data?.error_description || data?.error || res.status);
+            return null;
+        }
+        return data.access_token;
+    } catch (err) {
+        console.warn('[Auth] token exchange error:', err);
+        return null;
+    } finally {
+        try { sessionStorage.removeItem(PKCE_VERIFIER_KEY); sessionStorage.removeItem(PKCE_STATE_KEY); } catch {}
+    }
+}
+
+// Read ?code=&state= (PKCE) from the callback and validate state against the one
+// we stored. Returns { code } | { error } | null.
+function grabCodeFromQuery() {
+    const params = new URLSearchParams(location.search);
+    const code   = params.get('code');
+    const error  = params.get('error');
+    if (!code && !error) return null;
+    const state = params.get('state');
+    let expected = null;
+    try { expected = sessionStorage.getItem(PKCE_STATE_KEY); } catch {}
+    history.replaceState(null, '', location.pathname);
+    if (error) return { error: params.get('error_description') || error };
+    // CSRF: the callback must echo the state we generated.
+    if (expected && state !== expected) return { error: 'state mismatch — ignoring this callback' };
+    return { code };
+}
+
+// Legacy fragment callback (#api_key=…). Kept only so an in-flight or bookmarked
+// old-style redirect still lands; nothing in this app produces one any more.
 function grabKeyFromHash() {
     const hash   = location.hash.slice(1);
     const params = new URLSearchParams(hash);
@@ -689,23 +909,41 @@ function grabKeyFromHash() {
     return key || null;
 }
 
-function initAuth() {
+function _authSucceeded(key, authStatus, overlay) {
+    storeKey(key);
+    pollinationsKey = key;
+    providerKeys.pollinations = key;
+    if (authStatus) authStatus.textContent = '✅ Authorized! Loading game…';
+    overlay?.classList.add('hidden');
+    const dc = document.getElementById('disconnect-btn');
+    if (dc) dc.style.display = '';
+    tts.interrupt('Connected! Your Pollinations account is linked. The game is ready.');
+    // The PKCE exchange is async, so boot's initial balance fetch has already run
+    // with no key by the time we get here — refresh it now.
+    try { refreshPollenBalance(); } catch {}
+}
+
+async function initAuth() {
     const overlay    = document.getElementById('auth-overlay');
     const authBtn    = document.getElementById('auth-btn');
     const authStatus = document.getElementById('auth-status');
 
-    const hashKey = grabKeyFromHash();
-    if (hashKey) {
-        storeKey(hashKey);
-        pollinationsKey = hashKey;
-        providerKeys.pollinations = hashKey;
-        authStatus.textContent = '✅ Authorized! Loading game…';
-        overlay.classList.add('hidden');
-        document.getElementById('disconnect-btn').style.display = '';
-        tts.interrupt('Connected! Your Pollinations account is linked. The game is ready.');
-        return;
+    // 1. PKCE callback (?code=…)
+    const cb = grabCodeFromQuery();
+    if (cb?.code) {
+        if (authStatus) authStatus.textContent = '🔄 Exchanging authorization code…';
+        const key = await exchangeCodeForKey(cb.code);
+        if (key) { _authSucceeded(key, authStatus, overlay); return; }
+        if (authStatus) authStatus.textContent = '❌ Authorization failed — please try again.';
+    } else if (cb?.error) {
+        if (authStatus) authStatus.textContent = `❌ ${cb.error}`;
     }
 
+    // 2. Legacy fragment callback (#api_key=…)
+    const hashKey = grabKeyFromHash();
+    if (hashKey) { _authSucceeded(hashKey, authStatus, overlay); return; }
+
+    // 3. Already connected
     const stored = getStoredKey();
     if (stored) {
         pollinationsKey = stored;
@@ -716,12 +954,18 @@ function initAuth() {
     }
 
     overlay.classList.remove('hidden');
-    tts.speak('Welcome to SM64 AI Player! Connect your Pollinations account to get started.');
+    if (!cb) tts.speak('Welcome to SM64 AI Player! Connect your Pollinations account to get started.');
 
-    authBtn.addEventListener('click', () => {
+    authBtn.addEventListener('click', async () => {
         authStatus.textContent = '🔄 Redirecting to Pollinations…';
         authBtn.disabled = true;
-        setTimeout(() => { window.location.href = buildAuthUrl(); }, 300);
+        try {
+            const url = await buildAuthUrl();
+            setTimeout(() => { window.location.href = url; }, 300);
+        } catch (err) {
+            authStatus.textContent = `❌ Could not start authorization: ${err.message}`;
+            authBtn.disabled = false;
+        }
     });
 
     document.getElementById('auth-tutorial-btn').addEventListener('click', () => openTutorial());
@@ -754,8 +998,43 @@ document.addEventListener('click', () => {
 // ────────────────────────────────────────────────────────────
 // 6. LIVE MODEL FETCHING (Pollinations)
 // ────────────────────────────────────────────────────────────
-let allVisionModels = [];
+// `/text/models` returns BOTH first-party models and COMMUNITY models (alpha) —
+// user-owned OpenAI-compatible endpoints proxied under an `owner/model` id. We
+// list both: community models are the cheapest/free options, so hiding them
+// hides exactly the models a user with no pollen can actually afford.
+//
+// Two things make community models different, and both are surfaced in the UI:
+//  1. They run on the OWNER'S OWN BACKEND, not Pollinations infrastructure — so
+//     the game frames/prompts we send leave Pollinations. Users get a one-time
+//     consent prompt before the first community model is used.
+//  2. None of them currently declare image input, so they are BLIND. The AI loop
+//     falls back to a text-only perception path for those (see modelHasVision).
+let allModels       = [];   // every text model from the registry
 let showPaidModels  = false;
+let showCommunityModels = (() => { try { return localStorage.getItem('sm64_show_community') !== '0'; } catch { return true; } })();
+
+// name/alias → registry entry, so any part of the app can ask about the model.
+const _modelMeta = new Map();
+
+const isCommunityModel = (m) => m?.community === true || /^[^/\s]+\/[^/\s]+$/.test(m?.name || '');
+const modelEntryHasVision = (m) => Array.isArray(m?.input_modalities) && m.input_modalities.includes('image');
+
+function _indexModels(list) {
+    _modelMeta.clear();
+    for (const m of list) {
+        _modelMeta.set(m.name, m);
+        for (const a of (m.aliases || [])) if (!_modelMeta.has(a)) _modelMeta.set(a, m);
+    }
+}
+function modelInfo(name) { return _modelMeta.get(name) || null; }
+
+// Does the CURRENTLY selected (or given) model accept image input? Unknown
+// models are assumed sighted — the old behaviour — so a registry hiccup can't
+// silently blind a first-party vision model.
+function modelHasVision(name) {
+    const m = modelInfo(name || getSelectedModel());
+    return m ? modelEntryHasVision(m) : true;
+}
 
 async function fetchVisionModels() {
     const select     = document.getElementById('model-select');
@@ -768,42 +1047,59 @@ async function fetchVisionModels() {
         const res  = await fetch(POLLINATIONS_MODELS_URL);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        allVisionModels = data.filter(m =>
-            Array.isArray(m.input_modalities) && m.input_modalities.includes('image')
-        );
+        // Keep vision models (they can play) AND community models (they're the
+        // free tier). Everything else — first-party text-only models — is dropped,
+        // since a paid blind model has no advantage over a free blind one.
+        allModels = data.filter(m => modelEntryHasVision(m) || isCommunityModel(m));
+        _indexModels(allModels);
         populateModelDropdown();
     } catch (err) {
         console.error('Failed to fetch models:', err);
-        allVisionModels = [{ name: DEFAULT_MODEL, title: 'GPT-5.4 (fallback)', paid_only: false }];
+        allModels = [{ name: DEFAULT_MODEL, title: 'GPT-5.5 (fallback)', paid_only: false,
+                       input_modalities: ['text', 'image'], output_modalities: ['text'] }];
+        _indexModels(allModels);
         populateModelDropdown();
         if (statusSpan) statusSpan.textContent = '⚠ offline';
     }
 }
 
+// Rough per-1M-token prompt price, for the community model tooltips (owners set
+// their own prices, so "free" is a real possibility worth showing).
+function _priceHint(m) {
+    const p = parseFloat(m?.pricing?.promptTextTokens ?? 'NaN');
+    if (!Number.isFinite(p)) return '';
+    if (p <= 0) return ' · free';
+    return ` · ~${(p * 1e6).toFixed(2)} 🌸/1M in`;
+}
 
 function populateModelDropdown() {
     const select     = document.getElementById('model-select');
     const statusSpan = document.getElementById('model-status');
     if (!select) return;
 
+    const official  = allModels.filter(m => !isCommunityModel(m));
+    const community = allModels.filter(m =>  isCommunityModel(m));
 
-    const visible   = showPaidModels ? allVisionModels : allVisionModels.filter(m => !m.paid_only);
+    const free = official.filter(m => !m.paid_only);
+    const paid = official.filter(m =>  m.paid_only);
+
+    const visible = [...free, ...(showPaidModels ? paid : []), ...(showCommunityModels ? community : [])];
     const savedModel = localStorage.getItem(MODEL_STORAGE_KEY) || DEFAULT_MODEL;
     const savedOK    = visible.some(m => m.name === savedModel);
 
     select.innerHTML = '';
-    const free = visible.filter(m => !m.paid_only);
-    const paid = visible.filter(m =>  m.paid_only);
 
-    function addGroup(label, models) {
+    function addGroup(label, models, decorate) {
         if (!models.length) return;
         const grp = document.createElement('optgroup');
         grp.label = label;
         for (const m of models) {
             const opt = document.createElement('option');
             opt.value = m.name;
-            opt.textContent = m.title || m.name;
-            if (m.paid_only) opt.classList.add('paid-model');
+            opt.textContent = (decorate ? decorate(m) : '') + (m.title || m.name);
+            opt.title = [m.description, m.name, modelEntryHasVision(m) ? '👁 sees the screen' : '🚫 text-only — cannot see the screen'].filter(Boolean).join(' · ');
+            if (m.paid_only)        opt.classList.add('paid-model');
+            if (isCommunityModel(m)) opt.classList.add('community-model');
             if (m.name === (savedOK ? savedModel : DEFAULT_MODEL)) opt.selected = true;
             grp.appendChild(opt);
         }
@@ -812,13 +1108,25 @@ function populateModelDropdown() {
 
     addGroup('Free Models', free);
     if (showPaidModels) addGroup('Paid Models 💰', paid);
+    if (showCommunityModels) {
+        addGroup('🧪 Community · Alpha (3rd-party backends)', community,
+            (m) => (modelEntryHasVision(m) ? '👁 ' : '🚫 ') + m.name.split('/')[0] + ' — ');
+        // Tooltips carry the price + sighted/blind hint per option.
+        for (const opt of select.querySelectorAll('option.community-model')) {
+            const m = modelInfo(opt.value);
+            if (m) opt.title = `Community model — runs on ${m.name.split('/')[0]}'s own backend, not Pollinations${_priceHint(m)}. ` +
+                (modelEntryHasVision(m) ? 'Accepts images.' : 'TEXT-ONLY: it cannot see the screen, so the AI plays on a text description instead.');
+        }
+    }
 
     select.disabled = false;
-    const freeCount = allVisionModels.filter(m => !m.paid_only).length;
-    const paidCount = allVisionModels.filter(m =>  m.paid_only).length;
-    if (statusSpan) statusSpan.textContent = showPaidModels
-        ? `${free.length + paid.length} models`
-        : `${freeCount} free · ${paidCount} paid hidden`;
+    if (statusSpan) {
+        const bits = [`${free.length} free`];
+        if (paid.length)      bits.push(showPaidModels ? `${paid.length} paid` : `${paid.length} paid hidden`);
+        if (community.length) bits.push(showCommunityModels ? `${community.length} community` : `${community.length} community hidden`);
+        statusSpan.textContent = bits.join(' · ');
+    }
+    updateModelVisionNotice();
 }
 
 function getSelectedModel() {
@@ -828,12 +1136,64 @@ function getSelectedModel() {
     return activeProvider?.defaultModel || DEFAULT_MODEL;
 }
 
+// One-time consent before anything is sent to a third-party community backend.
+// api.txt: "Community models do NOT run on Pollinations infrastructure — they run
+// on the owner's own backend. Don't send API keys or other sensitive data."
+const COMMUNITY_CONSENT_KEY = 'sm64_community_consent';
+function communityConsentGiven() { try { return localStorage.getItem(COMMUNITY_CONSENT_KEY) === '1'; } catch { return false; } }
+function ensureCommunityConsent(modelName) {
+    if (communityConsentGiven()) return true;
+    const owner = String(modelName).split('/')[0];
+    const ok = confirm(
+        `“${modelName}” is a COMMUNITY model (Pollinations alpha).\n\n` +
+        `It does NOT run on Pollinations servers — your prompts and the game screenshots go to ${owner}'s own backend. ` +
+        `Pollinations doesn't control or vet what happens to them, and the model can be changed or taken down by its owner at any time.\n\n` +
+        `Your API key is never sent to it. Continue?`);
+    if (ok) { try { localStorage.setItem(COMMUNITY_CONSENT_KEY, '1'); } catch {} }
+    return ok;
+}
+
+// Persistent banner in the model row: warns when the picked model can't see.
+function updateModelVisionNotice() {
+    const statusSpan = document.getElementById('model-status');
+    if (!statusSpan) return;
+    const name = getSelectedModel();
+    const m    = modelInfo(name);
+    const el   = document.getElementById('model-vision-notice');
+    if (!el) return;
+    if (m && !modelEntryHasVision(m)) {
+        el.textContent = '🚫 blind';
+        el.title = `${name} does not accept images, so the AI plays from a text description of the frame (depth read, brightness grid, motion %) instead of seeing it. Expect much worse play. Pick a 👁 model for real vision.`;
+        el.style.display = '';
+    } else if (m && isCommunityModel(m)) {
+        el.textContent = '🧪 community';
+        el.title = `${name} runs on ${name.split('/')[0]}'s own backend, not Pollinations.`;
+        el.style.display = '';
+    } else {
+        el.style.display = 'none';
+    }
+}
+
 document.getElementById('model-select').addEventListener('change', (e) => {
-    try { localStorage.setItem(MODEL_STORAGE_KEY, e.target.value); } catch {}
+    const name = e.target.value;
+    if (isCommunityModel({ name }) && !ensureCommunityConsent(name)) {
+        // Declined — fall back to the previous/default model.
+        e.target.value = localStorage.getItem(MODEL_STORAGE_KEY) || DEFAULT_MODEL;
+        updateModelVisionNotice();
+        return;
+    }
+    try { localStorage.setItem(MODEL_STORAGE_KEY, name); } catch {}
+    updateModelVisionNotice();
 });
 
 document.getElementById('show-paid-toggle').addEventListener('change', (e) => {
     showPaidModels = e.target.checked;
+    populateModelDropdown();
+});
+
+document.getElementById('show-community-toggle')?.addEventListener('change', (e) => {
+    showCommunityModels = e.target.checked;
+    try { localStorage.setItem('sm64_show_community', showCommunityModels ? '1' : '0'); } catch {}
     populateModelDropdown();
 });
 
@@ -2789,7 +3149,9 @@ function setPlayMode(m) {
 }
 window.sm64Mode = (m) => { if (m) setPlayMode(m); return _playMode; };
 
-// ── RT cost warning — pops the GPT Realtime 2 pricing when you switch to RT mode ──
+// ── RT cost warning — pops the GPT Realtime 2 pricing + direction picker on RT mode ──
+function _rtGetRole() { try { return (window.sm64RtPlay && window.sm64RtPlay.getRole && window.sm64RtPlay.getRole()) || localStorage.getItem('sm64_rt_role') || 'coach'; } catch { return 'coach'; } }
+function _rtSetRole(r) { try { if (window.sm64RtPlay && window.sm64RtPlay.setRole) window.sm64RtPlay.setRole(r); else localStorage.setItem('sm64_rt_role', r === 'player' ? 'player' : 'coach'); } catch {} }
 function _showRtCostWarning() {
     let m = document.getElementById('rt-cost-modal');
     if (!m) {
@@ -2799,17 +3161,28 @@ function _showRtCostWarning() {
             '<h2>💸 Heads up — this shit is expensive</h2>' +
             '<p>RT Realtime runs on <b>GPT Realtime 2</b> (Pollinations). Each turn sends a screenshot and gets a spoken reply, and the rates stack up <b>fast</b>:</p>' +
             '<img src="./image.png" alt="GPT Realtime 2 pricing" class="rt-cost-img">' +
-            '<p class="rt-cost-tip">That\'s why RT modes stay silent until you talk to them, and <b>Auto-run is off by default</b>. Leave it off unless you really mean it.</p>' +
+            '<p class="rt-cost-tip">…and to be blunt, <b>GPT Realtime 2 is also kinda dumb at actually playing</b> — it misjudges the screen and fumbles controls, so don\'t expect speedruns. It shines as a real-time <i>coach/voice</i> far more than as a player.</p>' +
+            '<p class="rt-cost-tip">RT modes stay silent until you talk to them, and <b>Auto-run is off by default</b>. Leave it off unless you really mean it.</p>' +
+            '<div class="rt-dir-label">Who\'s in charge?</div>' +
+            '<div class="rt-dir-row">' +
+            '<button class="rt-dir-btn" data-role="coach"><b>🎓 It coaches me</b><span>I play — the AI gives tips</span></button>' +
+            '<button class="rt-dir-btn" data-role="player"><b>🎮 I coach it</b><span>the AI plays — I guide it</span></button>' +
+            '</div>' +
             '<button id="rt-cost-ok" class="rt-cost-ok">Got it — I\'ll be careful</button>' +
             '</div>';
         document.body.appendChild(m);
         const close = () => m.classList.remove('open');
         m.addEventListener('click', e => { if (e.target === m) close(); });
         m.querySelector('#rt-cost-ok').addEventListener('click', close);
+        m.querySelectorAll('.rt-dir-btn').forEach(b => b.addEventListener('click', () => {
+            const r = b.getAttribute('data-role'); _rtSetRole(r); _rtMarkDir(m, r);
+        }));
         document.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
     }
+    _rtMarkDir(m, _rtGetRole());     // reflect the current direction every time it opens
     m.classList.add('open');
 }
+function _rtMarkDir(m, role) { m.querySelectorAll('.rt-dir-btn').forEach(b => b.classList.toggle('active', b.getAttribute('data-role') === role)); }
 
 // ── RL SOLO CONTROL — the child plays with no LLM, off its learned Q-table ──
 // State generalizes across regions (it borrows stats from same stuck|vis context),
@@ -3080,6 +3453,10 @@ function _inputsToText(codes) {
 // The parent LLM grades a single move from BEFORE→AFTER frames + the EXACT inputs I
 // pressed. Controls are spelled out so the parent understands what the move did.
 async function _llmGradeMove(before, after, cat, inputStr, ctx) {
+    // Needs to compare two frames — impossible without image input. The RL loop
+    // already has an objective pixel-diff reward, so a blind model simply sits
+    // this out rather than hallucinating a grade it can't make.
+    if (!providerHasVision()) return null;
     const sys = `You grade ONE move in Super Mario 64 to train a learner. CONTROLS: ↑=FORWARD, ↓=BACKWARD, ←/→=turn, X=jump(A), C=dive/punch/grab(B), Z/Space=crouch/ground-pound.
 ${ctx ? 'CONTEXT: ' + ctx + '\n' : ''}You see a BEFORE frame then an AFTER frame. The player pressed [${inputStr}] (type "${cat}").
 Grade the RESULT — compare AFTER to BEFORE — for PROGRESS toward the objective, and be GENEROUS:
@@ -3236,6 +3613,45 @@ async function _depthRead(url) {
     return `🔍 DEPTH READ (rough heuristic): the ${labels[a.best]} looks most open/passable; the ${labels[a.worst]} looks ${a.flat ? 'like a near WALL' : 'more blocked'}. Trust your eyes first, use this as a tiebreaker.`;
 }
 
+// ── BLIND PERCEPTION — the frame rendered as TEXT, for models with no image input ──
+// Community models (alpha) are text-only, so they cannot be sent the screenshot.
+// Rather than let them guess in the dark, we hand them everything we can derive
+// from the pixels locally: a 6×4 brightness map, the L/C/R openness heuristic,
+// and a sky/ground read. This is genuinely much weaker than seeing the frame —
+// the prompt says so plainly rather than pretending otherwise.
+const _BLIND_RAMP = ['▓', '▒', '░', '·', ' '];   // dark → bright
+async function _blindPerception(url) {
+    await _depthAnalyze(url);                     // refreshes _lastVisGrid + _lastOpenSide
+    const g = _lastVisGrid;
+    if (!g || g.length < 24) return '\n\n👁️‍🗨️ TEXT-ONLY PERCEPTION: no readable frame data this turn — move cautiously and prefer short probing moves.';
+
+    const GW = 6, GH = 4;
+    const cell = v => _BLIND_RAMP[Math.min(_BLIND_RAMP.length - 1, Math.floor(v * _BLIND_RAMP.length))];
+    const rows = [];
+    for (let y = 0; y < GH; y++) rows.push(g.slice(y * GW, y * GW + GW).map(cell).join(' '));
+
+    const avg = a => a.reduce((s, v) => s + v, 0) / (a.length || 1);
+    const topBand    = avg(g.slice(0, GW));
+    const bottomBand = avg(g.slice(GW * (GH - 1)));
+    const skyNote = topBand > 0.55 && topBand - bottomBand > 0.12
+        ? 'The top band is much BRIGHTER than the bottom — likely OPEN SKY above ground, so you are probably OUTDOORS.'
+        : topBand < 0.35
+            ? 'The top band is DARK — likely a ceiling or a wall filling the view, so you are probably INDOORS or facing something solid.'
+            : 'Top and bottom brightness are similar — no clear sky/ceiling read.';
+
+    const openNote = _lastOpenSide
+        ? `The ${{ L: 'LEFT', C: 'CENTER', R: 'RIGHT' }[_lastOpenSide]} third looks the most open/passable.`
+        : 'No side looks clearly more open than the others.';
+
+    return `\n\n👁️‍🗨️ TEXT-ONLY PERCEPTION — you CANNOT see the screen (this model takes no images). ` +
+        `Everything below is measured from the frame by the app and is all you get:\n` +
+        `Brightness map, 6 columns × 4 rows, top row = top of screen ('▓' dark → ' ' bright):\n` +
+        rows.map((r, i) => `  ${['top  ', 'upper', 'lower', 'bot  '][i]} | ${r}`).join('\n') + '\n' +
+        `  ${skyNote}\n  ${openNote}\n` +
+        `⚠ This is a crude luminance read, NOT sight: it cannot tell a door from a painting, a star from a coin, or read any menu text. ` +
+        `So: prefer SHORT probing moves, use the VISUAL CHANGE % below to tell whether you actually moved, and lean on the BRAINMAP and your notes for where you are rather than trying to identify objects.`;
+}
+
 
 // ── DEBUG HUD: live readout of what the AI is thinking/doing ──
 let _debugHUD = (() => { try { return localStorage.getItem('sm64_debug_hud') === '1'; } catch { return false; } })();
@@ -3261,6 +3677,10 @@ function updateDebugHUD() {
         `<div>visualΔ: ${_lastVisualPct == null ? '—' : _lastVisualPct + '%'} · stuck:${_stuckCount} · cut:${_sceneCutCount}${_recovering ? ' · <b style="color:#ffb454">↻recovering</b>' : ''}${_trainStats.recoveries ? ` · recov:${_trainStats.recoveries}` : ''}</div>` +
         `<div>fmt: ${_cmdFormat}</div>` +
         `<div>mode: ${flags}</div>` +
+        `<div>model: ${_esc(getSelectedModel())} ${modelHasVision() ? '👁' : '<b style="color:#ffb454">🚫 blind</b>'}${supportsPromptCache(getSelectedModel()) ? ' · 💾cache' : ''}</div>` +
+        (_cacheStats.created || _cacheStats.hits
+            ? `<div>cache: ${_cacheStats.hits} hit / ${_cacheStats.created} create · ${_cacheStats.hitTokens.toLocaleString()} tok reused</div>`
+            : '') +
         brainLine +
         `<div>done: ${_esc(_progressLog.slice(-3).join(' → ') || '—')}</div>` +
         (_filmstrip.length
@@ -3738,16 +4158,38 @@ async function aiThink() {
             if (screenshot) depthCtx = await _depthRead(screenshot);
         }
 
-        const perceptionNote = memOn
-            ? 'Analyze the screenshot together with the LIVE GAME STATE below.'
-            : 'Analyze the screenshot. NOTE: there is NO live memory readout on this build — rely entirely on what you SEE in the image.';
+        // Can this model be sent the frame at all? Community models (alpha) are
+        // text-only, so they get the derived text perception instead of an image.
+        const sighted = providerHasVision();
+        const blindCtx = sighted ? '' : await _blindPerception(screenshot);
 
-        const hierarchyNote = memOn
-            ? `HOW TO DECIDE — strictly in this order:
+        const perceptionNote = !sighted
+            ? (memOn
+                ? 'You CANNOT see the screen — this model takes no image input. Work from the TEXT-ONLY PERCEPTION block and the LIVE GAME STATE numbers below.'
+                : 'You CANNOT see the screen — this model takes no image input, and there is NO live memory readout either. Work from the TEXT-ONLY PERCEPTION block below and move cautiously.')
+            : memOn
+                ? 'Analyze the screenshot together with the LIVE GAME STATE below.'
+                : 'Analyze the screenshot. NOTE: there is NO live memory readout on this build — rely entirely on what you SEE in the image.';
+
+        const hierarchyNote = !sighted
+            ? (memOn
+                ? `HOW TO DECIDE — you are BLIND, so the usual "trust your eyes" rule does not apply:
+1) MEMORY FIRST — the live game-state numbers (position, facing, action, health) are your most reliable signal. Navigate by coordinates and compass.
+2) TEXT PERCEPTION SECOND — the brightness map and openness read are crude hints, not sight. Use them only to break ties.
+3) FEEDBACK ALWAYS — after every move check whether the numbers actually changed. If they didn't, the move failed; try a different one.
+4) ANTI-STUCK TOOLS — call is_stuck / is_trapped freely; they are cheaper than guessing.`
+                : `HOW TO DECIDE — you are BLIND and have NO memory readout, so you are navigating almost entirely by feedback:
+1) PROBE, DON'T COMMIT — make ONE short move (200–600ms), then read the VISUAL CHANGE % to learn what happened. Long blind holds walk you off ledges.
+2) TEXT PERCEPTION — the brightness map and openness read are crude hints, not sight. Use them to pick which direction to probe.
+3) BRAINMAP — your running notes of where you are are more trustworthy than any single-turn guess. Keep them updated.
+4) ANTI-STUCK TOOLS — call is_stuck / is_trapped freely; they are cheaper than guessing.
+Be honest in "thought" about what you do and don't know. Do not describe things you cannot actually perceive.`)
+            : memOn
+                ? `HOW TO DECIDE — strictly in this order:
 1) VISUALS FIRST — trust what you SEE in the CURRENT frame; your eyes rarely lie. Figure out the screen type and what is actually around Mario right now.
 2) MEMORY SECOND — use the live game-state numbers to confirm/refine what you see. If the picture and the numbers DISAGREE, trust your EYES.
 3) ANTI-STUCK TOOLS THIRD — only when BOTH visuals and numbers are ambiguous, call is_stuck / is_trapped for a second opinion.`
-            : `HOW TO DECIDE:
+                : `HOW TO DECIDE:
 1) VISUALS FIRST — your EYES are the only source of truth here (no live memory). Identify the screen type and what is actually around Mario in the CURRENT frame, and act on that.
 2) ANTI-STUCK TOOLS — if you genuinely can't tell whether you're moving or you look stuck/softlocked, call is_stuck / is_trapped before doing anything drastic.`;
 
@@ -3789,7 +4231,16 @@ async function aiThink() {
         // every gameplay turn (that bloated context + cost). They're distilled
         // once by Study into aiNotes (fed via notesCtx) and used there instead.
 
-        const systemPrompt = `You are an AI playing Super Mario 64. Decide what actions to take.
+        // ── PROMPT CACHING (api.txt "Prompt caching") ────────────────────────
+        // The rulebook below is the same every single turn, and this loop fires
+        // every 1.5–5s, so it is the app's single largest recurring cost. It is
+        // split into a STATIC prefix (identical byte-for-byte across turns for a
+        // given set of session settings) and a DYNAMIC suffix appended after it.
+        // buildSystemMessage() marks the end of the static prefix with
+        // cache_control on Claude/Gemini/Nova, where repeat hits bill at ~10% of
+        // the input rate. Anything that changes turn-to-turn MUST stay in
+        // systemDynamic, or the prefix stops matching and never caches.
+        const systemStatic = `You are an AI playing Super Mario 64. Decide what actions to take.
 ${perceptionNote}
 
 ${hierarchyNote}
@@ -3872,7 +4323,6 @@ RULES:
 - ${memOn
     ? 'You may use tools (get_game_state, set_game_speed for tricky jumps, save_move/play_move for reusable sequences) when helpful, but don\'t call tools every turn.'
     : 'There is no reliable game memory — judge everything from the image. You may use set_game_speed, is_stuck/is_trapped, or save_move/play_move when helpful, but don\'t call tools every turn.'}
-${brainmapCtx}${brainCtx}${trustCtx}${rewardCtx}${depthCtx}${movementCtx}${planCtx}${lastActCtx}${preplanCtx}${memStateCtx}${motionCtx}${memoryCtx}${notesCtx}${instrCtx}
 
 ${_cmdFormat === 'simple'
 ? `Reply in this SIMPLE LINE FORMAT (one field per line, NO JSON, NO markdown):
@@ -3911,12 +4361,18 @@ SAY: heading into my first level!`
 A "step"/group is {"keys":[...simultaneous...], "hold_ms": N} OR a macro word ("run_jump","enter_painting","long_jump","dive","triple_jump","ground_pound","wall_kick","back_up","turn_around","swim_up","backflip","wait","observe"). The "wait"/"observe" macro presses NOTHING — use it to hold still and watch a moving platform/lift before committing. Hold guide: FORWARD/BACKWARD 1200–2500ms; TURN 250–500ms (short!); jump/dialog 150–350ms. ${_preplanMode ? `PRE-PLAN: give a full ${capTxt}-step script.` : 'Normally 1–5 steps (more only if preplan:true).'}
 Valid keys (THESE ARE THE ONLY ONES — there is no camera key): ArrowUp(forward), ArrowDown(BACKWARD — opposite of forward, USE IT), ArrowLeft(turn left), ArrowRight(turn right), jump(=A), action(=B: dive/punch/grab), crouch(=Z: ground-pound in air / long-jump), start(pause/confirm only). Combine arrows for diagonals.`;
 
+        // Everything that changes turn-to-turn — kept OUT of the cacheable prefix.
+        const systemDynamic =
+            `CURRENT STATE (this turn only):${brainmapCtx}${brainCtx}${trustCtx}${rewardCtx}${blindCtx}${depthCtx}${movementCtx}${planCtx}${lastActCtx}${preplanCtx}${memStateCtx}${motionCtx}${memoryCtx}${notesCtx}${instrCtx}`;
+
         // Single-frame perception: the AI acts on ONE current frame, annotated
         // with a nav grid + compass. (The previous-frame comparison was removed —
         // it confused the model into acting on the old frame; an objective motion
         // % is fed in TEXT instead, which is clearer and cheaper.)
         let visionImg = screenshot;
-        const promptText = 'This is the CURRENT live frame, overlaid with a faint 3×3 navigation grid (cells TL/T/TR · L/C/R · BL/B/BR) and a camera-relative compass marking which arrow key moves Mario which way on screen. First name the grid cell your target is in and which way you must turn to face it, then choose your actions.';
+        const promptText = sighted
+            ? 'This is the CURRENT live frame, overlaid with a faint 3×3 navigation grid (cells TL/T/TR · L/C/R · BL/B/BR) and a camera-relative compass marking which arrow key moves Mario which way on screen. First name the grid cell your target is in and which way you must turn to face it, then choose your actions.'
+            : 'No frame is attached — this model takes no image input. Decide from the TEXT-ONLY PERCEPTION and state above. Say plainly in "thought" what you are inferring versus guessing, then choose your actions.';
         try {
             visionImg = await annotateCurrentFrame(screenshot);
         } catch (e) {
@@ -3925,10 +4381,12 @@ Valid keys (THESE ARE THE ONLY ONES — there is no camera key): ArrowUp(forward
         setAIVisionFrame(visionImg);   // mirror exactly what the AI sees into streamer mode
         const userMessage = {
             role: 'user',
-            content: [
-                { type: 'text', text: promptText },
-                { type: 'image_url', image_url: { url: visionImg } },
-            ],
+            content: sighted
+                ? [
+                    { type: 'text', text: promptText },
+                    { type: 'image_url', image_url: { url: visionImg } },
+                  ]
+                : [{ type: 'text', text: promptText }],
         };
 
         // Pre-plan scripts can be long — give the model room for the whole sequence.
@@ -3936,7 +4394,7 @@ Valid keys (THESE ARE THE ONLY ONES — there is no camera key): ArrowUp(forward
             ? Math.min(2000, 500 + (_preplanCap > 0 ? _preplanCap : 40) * 25)
             : 400;
         const rawContent = await callChatWithTools([
-            { role: 'system', content: systemPrompt },
+            buildSystemMessage(systemStatic, systemDynamic),
             userMessage,
         ], { json: _cmdFormat !== 'simple', max_tokens: maxTokens });
 
@@ -4077,6 +4535,15 @@ Valid keys (THESE ARE THE ONLY ONES — there is no camera key): ArrowUp(forward
 
     } catch (err) {
         console.error('AI think error:', err);
+        // Out of pollen is terminal, not transient — backing off and retrying just
+        // spins forever. Stop the player and say so plainly.
+        if (err.code === 'INSUFFICIENT_POLLEN') {
+            _isThinking = false;
+            updateAIStatus(`💸 ${err.message}`);
+            tts.interrupt('Out of pollen. Top up your Pollinations balance, or switch to a free model, to keep playing.');
+            try { if (aiPlayerActive) stopAIPlayer(); } catch {}
+            return null;
+        }
         _consecutiveErrors++;
         updateAIStatus(`❌ ${err.message}`);
         if (_consecutiveErrors >= MAX_ERRORS_BEFORE_BACKOFF) {
@@ -4622,12 +5089,16 @@ Respond with ONLY valid JSON (no markdown fences):
         if (!screenshot) { buddyText.textContent = '❌ Could not capture game view'; return; }
         const base64Image = screenshot.replace(/^data:image\/(png|jpeg);base64,/, '');
         const mimeType    = screenshot.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png';
+        // Blind models (community/alpha) get the derived text read instead of the frame.
+        const buddySighted = providerHasVision();
         const userMessage = {
             role: 'user',
-            content: [
-                { type: 'text', text: 'What advice do you have?' },
-                { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64Image}` } },
-            ],
+            content: buddySighted
+                ? [
+                    { type: 'text', text: 'What advice do you have?' },
+                    { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64Image}` } },
+                  ]
+                : [{ type: 'text', text: `What advice do you have? You cannot see the screen — this model takes no images — so base your advice on the state below and keep it general.${await _blindPerception(screenshot)}` }],
         };
 
         const rawContent = await callChatAPI([
@@ -5036,24 +5507,83 @@ async function refreshPollenBalance() {
     updateEnergyUI();
 }
 
-// Sample balance after an AI call and log the cost (debounced)
+// ── Per-request cost ─────────────────────────────────────────
+// The API exposes the real per-request cost at GET /account/usage, so use that
+// instead of diffing the balance between polls. Balance-diffing attributed the
+// cost of every concurrent call (buddy coach, is_stuck probes, RL grading) to
+// whichever one polled next, and silently swallowed spend from anything running
+// in another tab on the same account.
+//
+// We still read the balance for the energy bar itself; only the per-call log
+// comes from /account/usage. If that endpoint is unavailable (key lacks the
+// account:usage scope, older deployment), we fall back to the old diff so the
+// log doesn't just go blank.
+let _usageCursor = null;   // newest usage row id/timestamp we've already logged
+let _usageEndpointOK = true;
+
+async function fetchRecentUsage(limit = 20) {
+    if (!pollinationsKey || !_usageEndpointOK) return null;
+    try {
+        const res = await fetch(`${POLLINATIONS_API_BASE}/account/usage?limit=${limit}`, {
+            headers: { 'Authorization': `Bearer ${pollinationsKey}` },
+        });
+        // 403 = key lacks account:usage. Don't keep hammering it.
+        if (res.status === 403 || res.status === 404) { _usageEndpointOK = false; return null; }
+        if (!res.ok) return null;
+        const data = await res.json();
+        const rows = Array.isArray(data) ? data : (data.usage || data.data || data.records || []);
+        return Array.isArray(rows) ? rows : null;
+    } catch { return null; }
+}
+
+const _rowCost = (r) => {
+    const c = r?.cost ?? r?.totalCost ?? r?.pollen ?? r?.amount;
+    const n = typeof c === 'number' ? c : (c != null ? parseFloat(c) : NaN);
+    return Number.isFinite(n) ? n : null;
+};
+const _rowKey = (r) => String(r?.id ?? r?.requestId ?? r?.request_id ?? r?.timestamp ?? r?.createdAt ?? r?.created_at ?? '');
+
+// Sample spend after an AI call and log the cost (debounced)
 async function recordUsage(force = false) {
     if (!pollinationsKey) return;
     const now = Date.now();
     if (!force && now - _lastUsageCheck < 2000) return;
     _lastUsageCheck = now;
-    const bal = await fetchBalanceValue();
-    if (bal == null) return;
-    if (_pollenStart == null) { _pollenStart = bal; _pollenLast = bal; }
-    if (_pollenLast != null) {
+
+    const [bal, rows] = await Promise.all([fetchBalanceValue(), fetchRecentUsage()]);
+
+    if (rows) {
+        // Rows are newest-first; take everything above the cursor we last saw.
+        const fresh = [];
+        for (const r of rows) {
+            const k = _rowKey(r);
+            if (k && k === _usageCursor) break;
+            fresh.push(r);
+        }
+        const firstKey = _rowKey(rows[0]);
+        if (firstKey) _usageCursor = firstKey;
+        // Oldest-first so the log reads in chronological order.
+        for (const r of fresh.reverse()) {
+            const c = _rowCost(r);
+            if (c != null && c > 1e-9) {
+                _usageLog.push(c);
+                if (_usageLog.length > 50) _usageLog.shift();
+            }
+        }
+    } else if (bal != null && _pollenLast != null) {
+        // Fallback: the old balance-diff estimate.
         const cost = _pollenLast - bal;
         if (cost > 1e-7) {
             _usageLog.push(cost);
-            if (_usageLog.length > 50) _usageLog.shift();   // keep total accurate, display only last 4
+            if (_usageLog.length > 50) _usageLog.shift();
         }
     }
-    _pollenLast = bal;
-    _pollenNow  = bal;
+
+    if (bal != null) {
+        if (_pollenStart == null) { _pollenStart = bal; _pollenLast = bal; }
+        _pollenLast = bal;
+        _pollenNow  = bal;
+    }
     updateEnergyUI();
 }
 
@@ -5263,7 +5793,9 @@ const _bmPersistEl = document.getElementById('brainmap-persist-toggle');
 if (_bmPersistEl) _bmPersistEl.checked = _persistBrainmap;
 if (_debugHUD) document.getElementById('debug-btn')?.classList.add('active');
 updateBrainmapViz();
-fetchVisionModels();   // Pollinations vision-model list
+const _commToggleEl = document.getElementById('show-community-toggle');
+if (_commToggleEl) _commToggleEl.checked = showCommunityModels;
+fetchVisionModels();   // Pollinations model list (vision + community/alpha)
 initAuth();
 renderControlsGuide(null);   // show static controls immediately
 // Voices may not be loaded yet — wait for them then re-render tutorial if open

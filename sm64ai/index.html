@@ -50,7 +50,7 @@
                 <button id="agent-only-btn"      class="hud-icon-btn" title="Agent-Only mode: disable manual control + enable the instruction box">🤖</button>
                 <button id="brainmap-btn"        class="hud-icon-btn" title="Brainmap visualizer (watch the AI's sense of place build)">🗺️</button>
                 <button id="cheater-btn"         class="hud-icon-btn" title="Cheater's Model: TAS-trained neural net prior for RL Play">🃏</button>
-                <button id="voice-btn"           class="hud-icon-btn" title="Voice agent — talk to gpt-realtime-2, it can control the app">🎙️</button>
+                <button id="voice-btn"           class="hud-icon-btn" title="Voice agent — talk to gpt-realtime-2.1, it can control the app">🎙️</button>
                 <button id="debug-btn"           class="hud-icon-btn" title="Debug HUD (live AI state)">🐞</button>
                 <button id="disconnect-btn"      class="hud-icon-btn danger" title="Disconnect account" style="display:none">🔌</button>
             </div>
@@ -63,11 +63,17 @@
                         <option value="">Loading models…</option>
                     </select>
                     <span id="model-status" title=""></span>
+                    <span id="model-vision-notice" title="" style="display:none"></span>
                 </div>
                 <label class="hud-toggle" title="Show paid-only models">
                     <input type="checkbox" id="show-paid-toggle">
                     <span class="toggle-track"><span class="toggle-thumb"></span></span>
                     <span class="hud-label">Paid</span>
+                </label>
+                <label class="hud-toggle" title="Show community models (alpha) — cheap/free, but they run on their owners' own backends and are text-only">
+                    <input type="checkbox" id="show-community-toggle" checked>
+                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                    <span class="hud-label">🧪 Community</span>
                 </label>
                 <div class="hud-divider"></div>
                 <button id="provider-btn" class="hud-icon-btn" title="API provider settings">⚙ API</button>
@@ -257,7 +263,7 @@
         <div id="voice-modal" role="dialog" aria-modal="true" aria-label="Voice Agent">
             <div id="voice-panel">
                 <button id="voice-close" class="modal-close-btn" aria-label="Close">✕</button>
-                <h3>🎙️ Voice Agent <span style="font-size:11px;color:#8a96b0;font-weight:600">gpt-realtime-2</span></h3>
+                <h3>🎙️ Voice Agent <span style="font-size:11px;color:#8a96b0;font-weight:600">gpt-realtime-2.1</span></h3>
                 <p class="provider-desc">Talk to a realtime model — it can <b>control the app</b> ("start RL play", "turn on the cheater", "start deep training", "what's the status?"). Speech-to-speech, so it answers in its own voice. Chrome + mic.</p>
                 <div class="energy-btn-row">
                     <button id="voice-connect" class="hud-btn green">🔗 Connect</button>

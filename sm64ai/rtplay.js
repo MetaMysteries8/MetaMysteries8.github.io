@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────
-// rtplay.js — RT REALTIME: you + gpt-realtime-2 around the SM64 game, in real
+// rtplay.js — RT REALTIME: you + gpt-realtime-2.1 around the SM64 game, in real
 // time. A SEPARATE system from the voice assistant (voice.js): its own realtime
 // connection and corner overlay. TWO directions (pick in the panel):
 //   • 🎓 AI coaches me — the HUMAN plays; the AI watches and gives short tips.
@@ -11,11 +11,16 @@
 // ─────────────────────────────────────────────────────────────────────────
 (function () {
     'use strict';
-    const RT_URL = 'wss://gen.pollinations.ai/v1/realtime?model=gpt-realtime-2';
+    const RT_MODEL = 'gpt-realtime-2.1';   // current realtime model (2.1 / 2.1-mini / 2)
+    // NOTE: the key goes in the query string because browsers can't set headers on
+    // a WebSocket. The docs suggest `pk_` here, but this app is BYOP — requests must
+    // bill the USER, so we pass their own OAuth-issued `sk_` (their key, their
+    // browser, over TLS). A `pk_` would bill the developer instead.
+    const RT_URL = `wss://gen.pollinations.ai/v1/realtime?model=${RT_MODEL}`;
     const SR = 24000;
     const B = () => window.sm64Voice || {};   // reuse the app bridge (key + rt frame/act/release)
 
-    let ws = null, connected = false, playing = false, busy = false;
+    let ws = null, connected = false, playing = false, busy = false, responding = false;
     // auto = the AI acts on its own in a loop. OFF by default — it BURNS CREDITS
     // (every tick sends a frame + gets a spoken reply). By default it only ever
     // responds when YOU talk or type to it.
@@ -27,13 +32,27 @@
     let timer = null, curText = '';
     let micStream = null, micCtx = null, micNode = null, micSrc = null, micZero = null, micReady = false, talking = false, sentSamples = 0;
     let playCtx = null, playHead = 0, liveSources = [], audioMuted = false;
+    let playDest = null, playEl = null;   // <audio> sink — required for echo cancellation
     let speakBack = true;
     let pttKey = 'Backquote', textKey = 'KeyT', capturing = null;
     try { pttKey = localStorage.getItem('sm64_rt_ptt') || 'Backquote'; textKey = localStorage.getItem('sm64_rt_textkey') || 'KeyT'; } catch {}
 
     const MOVE_ENUM = ['forward', 'backward', 'turn', 'forward-left', 'forward-right', 'jump', 'jump-forward', 'long_jump', 'dive', 'ground_pound', 'crouch', 'wait'];
-    const MOVE_TOOL = { type: 'function', name: 'move', description: 'Control Mario RIGHT NOW. The movement is HELD until your next move() call, so call it every turn.', parameters: { type: 'object', properties: { action: { type: 'string', enum: MOVE_ENUM }, say: { type: 'string', description: 'optional brief commentary' } }, required: ['action'] } };
+    const MOVE_TOOL = { type: 'function', name: 'move', description: 'Make Mario perform ONE brief action right now. It AUTO-STOPS on its own after a moment — you never hold or stop it manually; just choose the next action when you want Mario to move again. Optionally pass duration_ms (120-2000) to make this one longer/shorter.', parameters: { type: 'object', properties: { action: { type: 'string', enum: MOVE_ENUM }, duration_ms: { type: 'number', description: 'optional: how long this single action lasts, 120-2000 ms' }, say: { type: 'string', description: 'optional brief commentary' } }, required: ['action'] } };
     const isPlayer = () => role === 'player';
+    // Each move is a timed pulse, then Mario returns to neutral — so a held control
+    // never lasts "way too long". Per-action default lengths (ms):
+    const MOVE_HOLD = { wait: 0, turn: 320, 'forward-left': 520, 'forward-right': 520, crouch: 450, jump: 520, 'jump-forward': 650, long_jump: 780, dive: 600, ground_pound: 720 };
+    const HOLD_DEFAULT = 680;   // forward / backward
+    let holdTimer = null;
+    function pulseMove(action, durMs) {
+        if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+        try { B().rt && B().rt.act && B().rt.act(action); } catch {}
+        if (action === 'wait') { try { B().rt && B().rt.release && B().rt.release(); } catch {} return; }
+        let d = (typeof durMs === 'number' && durMs > 0) ? durMs : (action in MOVE_HOLD ? MOVE_HOLD[action] : HOLD_DEFAULT);
+        d = Math.max(120, Math.min(2000, d));
+        holdTimer = setTimeout(() => { holdTimer = null; try { B().rt && B().rt.release && B().rt.release(); } catch {} }, d);
+    }
 
     // ── overlay UI (built once, lives in its own corner panel) ──
     let el = {};
@@ -108,8 +127,10 @@
     function prompt() {
         if (isPlayer()) {
             return "You ARE playing Super Mario 64 in REAL TIME. Each turn you get the current screen as an image. " +
-                "Decide Mario's next movement and CALL the move tool — it is HELD until your next call, so call it every turn. " +
-                "GOAL: " + task + ". Keep Mario progressing; if stuck, try jumping, turning, or a long jump. Keep any commentary very brief. " +
+                "Decide Mario's next action and CALL the move tool. IMPORTANT: each move is a BRIEF pulse that AUTO-STOPS by itself " +
+                "after a moment — you never hold or stop a control, you just pick the next action. For a longer or shorter step, set " +
+                "duration_ms (120-2000). Move in small, deliberate steps and re-check the screen rather than holding a direction. " +
+                "GOAL: " + task + ". If stuck, try a small turn, a jump, or a long jump. Keep any commentary very brief. " +
                 "The HUMAN is your COACH — they will talk or type tips and corrections at any time; always follow their guidance.";
         }
         return "You are a friendly, expert Super Mario 64 COACH watching the player's screen in REAL TIME. " +
@@ -130,9 +151,13 @@
     function onMessage(ev) {
         let m; try { m = JSON.parse(ev.data); } catch { return; }
         console.log('[rtplay] ◀', m.type, m.error ? JSON.stringify(m.error) : '');
-        if (m.type && /\.error$|^error$/.test(m.type)) { const msg = (m.error && (m.error.message || m.error.code)) || JSON.stringify(m.error || m); log('sys', 'ERROR: ' + msg); setStatus('err'); return; }
+        if (m.type && /\.error$|^error$/.test(m.type)) {
+            const msg = (m.error && (m.error.message || m.error.code)) || JSON.stringify(m.error || m);
+            if (/no active response/i.test(msg)) { responding = false; return; }   // benign: we cancelled when nothing was running
+            log('sys', 'ERROR: ' + msg); setStatus('err'); return;
+        }
         switch (m.type) {
-            case 'response.created': audioMuted = false; break;  // a new answer starts → let its audio through
+            case 'response.created': audioMuted = false; responding = true; break;  // a new answer starts → let its audio through
             case 'response.audio.delta':
             case 'response.output_audio.delta': if (speakBack && !audioMuted) playPCM(m.delta); break;
             case 'response.audio_transcript.delta':
@@ -142,6 +167,7 @@
             case 'response.function_call_arguments.done':
                 execMove({ name: m.name, call_id: m.call_id, arguments: m.arguments }); break;
             case 'response.done': {
+                responding = false;
                 const out = (m.response && m.response.output) || [];
                 for (const it of out) if (it.type === 'function_call') execMove(it);
                 if (curText) { log('tip', curText.trim()); if (!speakBack) speakText(curText); }
@@ -157,8 +183,8 @@
         if (!it || it.name !== 'move' || (it.call_id && handled.has(it.call_id))) return;
         if (it.call_id) handled.add(it.call_id);
         let a = {}; try { a = JSON.parse(it.arguments || '{}'); } catch {}
-        try { B().rt && B().rt.act && B().rt.act(a.action); } catch {}
-        log('move', a.action + (a.say ? ' — ' + a.say : ''));
+        pulseMove(a.action, a.duration_ms);
+        log('move', a.action + (a.duration_ms ? ' (' + a.duration_ms + 'ms)' : '') + (a.say ? ' — ' + a.say : ''));
         if (it.call_id) send({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: it.call_id, output: JSON.stringify({ ok: true }) } });
     }
 
@@ -203,7 +229,7 @@
         if (r === role) return;
         role = r; try { localStorage.setItem('sm64_rt_role', r); } catch {}
         if (el.role) el.role.value = r;
-        if (!isPlayer()) { try { B().rt && B().rt.release && B().rt.release(); } catch {} }  // hand control back
+        if (!isPlayer()) { if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; } try { B().rt && B().rt.release && B().rt.release(); } catch {} }  // hand control back
         updateRoleUI();
         if (playing) {
             interrupt(); session();
@@ -213,14 +239,33 @@
     }
 
     // ── audio playback + clean barge-in interrupt ──
+    // Playback goes through an <audio> element, not straight to the Web Audio
+    // output: the browser only uses audio-ELEMENT output as the echo-cancellation
+    // reference, so playing to playCtx.destination lets the mic re-capture the
+    // model's own voice and it ends up coaching itself. The WebRTC transport
+    // handles this for you; on the WebSocket transport it's our job.
+    function ensurePlayback() {
+        if (!playCtx) playCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (!playDest) {
+            playDest = playCtx.createMediaStreamDestination();
+            playEl = document.createElement('audio');
+            playEl.autoplay = true;
+            playEl.srcObject = playDest.stream;
+            playEl.style.display = 'none';
+            document.body.appendChild(playEl);
+        }
+        if (playCtx.state === 'suspended') { try { playCtx.resume(); } catch {} }
+        try { playEl.play?.().catch(() => {}); } catch {}
+        return playDest;
+    }
     function playPCM(b64) {
         if (!b64) return;
-        if (!playCtx) playCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const dest = ensurePlayback();
         const bin = atob(b64), n = bin.length >> 1, i16 = new Int16Array(n);
         for (let i = 0; i < n; i++) { let v = bin.charCodeAt(i * 2) | (bin.charCodeAt(i * 2 + 1) << 8); i16[i] = v >= 32768 ? v - 65536 : v; }
         const buf = playCtx.createBuffer(1, n, SR), ch = buf.getChannelData(0);
         for (let i = 0; i < n; i++) ch[i] = i16[i] / 32768;
-        const src = playCtx.createBufferSource(); src.buffer = buf; src.connect(playCtx.destination);
+        const src = playCtx.createBufferSource(); src.buffer = buf; src.connect(dest);
         const now = playCtx.currentTime; if (playHead < now) playHead = now;
         src.start(playHead); playHead += buf.duration;
         liveSources.push(src);
@@ -236,7 +281,7 @@
     }
     function interrupt() {
         stopAudio();
-        try { send({ type: 'response.cancel' }); } catch {}
+        if (responding) { try { send({ type: 'response.cancel' }); } catch {} responding = false; }
         busy = false; curText = '';
     }
     function speakText(t) { try { speechSynthesis.speak(new SpeechSynthesisUtterance(t)); } catch {} }
@@ -311,11 +356,12 @@
     }
     function stop() {
         playing = false; if (timer) { clearTimeout(timer); timer = null; }
+        if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
         try { B().rt && B().rt.release && B().rt.release(); } catch {}   // release any held keys
         stopAudio();
         stopMic();
         try { ws && ws.close(); } catch {} connected = false;
         setStatus('stopped'); show(false);
     }
-    window.sm64RtPlay = { start, stop, guide };
+    window.sm64RtPlay = { start, stop, guide, setRole, getRole: () => role };
 })();
