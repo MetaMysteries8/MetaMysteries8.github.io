@@ -1,0 +1,73 @@
+{
+  "format": "mainvoice-static-index-1",
+  "generated": "2026-08-16T08:02:03.083097+00:00",
+  "voices": [
+    {
+      "id": "doxidoxi",
+      "folder": "doxidoxi",
+      "name": "DoxiDoxi",
+      "author": "Endoxidev",
+      "description": "Creator of the project's voice because why the heck not!",
+      "introSentence": "Hello World! I'm Endoxidev!",
+      "icon": ":D",
+      "tags": [
+        "main",
+        "voice"
+      ],
+      "artFile": "character.png",
+      "created": "2026-08-16T07:59:05.079Z",
+      "phonemeSet": "ARPAbet-39",
+      "phonemes": [
+        "IY",
+        "IH",
+        "EH",
+        "AE",
+        "AA",
+        "AO",
+        "AH",
+        "UH",
+        "UW",
+        "ER",
+        "AY",
+        "AW",
+        "EY",
+        "OW",
+        "OY",
+        "W",
+        "Y",
+        "R",
+        "L",
+        "M",
+        "N",
+        "NG",
+        "F",
+        "TH",
+        "S",
+        "SH",
+        "V",
+        "DH",
+        "Z",
+        "ZH",
+        "HH",
+        "P",
+        "B",
+        "T",
+        "D",
+        "K",
+        "G",
+        "CH",
+        "JH"
+      ],
+      "defaults": {
+        "speed": 1,
+        "overlapMs": 40,
+        "wordGapMs": 50,
+        "pitchSemitones": 0,
+        "punctuationGapMs": 260
+      },
+      "sample_count": 39,
+      "complete": true,
+      "base_url": "mainvoices/doxidoxi"
+    }
+  ]
+}

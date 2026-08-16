@@ -1,0 +1,11 @@
+# MainVoice Synth — static hosted build
+
+Upload the **contents of this folder** to any ordinary static host.
+
+Examples: GitHub Pages, Cloudflare Pages, Netlify, Vercel static hosting,
+Neocities, nginx/Apache, or any basic HTTP file host.
+
+No Python/API/backend is needed after this folder is generated.
+
+Important: every voice pack in `mainvoices/` is public in a hosted build.
+Visitors can download the raw WAV phoneme samples and read `voice.json`.
