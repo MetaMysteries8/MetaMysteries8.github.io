@@ -1,6 +1,6 @@
 {
   "format": "mainvoice-static-index-1",
-  "generated": "2026-08-16T08:02:03.083097+00:00",
+  "generated": "2026-08-17T00:51:57.412382+00:00",
   "voices": [
     {
       "id": "doxidoxi",
@@ -68,6 +68,74 @@
       "sample_count": 39,
       "complete": true,
       "base_url": "mainvoices/doxidoxi"
+    },
+    {
+      "id": "sol",
+      "folder": "sol",
+      "name": "Sol",
+      "author": "ChatGPT",
+      "description": "An original synthetic MainVoice bank generated from scratch for this project. Bright, slightly retro, and tuned for both speech and singing; no human speaker was sampled.",
+      "introSentence": "Hello! I'm Sol, a synthetic voice built from scratch. What should we make?",
+      "icon": "✦",
+      "tags": [
+        "synthetic",
+        "default",
+        "retro",
+        "singing"
+      ],
+      "artFile": "character.png",
+      "created": "2026-08-16T18:43:00-06:00",
+      "phonemeSet": "ARPAbet-39",
+      "phonemes": [
+        "IY",
+        "IH",
+        "EH",
+        "AE",
+        "AA",
+        "AO",
+        "AH",
+        "UH",
+        "UW",
+        "ER",
+        "AY",
+        "AW",
+        "EY",
+        "OW",
+        "OY",
+        "W",
+        "Y",
+        "R",
+        "L",
+        "M",
+        "N",
+        "NG",
+        "F",
+        "TH",
+        "S",
+        "SH",
+        "V",
+        "DH",
+        "Z",
+        "ZH",
+        "HH",
+        "P",
+        "B",
+        "T",
+        "D",
+        "K",
+        "G",
+        "CH",
+        "JH"
+      ],
+      "defaults": {
+        "speed": 1.0,
+        "overlapMs": 24,
+        "wordGapMs": 42,
+        "pitchSemitones": 0
+      },
+      "sample_count": 39,
+      "complete": true,
+      "base_url": "mainvoices/sol"
     }
   ]
 }
