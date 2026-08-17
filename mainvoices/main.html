@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="dark" />
   <title>MainVoice Synth</title>
-  <link rel="stylesheet" href="style.css?v=20260817-conversation-v2" />
+  <link rel="stylesheet" href="style.css?v=20260817-qol-v3" />
 </head>
 <body>
   <div class="shell">
@@ -16,7 +16,7 @@
         <p>Type normal English, pick a voice pack, shape the performance, and export WAV. The expressive renderer adds stress, intonation, rhythm, and phoneme-aware joins without changing the voicebank.</p>
       </div>
       <div class="navlinks">
-        <a href="mainpack%20setup.html">+ Build a voice pack</a>
+        <a href="mainpack%20setup.html">✎ Build / edit a voice pack</a><span class="status-pill">STATIC HOSTED BUILD</span>
         <span class="status-pill"><span id="statusDot" class="dot"></span><span id="globalStatus">loading</span></span>
       </div>
     </header>
@@ -138,6 +138,7 @@
             <div class="daw-tool-group">
               <button id="songUndoBtn" class="daw-tool">↶ Undo</button><button id="songRedoBtn" class="daw-tool">↷ Redo</button>
               <button id="songCopyBtn" class="daw-tool">Copy</button><button id="songPasteBtn" class="daw-tool">Paste</button>
+              <button id="songSelectAllBtn" class="daw-tool">Select all</button><button id="songDuplicateToolbarBtn" class="daw-tool">Duplicate</button>
               <button id="songQuantizeBtn" class="daw-tool">Quantize</button><button id="songAutoSlidesBtn" class="daw-tool">Auto slides</button>
             </div>
             <div class="daw-tool-group compact">
@@ -188,8 +189,10 @@
               <textarea id="songLyricsBatch" class="song-lyrics-batch" placeholder="hel lo world&#10;one token per note"></textarea>
               <button id="songApplyLyricsBtn" class="button secondary" style="width:100%">Apply lyrics left → right</button>
               <div class="row" style="margin-top:12px"><button id="songSaveBtn" class="button secondary">↓ Save project</button><label class="button secondary file-button">↥ Load project<input id="songLoadInput" type="file" accept=".json,application/json"></label></div>
+              <div class="row" style="margin-top:8px"><button id="songRestoreDraftBtn" class="button secondary">↻ Restore autosave</button><button id="songClearDraftBtn" class="button secondary">⌫ Clear autosave</button></div>
+              <div id="songAutosaveStatus" class="small qol-autosave-status">Autosave is ready.</div>
               <div class="row" style="margin-top:8px"><button id="songDemoBtn" class="button secondary">♪ DAW demo</button><button id="songClearBtn" class="button danger">Clear vocals</button></div>
-              <p class="small">Project JSON stores notes, tracks, slides, vibrato, pitch curves, and mixer settings. Backing audio is not embedded; reattach that file when reopening.</p>
+              <p class="small">Project JSON stores notes, tracks, slides, vibrato, pitch curves, and mixer settings. Backing audio is not embedded; reattach that file when reopening. Drafts are also autosaved locally in your browser.</p>
             </aside>
           </div>
 
@@ -206,6 +209,7 @@
                 <div class="daw-roll-controls">
                   <label>horizontal zoom <output id="songZoomXVal">82 px/beat</output><input id="songZoomX" type="range" min="42" max="150" step="2" value="82"></label>
                   <label>key height <output id="songZoomYVal">24 px/key</output><input id="songZoomY" type="range" min="18" max="34" step="1" value="24"></label>
+                  <button id="songFitBtn" class="button secondary small-button">Fit notes</button>
                 </div>
               </div>
               <div class="song-roll-help daw-shortcuts">1 select · 2 pencil · 3 erase · 4 slide · Space play/stop · Ctrl/Cmd+C/V · Ctrl/Cmd+Z/Y · ↑/↓ transpose · Shift+↑/↓ octave</div>
@@ -269,8 +273,15 @@
                   <button id="convDemoBtn" class="button secondary">Load demo</button>
                   <button id="convSaveBtn" class="button secondary">↓ Save project</button>
                   <label class="button secondary file-button">↥ Load project<input id="convLoadInput" type="file" accept=".json,.mainvoice-conversation.json,application/json"></label>
+                  <button id="convTranscriptBtn" class="button secondary">↓ Transcript</button>
+                  <button id="convSrtBtn" class="button secondary">↓ SRT</button>
+                  <button id="convRestoreDraftBtn" class="button secondary">↻ Restore autosave</button>
+                  <button id="convClearDraftBtn" class="button secondary">⌫ Clear autosave</button>
+                  <label class="qol-check"><input id="convCompact" type="checkbox"> compact lines</label>
                   <button id="convClearBtn" class="button danger">Clear</button>
                 </div>
+                <div id="convAutosaveStatus" class="small qol-autosave-status">Autosave is ready.</div>
+                <div class="small qol-shortcuts">Tip: drag the ⋮⋮ handle to reorder · Ctrl/Cmd+Enter previews the current line · Alt+Enter adds a line below.</div>
               </div>
 
               <div id="convTimeline" class="conversation-timeline"></div>
@@ -319,26 +330,25 @@
       <section class="panel" id="tab-voices">
         <div class="two-col">
           <div class="card">
-            <div class="eyebrow">MAINVOICES FOLDER</div>
-            <h2>Installed voice packs</h2>
+            <div class="eyebrow">PUBLIC VOICE LIBRARY</div>
+            <h2>Available voice packs</h2>
             <div id="voiceList" class="voice-list"></div>
           </div>
           <div class="card">
-            <div class="eyebrow">HOW VOICES APPEAR HERE</div>
-            <h2>Drop in a folder, refresh</h2>
-            <div class="codebox">mainvoices/
-└─ doxi/
-   ├─ voice.json
-   └─ samples/
-      ├─ IY.wav
-      ├─ IH.wav
-      └─ ...</div>
-            <p class="muted">The included <code>server.py</code> scans <code>mainvoices/</code>. That is why you do not have to manually edit a manifest every time you add a voice.</p>
+            <div class="eyebrow">STATIC SITE</div>
+            <h2>Official packs + your local test pack</h2>
+            <div class="codebox">hosted/
+├─ main.html
+├─ mainpack setup.html   ← full recorder + waveform editor
+└─ mainvoices/
+   ├─ voices.json
+   └─ official voice folders...</div>
+            <p class="muted">Official packs are bundled into <code>mainvoices/</code> by the site owner. Your own ZIP can be tested or edited entirely in this browser without being uploaded or installed.</p>
             <div class="row">
-              <a class="button primary" href="mainpack%20setup.html">Open MainPack Setup</a>
-              <label class="button secondary file-button">↥ Test a ZIP here<input id="browserPackImportVoices" type="file" accept=".zip,application/zip" /></label>
+              <label class="button primary file-button">↥ Test your MainVoice ZIP<input id="browserPackImportVoices" type="file" accept=".zip,application/zip" /></label>
+              <a class="button secondary" href="mainpack%20setup.html">✂ Open pack editor</a>
             </div>
-            <p class="small">Browser-loaded ZIPs are temporary test voices. Refreshing the page removes them; installed voices are unchanged.</p>
+            <p class="small">A browser-loaded ZIP disappears on refresh. The editor can load an old pack, repair waveform timing/clicks, test it, and export a new ZIP.</p>
           </div>
         </div>
       </section>
@@ -382,12 +392,12 @@
       </section>
     </main>
 
-    <footer>Runs locally · expressive prosody happens in the browser · voice folders stay ordinary WAV files + JSON · normal-text pronunciation uses bundled CMUdict data</footer>
+    <footer>Static hosted build · expressive prosody runs in your browser · full pack editor included · pronunciation uses bundled CMUdict data</footer>
   </div>
   <script src="phonemes.js"></script>
   <script src="dsp.js"></script>
-  <script src="main.js"></script>
-  <script src="song.js"></script>
-  <script src="conversation.js?v=20260817-conversation-v2"></script>
+  <script src="main.js?v=20260817-qol-v3"></script>
+  <script src="song.js?v=20260817-qol-v3"></script>
+  <script src="conversation.js?v=20260817-qol-v3"></script>
 </body>
 </html>
