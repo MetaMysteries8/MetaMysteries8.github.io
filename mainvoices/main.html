@@ -110,106 +110,132 @@
         </div>
       </section>
 
-
       <section class="panel" id="tab-song">
-        <div class="song-top-grid">
-          <div class="card">
-            <div class="section-head">
-              <div>
-                <div class="eyebrow">MAINVOICE SINGING EDITOR</div>
-                <h2>Make the voice sing</h2>
-                <p class="muted">Draw notes onto the piano roll, give each note a lyric or ARPAbet override, and MainVoice turns the phonemes into sung syllables while preserving their one-time attacks and releases.</p>
-              </div>
-              <span class="continuous-badge">EXPERIMENTAL · LOCAL</span>
+        <div class="daw-shell">
+          <div class="card daw-commandbar">
+            <div class="daw-brand">
+              <div class="eyebrow">MAINVOICE VOCAL DAW</div>
+              <h2>Song Studio</h2>
+              <p class="muted">Layer vocals, draw slides, automate pitch, add vibrato, mix a backing track, loop sections, and export a stereo WAV — all from the same MainVoice phoneme bank.</p>
             </div>
-
-            <div class="song-settings-grid">
-              <label class="expression-field"><span>voice</span><select id="songVoiceSelect"><option>Loading voices…</option></select></label>
-              <label class="expression-field"><span>tempo (BPM)</span><input id="songBpm" class="text-input" type="number" min="30" max="300" step="1" value="120"></label>
-              <label class="expression-field"><span>snap</span><select id="songSnap">
-                <option value="1">1 beat / quarter</option>
-                <option value="0.5">1/2 beat / eighth</option>
-                <option value="0.25" selected>1/4 beat / sixteenth</option>
-                <option value="0.125">1/8 beat / thirty-second</option>
-              </select></label>
-              <label class="expression-field"><span>song length</span><select id="songBars">
-                <option value="4">4 bars</option><option value="8" selected>8 bars</option><option value="16">16 bars</option><option value="32">32 bars</option>
-              </select></label>
-              <label class="expression-field"><span>recorded base note</span><select id="songBaseNote"></select></label>
-              <label class="expression-field"><span>transpose</span><select id="songTranspose"></select></label>
-            </div>
-
-            <div class="song-performance-grid">
-              <div class="control"><label>legato / phoneme crossfade <output id="songLegatoVal">18 ms</output></label><input id="songLegato" type="range" min="0" max="80" step="1" value="18"></div>
-              <div class="control"><label>consonant pre-roll <output id="songLeadVal">45 ms</output></label><input id="songLead" type="range" min="0" max="140" step="5" value="45"></div>
-              <div class="control"><label>song gain <output id="songGainVal">0 dB</output></label><input id="songGain" type="range" min="-18" max="6" step="1" value="0"></div>
-              <div class="control"><label>note humanize <output id="songHumanizeVal">0%</output></label><input id="songHumanize" type="range" min="0" max="100" step="1" value="0"></div>
-            </div>
-
-            <div class="notice" style="margin-top:14px"><b>Recorded base note matters:</b> set this to the pitch you used when holding the voiced phonemes. Unvoiced sounds such as S/SH/F/P/T/K stay noise-like instead of being forced onto a musical note.<br><br><b>Long notes do not loop the full WAV:</b> MainVoice plays the attack once, stretches only a stable sustain region, then plays the release once. Diphthong glides such as AY/OW are kept toward the note ending instead of repeating.</div>
-
-            <div class="transport song-transport">
-              <button id="songPlayBtn" class="button primary big">▶ Play song</button>
+            <div class="daw-transport-main">
+              <button id="songRewindBtn" class="button secondary" title="Return cursor to beat 0">↤</button>
+              <button id="songPlayBtn" class="button primary big">▶ Play</button>
               <button id="songStopBtn" class="button secondary">■ Stop</button>
-              <button id="songExportBtn" class="button secondary">↓ Export WAV</button>
-              <button id="songDemoBtn" class="button secondary">♪ Demo melody</button>
-              <button id="songClearBtn" class="button danger">Clear notes</button>
-            </div>
-            <div id="songMessage" class="small" style="margin-top:10px">Tip: one syllable per note sounds best. Multi-syllable words still work, but are squeezed inside one note.</div>
-          </div>
-
-          <aside class="card song-project-card">
-            <div class="eyebrow">SONG PROJECT</div>
-            <label class="field-label" for="songTitle">Title</label>
-            <input id="songTitle" class="text-input" value="Untitled MainVoice Song">
-            <label class="field-label" for="songLyricsBatch">Quick lyric fill</label>
-            <textarea id="songLyricsBatch" class="song-lyrics-batch" placeholder="la la la la&#10;or: hel lo world"></textarea>
-            <button id="songApplyLyricsBtn" class="button secondary" style="width:100%">Apply words to notes left → right</button>
-            <div class="divider"></div>
-            <div class="row">
-              <button id="songSaveBtn" class="button secondary">↓ Save song JSON</button>
-              <label class="button secondary file-button">↥ Load song JSON<input id="songLoadInput" type="file" accept=".json,application/json"></label>
-            </div>
-            <p class="small">Song files contain notes, lyrics, tempo, and synth settings — not the voice samples. Pick any compatible MainVoice when reopening them.</p>
-          </aside>
-        </div>
-
-        <div class="song-editor-grid">
-          <div class="card song-roll-card">
-            <div class="section-head">
-              <div><div class="eyebrow">PIANO ROLL</div><h2>Draw notes</h2></div>
-              <div class="song-roll-help">click/drag empty space = note · drag note = move · drag right edge = resize · Delete = remove</div>
-            </div>
-            <div id="songRuler" class="song-ruler"></div>
-            <div id="songRollViewport" class="song-roll-viewport">
-              <canvas id="songRollCanvas" width="2400" height="1176"></canvas>
+              <button id="songExportBtn" class="button secondary">↓ Stereo WAV</button>
+              <span id="songCursorVal" class="status-pill">beat 0</span>
             </div>
           </div>
 
-          <aside class="card song-note-card">
-            <div class="eyebrow">SELECTED NOTE</div>
-            <div id="songNoSelection" class="voice-empty">Click a note to edit its lyric and timing.</div>
-            <div id="songNoteInspector" hidden>
-              <div id="songSelectedPitch" class="song-big-note">C4</div>
-              <label class="field-label" for="songNoteLyric">Lyric / syllable</label>
-              <input id="songNoteLyric" class="text-input" value="la">
-              <label class="field-label" for="songNotePhones">ARPAbet override <span class="small">(optional)</span></label>
-              <input id="songNotePhones" class="text-input arpabet" placeholder="leave blank for automatic pronunciation">
-              <div id="songNoteAutoPhones" class="codebox" style="margin-top:8px">L AA</div>
-
-              <div class="song-note-numbers">
-                <label class="expression-field"><span>start beat</span><input id="songNoteStart" class="text-input" type="number" min="0" step="0.25"></label>
-                <label class="expression-field"><span>length (beats)</span><input id="songNoteDuration" class="text-input" type="number" min="0.125" step="0.25"></label>
-              </div>
-              <div class="control"><label>note volume <output id="songNoteVelocityVal">100%</output></label><input id="songNoteVelocity" type="range" min="20" max="160" step="1" value="100"></div>
-              <div class="row" style="margin-top:14px">
-                <button id="songNoteAuditionBtn" class="button primary">▶ Audition note</button>
-                <button id="songNoteDuplicateBtn" class="button secondary">Duplicate</button>
-                <button id="songNoteDeleteBtn" class="button danger">Delete</button>
-              </div>
-              <p id="songNoteHint" class="small" style="margin-top:10px"></p>
+          <div class="daw-toolbar card">
+            <div class="daw-tool-group" aria-label="Piano roll tools">
+              <button class="daw-tool" data-song-tool="select" title="Select / marquee (1)">↖ Select</button>
+              <button class="daw-tool active" data-song-tool="pencil" title="Draw notes (2)">✎ Pencil</button>
+              <button class="daw-tool" data-song-tool="eraser" title="Erase notes (3)">⌫ Erase</button>
+              <button class="daw-tool" data-song-tool="slide" title="Connect two notes with portamento (4)">〰 Slide</button>
             </div>
-          </aside>
+            <div class="daw-tool-group">
+              <button id="songUndoBtn" class="daw-tool">↶ Undo</button><button id="songRedoBtn" class="daw-tool">↷ Redo</button>
+              <button id="songCopyBtn" class="daw-tool">Copy</button><button id="songPasteBtn" class="daw-tool">Paste</button>
+              <button id="songQuantizeBtn" class="daw-tool">Quantize</button><button id="songAutoSlidesBtn" class="daw-tool">Auto slides</button>
+            </div>
+            <div class="daw-tool-group compact">
+              <button id="songOctaveDownBtn" class="daw-tool">−12</button><button id="songSemiDownBtn" class="daw-tool">−1</button><button id="songSemiUpBtn" class="daw-tool">+1</button><button id="songOctaveUpBtn" class="daw-tool">+12</button>
+            </div>
+          </div>
+
+          <div class="daw-top-grid">
+            <div class="card">
+              <div class="section-head">
+                <div><div class="eyebrow">SESSION</div><h2>Singer + timeline</h2></div>
+                <span class="continuous-badge">VOICE DAW</span>
+              </div>
+              <div class="song-settings-grid daw-settings-grid">
+                <label class="expression-field"><span>voice</span><select id="songVoiceSelect"><option>Loading voices…</option></select></label>
+                <label class="expression-field"><span>tempo (BPM)</span><input id="songBpm" class="text-input" type="number" min="30" max="300" step="1" value="120"></label>
+                <label class="expression-field"><span>song length</span><select id="songBars"><option value="4">4 bars</option><option value="8" selected>8 bars</option><option value="16">16 bars</option><option value="32">32 bars</option><option value="64">64 bars</option></select></label>
+                <label class="expression-field"><span>snap</span><select id="songSnap"><option value="1">quarter</option><option value="0.5">eighth</option><option value="0.25" selected>sixteenth</option><option value="0.125">thirty-second</option></select></label>
+                <label class="expression-field"><span>recorded base note</span><select id="songBaseNote"></select></label>
+                <label class="expression-field"><span>transpose</span><select id="songTranspose"></select></label>
+              </div>
+              <div class="song-performance-grid daw-performance-grid">
+                <div class="control"><label>phoneme legato <output id="songLegatoVal">18 ms</output></label><input id="songLegato" type="range" min="0" max="100" step="1" value="18"></div>
+                <div class="control"><label>consonant pre-roll <output id="songLeadVal">45 ms</output></label><input id="songLead" type="range" min="0" max="180" step="5" value="45"></div>
+                <div class="control"><label>master gain <output id="songGainVal">0 dB</output></label><input id="songGain" type="range" min="-18" max="6" step="1" value="0"></div>
+                <div class="control"><label>timing humanize <output id="songHumanizeVal">0%</output></label><input id="songHumanize" type="range" min="0" max="100" step="1" value="0"></div>
+              </div>
+              <div class="daw-loop-row">
+                <label class="check"><input id="songLoop" type="checkbox"> loop playback</label>
+                <label>from <input id="songLoopStart" class="mini-number" type="number" min="0" step="0.25" value="0"></label>
+                <label>to <input id="songLoopEnd" class="mini-number" type="number" min="0.25" step="0.25" value="8"></label>
+                <span class="small">Click the ruler to move the playback cursor.</span>
+              </div>
+            </div>
+
+            <aside class="card daw-project-card">
+              <div class="eyebrow">PROJECT + BACKING TRACK</div>
+              <label class="field-label" for="songTitle">Title</label>
+              <input id="songTitle" class="text-input" value="Untitled MainVoice Song">
+              <div class="daw-backing-box">
+                <div class="section-head tight"><b>Instrumental / backing audio</b><label class="button secondary file-button small-button">↥ Load audio<input id="songBackingInput" type="file" accept="audio/*"></label></div>
+                <div id="songBackingName" class="small">No backing track loaded</div>
+                <div class="control"><label>backing gain <output id="songBackingGainVal">-8 dB</output></label><input id="songBackingGain" type="range" min="-30" max="6" step="1" value="-8"></div>
+                <div class="daw-loop-row"><label>offset beats <input id="songBackingOffset" class="mini-number" type="number" step="0.25" value="0"></label><label class="check"><input id="songBackingMute" type="checkbox"> mute</label><button id="songBackingRemove" class="button secondary small-button" disabled>Remove</button></div>
+              </div>
+              <div class="divider"></div>
+              <label class="field-label" for="songLyricsBatch">Quick lyric fill</label>
+              <textarea id="songLyricsBatch" class="song-lyrics-batch" placeholder="hel lo world&#10;one token per note"></textarea>
+              <button id="songApplyLyricsBtn" class="button secondary" style="width:100%">Apply lyrics left → right</button>
+              <div class="row" style="margin-top:12px"><button id="songSaveBtn" class="button secondary">↓ Save project</button><label class="button secondary file-button">↥ Load project<input id="songLoadInput" type="file" accept=".json,application/json"></label></div>
+              <div class="row" style="margin-top:8px"><button id="songDemoBtn" class="button secondary">♪ DAW demo</button><button id="songClearBtn" class="button danger">Clear vocals</button></div>
+              <p class="small">Project JSON stores notes, tracks, slides, vibrato, pitch curves, and mixer settings. Backing audio is not embedded; reattach that file when reopening.</p>
+            </aside>
+          </div>
+
+          <div class="daw-track-rack card">
+            <div class="section-head tight"><div><div class="eyebrow">VOCAL LAYERS</div><h2>Tracks</h2></div><div class="row"><button id="songAddTrackBtn" class="button secondary small-button">+ Add track</button><button id="songRenameTrackBtn" class="button secondary small-button">Rename</button><button id="songRemoveTrackBtn" class="button danger small-button">Remove</button></div></div>
+            <div id="songTrackList" class="daw-track-list"></div>
+            <p class="small">Tracks share the selected MainVoice but have independent volume, pan, mute, and solo. Use them for harmonies, doubles, call-and-response, or chaos.</p>
+          </div>
+
+          <div class="song-editor-grid daw-editor-grid">
+            <div class="card song-roll-card">
+              <div class="section-head">
+                <div><div class="eyebrow">PIANO ROLL</div><h2>Notes + slides</h2></div>
+                <div class="daw-roll-controls">
+                  <label>horizontal zoom <output id="songZoomXVal">82 px/beat</output><input id="songZoomX" type="range" min="42" max="150" step="2" value="82"></label>
+                  <label>key height <output id="songZoomYVal">24 px/key</output><input id="songZoomY" type="range" min="18" max="34" step="1" value="24"></label>
+                </div>
+              </div>
+              <div class="song-roll-help daw-shortcuts">1 select · 2 pencil · 3 erase · 4 slide · Space play/stop · Ctrl/Cmd+C/V · Ctrl/Cmd+Z/Y · ↑/↓ transpose · Shift+↑/↓ octave</div>
+              <div id="songRuler" class="song-ruler daw-ruler"></div>
+              <div id="songRollViewport" class="song-roll-viewport daw-roll-viewport"><canvas id="songRollCanvas" width="2400" height="1176"></canvas></div>
+              <div id="songMessage" class="small" style="margin-top:10px">Pencil notes in, then use the Slide tool to click a source note and a target note.</div>
+            </div>
+
+            <aside class="card song-note-card daw-inspector-card">
+              <div class="section-head tight"><div><div class="eyebrow">NOTE INSPECTOR</div><h2 id="songSelectionCount">no selection</h2></div></div>
+              <div id="songNoSelection" class="voice-empty">Select a note to edit its lyric, pitch motion, vibrato, and track.</div>
+              <div id="songNoteInspector" hidden>
+                <div id="songSelectedPitch" class="song-big-note">C4</div>
+                <label class="field-label" for="songNoteTrack">vocal track</label><select id="songNoteTrack"></select>
+                <label class="field-label" for="songNoteLyric">lyric / syllable</label><input id="songNoteLyric" class="text-input" value="la">
+                <label class="field-label" for="songNotePhones">ARPAbet override <span class="small">(optional)</span></label><input id="songNotePhones" class="text-input arpabet" placeholder="automatic pronunciation"><div id="songNoteAutoPhones" class="codebox" style="margin-top:8px">L AA</div>
+                <div class="song-note-numbers"><label class="expression-field"><span>start beat</span><input id="songNoteStart" class="text-input" type="number" min="0" step="0.25"></label><label class="expression-field"><span>length (beats)</span><input id="songNoteDuration" class="text-input" type="number" min="0.125" step="0.25"></label></div>
+                <div class="control"><label>note volume <output id="songNoteVelocityVal">100%</output></label><input id="songNoteVelocity" type="range" min="20" max="160" step="1" value="100"></div>
+                <div class="control"><label>fine tune <output id="songNoteFineVal">0¢</output></label><input id="songNoteFine" type="range" min="-100" max="100" step="1" value="0"></div>
+
+                <div class="daw-inspector-section"><div class="section-head tight"><b>〰 Portamento / slide</b><button id="songUnlinkSlideBtn" class="button secondary small-button">Unlink</button></div><div id="songSlideStatus" class="small">No incoming slide</div><div class="control"><label>glide time <output id="songNoteSlideVal">0.35 beat</output></label><input id="songNoteSlideBeats" type="range" min="0" max="4" step="0.05" value="0.35"></div><label class="expression-field"><span>curve</span><select id="songNoteSlideCurve"><option value="smooth">smooth S-curve</option><option value="linear">linear</option><option value="fast">fast arrival</option><option value="late">late arrival</option></select></label><p class="small">Use the Slide tool in the piano roll to choose where this note glides from.</p></div>
+
+                <div class="daw-inspector-section"><b>〽 Vibrato</b><div class="control"><label>depth <output id="songVibratoDepthVal">0¢</output></label><input id="songVibratoDepth" type="range" min="0" max="200" step="1" value="0"></div><div class="control"><label>rate <output id="songVibratoRateVal">5.5 Hz</output></label><input id="songVibratoRate" type="range" min="2" max="9" step="0.1" value="5.5"></div><div class="control"><label>delay <output id="songVibratoDelayVal">45%</output></label><input id="songVibratoDelay" type="range" min="0" max="90" step="1" value="45"></div><div class="control"><label>fade-in <output id="songVibratoFadeVal">20%</output></label><input id="songVibratoFade" type="range" min="1" max="80" step="1" value="20"></div></div>
+
+                <div class="daw-inspector-section"><div class="section-head tight"><b>Pitch automation</b><button id="songPitchResetBtn" class="button secondary small-button">Reset</button></div><canvas id="songPitchCurve" width="300" height="150"></canvas><p class="small">Click to add pitch-bend points (±1200¢). Drag points to shape the note. Right-click a point to remove it. Slide + pitch automation + vibrato are combined.</p></div>
+
+                <div class="row" style="margin-top:14px"><button id="songNoteAuditionBtn" class="button primary">▶ Audition</button><button id="songNoteDuplicateBtn" class="button secondary">Duplicate</button><button id="songNoteDeleteBtn" class="button danger">Delete</button></div>
+                <p id="songNoteHint" class="small" style="margin-top:10px"></p>
+              </div>
+            </aside>
+          </div>
         </div>
       </section>
 
