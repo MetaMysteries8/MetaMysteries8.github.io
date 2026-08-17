@@ -118,7 +118,7 @@
     if(!(input instanceof Float32Array)) input=new Float32Array(input);
     inputRate=Math.max(8000,+inputRate||48000);outputRate=Math.max(8000,+outputRate||inputRate);
     const pitch=clamp(+options.pitchSemitones||0,-24,24);
-    const speed=clamp(+options.speed||1,0.25,4);
+    const speed=clamp(+options.speed||1,0.08,8);
     const maxSeconds=Number.isFinite(options.maxSourceSeconds)?Math.max(0.005,+options.maxSourceSeconds):Infinity;
     const sourceLength=Math.max(1,Math.min(input.length,Math.round(maxSeconds*inputRate)));
     const source=input.subarray(0,sourceLength);
@@ -140,6 +140,99 @@
     return out;
   }
 
+  // Singing sustain: preserve the recorded attack and release once, and stretch
+  // only a stable middle region. This avoids the classic bad sampler behavior
+  // where a long note repeats the whole phoneme (attack -> body -> release ->
+  // attack -> body -> release...). Diphthongs can reserve a longer release so
+  // their vowel glide happens once near the end of the note.
+  function sustainTransform(input, inputRate, outputRate, options={}){
+    if(!(input instanceof Float32Array)) input=new Float32Array(input);
+    inputRate=Math.max(8000,+inputRate||48000);outputRate=Math.max(8000,+outputRate||inputRate);
+    const pitch=clamp(+options.pitchSemitones||0,-24,24);
+    const targetSeconds=Math.max(0.018,+options.targetSeconds||0.1);
+    const maxSeconds=Number.isFinite(options.maxSourceSeconds)?Math.max(0.005,+options.maxSourceSeconds):Infinity;
+    const sourceLength=Math.max(1,Math.min(input.length,Math.round(maxSeconds*inputRate)));
+    const source=input.subarray(0,sourceLength);
+    const sourceSeconds=sourceLength/inputRate;
+
+    // Shift pitch first while keeping the natural source duration unchanged.
+    const pitched=transform(source,inputRate,outputRate,{pitchSemitones:pitch,speed:1});
+    const targetLength=Math.max(1,Math.round(targetSeconds*outputRate));
+    const naturalSeconds=pitched.length/outputRate;
+
+    // Short notes are better served by the normal duration-preserving transform.
+    // The special sustain path is for actual holds.
+    if(targetLength<=pitched.length*1.04 || pitched.length<96){
+      const speed=sourceSeconds/targetSeconds;
+      return transform(source,inputRate,outputRate,{pitchSemitones:pitch,speed});
+    }
+
+    let attackSec=Number.isFinite(options.attackSeconds)?+options.attackSeconds:Math.min(0.075,naturalSeconds*0.20);
+    let releaseSec=Number.isFinite(options.releaseSeconds)?+options.releaseSeconds:Math.min(0.065,naturalSeconds*0.18);
+    attackSec=clamp(attackSec,0.004,naturalSeconds*0.42);
+    releaseSec=clamp(releaseSec,0.004,naturalSeconds*0.42);
+    let attackLen=Math.max(8,Math.round(attackSec*outputRate));
+    let releaseLen=Math.max(8,Math.round(releaseSec*outputRate));
+    if(attackLen+releaseLen>pitched.length-48){
+      const scale=Math.max(0.15,(pitched.length-48)/(attackLen+releaseLen));
+      attackLen=Math.max(8,Math.floor(attackLen*scale));
+      releaseLen=Math.max(8,Math.floor(releaseLen*scale));
+    }
+    const middleStart=attackLen,middleEnd=Math.max(middleStart+32,pitched.length-releaseLen);
+    const attack=pitched.slice(0,middleStart),middle=pitched.slice(middleStart,middleEnd),release=pitched.slice(middleEnd);
+    if(middle.length<32 || release.length<4){
+      const speed=sourceSeconds/targetSeconds;
+      return transform(source,inputRate,outputRate,{pitchSemitones:pitch,speed});
+    }
+
+    let fade=Math.round((Number.isFinite(options.crossfadeSeconds)?+options.crossfadeSeconds:0.010)*outputRate);
+    fade=Math.max(2,Math.min(fade,Math.floor(attack.length/3),Math.floor(middle.length/3),Math.floor(release.length/3)));
+    const middleWanted=Math.max(32,targetLength-attack.length-release.length+fade*2);
+    const stretched=wsola(middle,middleWanted/Math.max(1,middle.length),outputRate,middleWanted);
+    const outLength=attack.length+stretched.length+release.length-fade*2;
+    const out=new Float32Array(outLength);
+
+    // Attack, once.
+    out.set(attack,0);
+    let pos=attack.length-fade;
+    // Attack -> sustain equal-power-ish linear crossfade.
+    for(let i=0;i<fade;i++){
+      const t=(i+1)/(fade+1),a=out[pos+i],b=stretched[i]||0;
+      out[pos+i]=a*(1-t)+b*t;
+    }
+    out.set(stretched.subarray(fade),pos+fade);
+    pos=attack.length+stretched.length-fade*2;
+    // Sustain -> release.
+    for(let i=0;i<fade;i++){
+      const t=(i+1)/(fade+1),a=out[pos+i],b=release[i]||0;
+      out[pos+i]=a*(1-t)+b*t;
+    }
+    out.set(release.subarray(fade),pos+fade);
+
+    // Correct any +/- a few samples of rounding without changing pitch.
+    let result=out;
+    if(result.length!==targetLength){
+      if(Math.abs(result.length-targetLength)<=4){
+        const fixed=new Float32Array(targetLength);fixed.set(result.subarray(0,Math.min(result.length,targetLength)));result=fixed;
+      }else{
+        // Only the middle is allowed to absorb duration correction; never resample
+        // the complete attack/release just to fix bookkeeping.
+        const desiredMiddle=Math.max(32,targetLength-attack.length-release.length+fade*2);
+        const corrected=wsola(middle,desiredMiddle/Math.max(1,middle.length),outputRate,desiredMiddle);
+        const fixedLen=attack.length+corrected.length+release.length-fade*2, fixed=new Float32Array(fixedLen);
+        fixed.set(attack,0);let p=attack.length-fade;
+        for(let i=0;i<fade;i++){const t=(i+1)/(fade+1);fixed[p+i]=fixed[p+i]*(1-t)+(corrected[i]||0)*t;}
+        fixed.set(corrected.subarray(fade),p+fade);p=attack.length+corrected.length-fade*2;
+        for(let i=0;i<fade;i++){const t=(i+1)/(fade+1);fixed[p+i]=fixed[p+i]*(1-t)+(release[i]||0)*t;}
+        fixed.set(release.subarray(fade),p+fade);result=fixed;
+      }
+    }
+
+    const edge=Math.min(Math.round(outputRate*0.0025),Math.floor(result.length/2));
+    for(let i=0;i<edge;i++){const g=(i+1)/Math.max(1,edge);result[i]*=g;result[result.length-1-i]*=g;}
+    return result;
+  }
+
   function toAudioBuffer(context, inputBuffer, options={}){
     const mono=inputBuffer.getChannelData(0);
     const data=transform(mono,inputBuffer.sampleRate,context.sampleRate,options);
@@ -148,5 +241,13 @@
     return buf;
   }
 
-  return {transform,toAudioBuffer,resampleLinear,wsola};
+  function sustainToAudioBuffer(context,inputBuffer,options={}){
+    const mono=inputBuffer.getChannelData(0);
+    const data=sustainTransform(mono,inputBuffer.sampleRate,context.sampleRate,options);
+    const buf=context.createBuffer(1,data.length,context.sampleRate);
+    buf.copyToChannel(data,0);
+    return buf;
+  }
+
+  return {transform,sustainTransform,toAudioBuffer,sustainToAudioBuffer,resampleLinear,wsola};
 });

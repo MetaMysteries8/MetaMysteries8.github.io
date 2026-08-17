@@ -312,7 +312,7 @@
     for(const v of state.voices){
       const o=document.createElement('option');o.value=v.id;o.textContent=voiceLabel(v)+(v.author?` — ${v.author}`:'')+(v.temporary?' [browser test]':'');o.selected=state.voice?.id===v.id;sel.appendChild(o);
       const b=document.createElement('button'),art=voiceArtUrl(v);b.className='voice-option'+(state.voice?.id===v.id?' active':'')+(art?'':' no-art');const tags=voiceTags(v),copy=`<div class="voice-option-copy"><b>${v.icon?`<span class="voice-icon">${esc(v.icon)}</span>`:''}${esc(v.name)}${v.temporary?'<span class="temporary-badge">BROWSER TEST</span>':''}</b><span class="${v.temporary?'temp-line':''}">${esc(v.author||'no author')} · ${v.complete?39:v.sample_count}/39 samples${v.description?' · '+esc(v.description):''}</span>${tags.length?`<div class="voice-tags">${tags.map(t=>`<span class="voice-tag">${esc(t)}</span>`).join('')}</div>`:''}</div>`;b.innerHTML=art?`<img class="voice-option-thumb" src="${esc(art)}" alt=""><div>${copy}</div>`:copy;b.onclick=()=>loadVoice(v.id);list.appendChild(b);
-    }
+    }    try{document.dispatchEvent(new CustomEvent('mainvoice:voiceschange',{detail:{voices:state.voices}}))}catch{}
   }
   function applyIntro(v){
     const intro=String(v?.introSentence||'').trim();if(!intro)return;$('textInput').value=intro;state.manual=false;buildPronunciation();
@@ -323,7 +323,7 @@
       const ctx=getAudioCtx();let pairs;
       if(v.temporary&&v._sampleBytes){pairs=await Promise.all(P.map(async p=>{const ab=v._sampleBytes.get(p.c);if(!ab)return[p.c,null];try{return[p.c,await ctx.decodeAudioData(ab.slice(0))]}catch{return[p.c,null]}}))}
       else{pairs=await Promise.all(P.map(async p=>{const url=`${v.base_url}/samples/${p.c}.wav`;try{const r=await fetch(url,{cache:'no-store'});if(!r.ok)return[p.c,null];const ab=await r.arrayBuffer(),buf=await ctx.decodeAudioData(ab.slice(0));return[p.c,buf]}catch{return[p.c,null]}}))}
-      state.buffers=new Map(pairs.filter(x=>x[1]));state.voice=v;if(!v.temporary)localStorage.setItem('mainvoice.lastVoice',v.id);$('voiceSelect').value=v.id;applyIntro(v);applyVoiceDefaults(v.defaults||{});renderVoiceInfo();renderVoiceOptions();renderBank();setStatus(`${v.name} ready`);state.rendered=null;
+      state.buffers=new Map(pairs.filter(x=>x[1]));state.voice=v;if(!v.temporary)localStorage.setItem('mainvoice.lastVoice',v.id);$('voiceSelect').value=v.id;applyIntro(v);applyVoiceDefaults(v.defaults||{});renderVoiceInfo();renderVoiceOptions();renderBank();setStatus(`${v.name} ready`);state.rendered=null;try{document.dispatchEvent(new CustomEvent('mainvoice:voicechange',{detail:{voice:v}}))}catch{};
     }catch(e){setStatus('voice load failed','bad');$('voiceInfo').textContent=e.message}finally{document.body.classList.remove('loading')}
   }
   function applyVoiceDefaults(d){if(Number.isFinite(d.speed))$('speed').value=d.speed;if(Number.isFinite(d.pitchSemitones))$('pitch').value=d.pitchSemitones;if(Number.isFinite(d.overlapMs))$('overlap').value=d.overlapMs;if(Number.isFinite(d.wordGapMs))$('wordGap').value=d.wordGapMs;if(Number.isFinite(d.punctuationGapMs))$('punctGap').value=d.punctuationGapMs;['speed','pitch','overlap','wordGap','punctGap','gain'].forEach(id=>$(id).dispatchEvent(new Event('input')));buildPronunciation()}
@@ -348,6 +348,30 @@
   $('newVariationBtn').onclick=()=>{state.variationSeed=(state.variationSeed%9999)+1;$('variationVal').textContent='#'+state.variationSeed;state.rendered=null;$('synthMessage').textContent='New deterministic micro-variation ready. Same words, slightly different timing/pitch details.'};
   $('clearEmphasisBtn').onclick=()=>{state.emphasis.clear();renderEmphasisWords();state.rendered=null};
   loadExpressionPrefs();['expressionAmount','intonation','rhythm','humanize'].forEach(id=>$(id).dispatchEvent(new Event('input')));$('variationVal').textContent='#'+state.variationSeed;
+
+  // Small public bridge used by the optional piano-roll singing editor. The
+  // voicebank/editor format stays unchanged; this only exposes the already
+  // loaded voice, dictionary pronunciation, and DSP helpers to song.js.
+  window.MainVoiceApp={
+    get voice(){return state.voice},
+    get voices(){return state.voices},
+    get buffers(){return state.buffers},
+    get dict(){return state.dict},
+    phonemes:P,
+    vowels:VOWELS,
+    loadVoice,
+    wordPron,
+    dictPronDetailed,
+    fallbackDetailed,
+    getAudioCtx,
+    stopSpeech:stopPlayback,
+    encodeWav,
+    download,
+    speechMaxSourceSeconds,
+    setStatus,
+    voiceLabel,
+    voiceArtUrl
+  };
 
   (async()=>{try{await loadDictionary();buildPronunciation();await scanVoices()}catch(e){console.error(e);setStatus('startup failed','bad');$('synthMessage').textContent=e.message}})();
 })();

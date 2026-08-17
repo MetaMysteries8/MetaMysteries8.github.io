@@ -23,6 +23,7 @@
 
     <nav class="tabs">
       <button class="tab active" data-tab="synth">Synthesizer</button>
+      <button class="tab" data-tab="song">Song editor</button>
       <button class="tab" data-tab="voices">Voices</button>
       <button class="tab" data-tab="bank">Phoneme bank</button>
       <button class="tab" data-tab="advanced">Advanced pronunciation</button>
@@ -109,6 +110,109 @@
         </div>
       </section>
 
+
+      <section class="panel" id="tab-song">
+        <div class="song-top-grid">
+          <div class="card">
+            <div class="section-head">
+              <div>
+                <div class="eyebrow">MAINVOICE SINGING EDITOR</div>
+                <h2>Make the voice sing</h2>
+                <p class="muted">Draw notes onto the piano roll, give each note a lyric or ARPAbet override, and MainVoice turns the phonemes into sung syllables while preserving their one-time attacks and releases.</p>
+              </div>
+              <span class="continuous-badge">EXPERIMENTAL · LOCAL</span>
+            </div>
+
+            <div class="song-settings-grid">
+              <label class="expression-field"><span>voice</span><select id="songVoiceSelect"><option>Loading voices…</option></select></label>
+              <label class="expression-field"><span>tempo (BPM)</span><input id="songBpm" class="text-input" type="number" min="30" max="300" step="1" value="120"></label>
+              <label class="expression-field"><span>snap</span><select id="songSnap">
+                <option value="1">1 beat / quarter</option>
+                <option value="0.5">1/2 beat / eighth</option>
+                <option value="0.25" selected>1/4 beat / sixteenth</option>
+                <option value="0.125">1/8 beat / thirty-second</option>
+              </select></label>
+              <label class="expression-field"><span>song length</span><select id="songBars">
+                <option value="4">4 bars</option><option value="8" selected>8 bars</option><option value="16">16 bars</option><option value="32">32 bars</option>
+              </select></label>
+              <label class="expression-field"><span>recorded base note</span><select id="songBaseNote"></select></label>
+              <label class="expression-field"><span>transpose</span><select id="songTranspose"></select></label>
+            </div>
+
+            <div class="song-performance-grid">
+              <div class="control"><label>legato / phoneme crossfade <output id="songLegatoVal">18 ms</output></label><input id="songLegato" type="range" min="0" max="80" step="1" value="18"></div>
+              <div class="control"><label>consonant pre-roll <output id="songLeadVal">45 ms</output></label><input id="songLead" type="range" min="0" max="140" step="5" value="45"></div>
+              <div class="control"><label>song gain <output id="songGainVal">0 dB</output></label><input id="songGain" type="range" min="-18" max="6" step="1" value="0"></div>
+              <div class="control"><label>note humanize <output id="songHumanizeVal">0%</output></label><input id="songHumanize" type="range" min="0" max="100" step="1" value="0"></div>
+            </div>
+
+            <div class="notice" style="margin-top:14px"><b>Recorded base note matters:</b> set this to the pitch you used when holding the voiced phonemes. Unvoiced sounds such as S/SH/F/P/T/K stay noise-like instead of being forced onto a musical note.<br><br><b>Long notes do not loop the full WAV:</b> MainVoice plays the attack once, stretches only a stable sustain region, then plays the release once. Diphthong glides such as AY/OW are kept toward the note ending instead of repeating.</div>
+
+            <div class="transport song-transport">
+              <button id="songPlayBtn" class="button primary big">▶ Play song</button>
+              <button id="songStopBtn" class="button secondary">■ Stop</button>
+              <button id="songExportBtn" class="button secondary">↓ Export WAV</button>
+              <button id="songDemoBtn" class="button secondary">♪ Demo melody</button>
+              <button id="songClearBtn" class="button danger">Clear notes</button>
+            </div>
+            <div id="songMessage" class="small" style="margin-top:10px">Tip: one syllable per note sounds best. Multi-syllable words still work, but are squeezed inside one note.</div>
+          </div>
+
+          <aside class="card song-project-card">
+            <div class="eyebrow">SONG PROJECT</div>
+            <label class="field-label" for="songTitle">Title</label>
+            <input id="songTitle" class="text-input" value="Untitled MainVoice Song">
+            <label class="field-label" for="songLyricsBatch">Quick lyric fill</label>
+            <textarea id="songLyricsBatch" class="song-lyrics-batch" placeholder="la la la la&#10;or: hel lo world"></textarea>
+            <button id="songApplyLyricsBtn" class="button secondary" style="width:100%">Apply words to notes left → right</button>
+            <div class="divider"></div>
+            <div class="row">
+              <button id="songSaveBtn" class="button secondary">↓ Save song JSON</button>
+              <label class="button secondary file-button">↥ Load song JSON<input id="songLoadInput" type="file" accept=".json,application/json"></label>
+            </div>
+            <p class="small">Song files contain notes, lyrics, tempo, and synth settings — not the voice samples. Pick any compatible MainVoice when reopening them.</p>
+          </aside>
+        </div>
+
+        <div class="song-editor-grid">
+          <div class="card song-roll-card">
+            <div class="section-head">
+              <div><div class="eyebrow">PIANO ROLL</div><h2>Draw notes</h2></div>
+              <div class="song-roll-help">click/drag empty space = note · drag note = move · drag right edge = resize · Delete = remove</div>
+            </div>
+            <div id="songRuler" class="song-ruler"></div>
+            <div id="songRollViewport" class="song-roll-viewport">
+              <canvas id="songRollCanvas" width="2400" height="1176"></canvas>
+            </div>
+          </div>
+
+          <aside class="card song-note-card">
+            <div class="eyebrow">SELECTED NOTE</div>
+            <div id="songNoSelection" class="voice-empty">Click a note to edit its lyric and timing.</div>
+            <div id="songNoteInspector" hidden>
+              <div id="songSelectedPitch" class="song-big-note">C4</div>
+              <label class="field-label" for="songNoteLyric">Lyric / syllable</label>
+              <input id="songNoteLyric" class="text-input" value="la">
+              <label class="field-label" for="songNotePhones">ARPAbet override <span class="small">(optional)</span></label>
+              <input id="songNotePhones" class="text-input arpabet" placeholder="leave blank for automatic pronunciation">
+              <div id="songNoteAutoPhones" class="codebox" style="margin-top:8px">L AA</div>
+
+              <div class="song-note-numbers">
+                <label class="expression-field"><span>start beat</span><input id="songNoteStart" class="text-input" type="number" min="0" step="0.25"></label>
+                <label class="expression-field"><span>length (beats)</span><input id="songNoteDuration" class="text-input" type="number" min="0.125" step="0.25"></label>
+              </div>
+              <div class="control"><label>note volume <output id="songNoteVelocityVal">100%</output></label><input id="songNoteVelocity" type="range" min="20" max="160" step="1" value="100"></div>
+              <div class="row" style="margin-top:14px">
+                <button id="songNoteAuditionBtn" class="button primary">▶ Audition note</button>
+                <button id="songNoteDuplicateBtn" class="button secondary">Duplicate</button>
+                <button id="songNoteDeleteBtn" class="button danger">Delete</button>
+              </div>
+              <p id="songNoteHint" class="small" style="margin-top:10px"></p>
+            </div>
+          </aside>
+        </div>
+      </section>
+
       <section class="panel" id="tab-voices">
         <div class="two-col">
           <div class="card">
@@ -179,5 +283,6 @@
   <script src="phonemes.js"></script>
   <script src="dsp.js"></script>
   <script src="main.js"></script>
+  <script src="song.js"></script>
 </body>
 </html>
