@@ -13,10 +13,10 @@
       <div>
         <div class="eyebrow">LOCAL CONCATENATIVE SPEECH SYNTH</div>
         <h1><span class="brandmark">▰</span> MAINVOICE SYNTH</h1>
-        <p>Type normal English, pick a voice pack, tweak a few controls, and export WAV. Advanced users can edit the generated ARPAbet directly.</p>
+        <p>Type normal English, pick a voice pack, shape the performance, and export WAV. The expressive renderer adds stress, intonation, rhythm, and phoneme-aware joins without changing the voicebank.</p>
       </div>
       <div class="navlinks">
-        <span class="status-pill">STATIC HOSTED BUILD</span>
+        <a href="mainpack%20setup.html">✎ Build / edit a voice pack</a><span class="status-pill">STATIC HOSTED BUILD</span>
         <span class="status-pill"><span id="statusDot" class="dot"></span><span id="globalStatus">loading</span></span>
       </div>
     </header>
@@ -39,12 +39,49 @@
 
             <div class="controls-grid">
               <div class="control"><label>speed <output id="speedVal">1.00×</output></label><input id="speed" type="range" min="0.55" max="2.2" step="0.01" value="1" /></div>
-              <div class="control"><label>pitch <output id="pitchVal">0 st</output></label><input id="pitch" type="range" min="-8" max="8" step="1" value="0" /></div>
-              <div class="notice" style="grid-column:1/-1"><b>Independent pitch/time:</b> pitch shifting no longer shortens or lengthens phonemes. Speed changes duration without changing pitch.</div>
-              <div class="control"><label>phoneme overlap <output id="overlapVal">22 ms</output></label><input id="overlap" type="range" min="0" max="110" step="1" value="22" /></div>
+              <div class="control"><label>base pitch <output id="pitchVal">0 st</output></label><input id="pitch" type="range" min="-8" max="8" step="1" value="0" /></div>
+              <div class="notice" style="grid-column:1/-1"><b>Independent pitch/time:</b> pitch shifting does not shorten or lengthen phonemes. The expression engine can move pitch per phoneme while speed remains independent.</div>
+              <div class="control"><label>base overlap <output id="overlapVal">22 ms</output></label><input id="overlap" type="range" min="0" max="110" step="1" value="22" /></div>
               <div class="control"><label>word gap <output id="wordGapVal">45 ms</output></label><input id="wordGap" type="range" min="0" max="220" step="5" value="45" /></div>
               <div class="control"><label>punctuation pause <output id="punctGapVal">260 ms</output></label><input id="punctGap" type="range" min="60" max="850" step="10" value="260" /></div>
               <div class="control"><label>output gain <output id="gainVal">0 dB</output></label><input id="gain" type="range" min="-12" max="6" step="1" value="0" /></div>
+            </div>
+
+            <div class="expression-panel">
+              <div class="expression-head">
+                <div>
+                  <div class="eyebrow">EXPRESSION ENGINE</div>
+                  <h3>Make the samples perform the sentence</h3>
+                  <p class="small">Uses dictionary stress, punctuation, phrase shape, vowel timing, smart coarticulation, and tiny repeatable humanization. No voicebank changes needed.</p>
+                </div>
+                <button id="newVariationBtn" class="button secondary">↻ New variation <span id="variationVal">#1</span></button>
+              </div>
+              <div class="expression-grid">
+                <label class="expression-field"><span>performance</span><select id="expressionPreset">
+                  <option value="natural" selected>Natural</option>
+                  <option value="friendly">Friendly</option>
+                  <option value="excited">Excited</option>
+                  <option value="calm">Calm</option>
+                  <option value="dramatic">Dramatic</option>
+                  <option value="storyteller">Storyteller</option>
+                  <option value="deadpan">Deadpan</option>
+                  <option value="neutral">Neutral / almost flat</option>
+                </select></label>
+                <div class="control"><label>expression strength <output id="expressionAmountVal">72%</output></label><input id="expressionAmount" type="range" min="0" max="100" step="1" value="72" /></div>
+                <div class="control"><label>intonation range <output id="intonationVal">100%</output></label><input id="intonation" type="range" min="0" max="200" step="5" value="100" /></div>
+                <div class="control"><label>rhythm / stress timing <output id="rhythmVal">100%</output></label><input id="rhythm" type="range" min="0" max="200" step="5" value="100" /></div>
+                <div class="control"><label>humanize <output id="humanizeVal">18%</output></label><input id="humanize" type="range" min="0" max="100" step="1" value="18" /></div>
+              </div>
+              <div class="expression-toggles">
+                <label><input id="autoStress" type="checkbox" checked /> dictionary stress + content-word rhythm</label>
+                <label><input id="smartOverlap" type="checkbox" checked /> smart phoneme-aware overlap</label>
+                <label><input id="autoPunctuation" type="checkbox" checked /> punctuation + phrase intonation</label>
+              </div>
+              <div class="emphasis-head">
+                <div><b>Word emphasis</b><span>click any word to punch it harder; ALL CAPS is emphasized automatically</span></div>
+                <button id="clearEmphasisBtn" class="button ghost">clear</button>
+              </div>
+              <div id="emphasisWords" class="emphasis-words"><span class="small">Type something above and its words will appear here.</span></div>
             </div>
 
             <div class="transport">
@@ -81,17 +118,19 @@
           </div>
           <div class="card">
             <div class="eyebrow">STATIC SITE</div>
-            <h2>Voice packs bundled at build time</h2>
-            <div class="codebox">This is a static export of MainVoice Synth.
-No server-side code or account is required.
-
-Official voices are bundled by the site owner.
-Your own ZIP can still be tested locally in this browser.</div>
-            <p class="muted">Speech synthesis and WAV export happen in your browser. A ZIP you load for testing is never installed on the site and disappears on refresh.</p>
+            <h2>Official packs + your local test pack</h2>
+            <div class="codebox">hosted/
+├─ main.html
+├─ mainpack setup.html   ← full recorder + waveform editor
+└─ mainvoices/
+   ├─ voices.json
+   └─ official voice folders...</div>
+            <p class="muted">Official packs are bundled into <code>mainvoices/</code> by the site owner. Your own ZIP can be tested or edited entirely in this browser without being uploaded or installed.</p>
             <div class="row">
               <label class="button primary file-button">↥ Test your MainVoice ZIP<input id="browserPackImportVoices" type="file" accept=".zip,application/zip" /></label>
+              <a class="button secondary" href="mainpack%20setup.html">✂ Open pack editor</a>
             </div>
-            <p class="small">Perfect for checking your own pack before sending it to the site owner to be added officially.</p>
+            <p class="small">A browser-loaded ZIP disappears on refresh. The editor can load an old pack, repair waveform timing/clicks, test it, and export a new ZIP.</p>
           </div>
         </div>
       </section>
@@ -135,7 +174,7 @@ Your own ZIP can still be tested locally in this browser.</div>
       </section>
     </main>
 
-    <footer>Static hosted build · synthesis runs in your browser · voice packs are ordinary WAV files + JSON · pronunciation uses bundled CMUdict data</footer>
+    <footer>Static hosted build · expressive prosody runs in your browser · full pack editor included · pronunciation uses bundled CMUdict data</footer>
   </div>
   <script src="phonemes.js"></script>
   <script src="dsp.js"></script>

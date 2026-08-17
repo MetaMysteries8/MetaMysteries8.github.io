@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>MainPack Setup — MainVoice Synth</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">MAINVOICE / VOICE PACK BUILDER</div>
+        <h1><span class="brandmark">▰</span> MAINPACK SETUP</h1>
+        <p>This full recorder + waveform editor runs in your browser. Build a new voice or load an existing MainVoice ZIP, repair it, test it, and export it again.</p>
+      </div>
+      <div class="navlinks">
+        <a href="main.html">← Main synthesizer</a>
+        <span class="status-pill"><span id="statusDot" class="dot"></span><span id="globalStatus">ready</span></span>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="guide">1. Guided recording</button>
+      <button class="tab" data-tab="bank">2. Check bank</button>
+      <button class="tab" data-tab="details">3. Pack details</button>
+      <button class="tab" data-tab="test">4. Test voice</button>
+      <button class="tab" data-tab="export">5. Export ZIP</button>
+    </nav>
+
+    <main>
+      <section class="panel active" id="tab-guide">
+        <div class="guide-layout">
+          <aside class="card progress-card">
+            <div class="eyebrow">RECORDING PROGRESS</div>
+            <div class="progress-ring" id="progressRing"><span id="progressNumber">0/39</span></div>
+            <div class="progress-bar"><i id="progressBar"></i></div>
+            <p class="muted" id="progressText">Record each sound once. You can redo any take.</p>
+            <div class="stack">
+              <label class="button primary file-button">↥ Load previous MainPack ZIP<input id="packImport" type="file" accept=".zip,application/zip" /></label>
+              <button id="firstMissingBtn" class="button secondary">Jump to first missing</button>
+              <button id="clearAllBtn" class="button danger ghost">Clear all recordings</button>
+            </div>
+            <div id="importStatus" class="notice" style="margin-top:16px"><b>Continuing an old pack?</b> Load a ZIP exported by this builder. It restores the pack details and every WAV so you can re-record only the sounds you dislike.</div>
+            <div class="notice" style="margin-top:10px"><b>You do not need to know ARPAbet.</b> The giant code is just the internal label. Follow the example word and the pronunciation hint.</div>
+          </aside>
+
+          <section class="card guide-card">
+            <div class="guide-head">
+              <div>
+                <div class="eyebrow">CURRENT SOUND <span id="phonemeIndex">1 / 39</span></div>
+                <div class="phoneme-code" id="guideCode">IY</div>
+              </div>
+              <div class="state-badge missing" id="guideState">MISSING</div>
+            </div>
+
+            <div class="example-line">
+              <span>Find it in</span>
+              <strong id="guideWord">see</strong>
+              <button id="hearWordBtn" class="button secondary">▶ Hear example word</button>
+            </div>
+
+            <div class="instruction" id="guideInstruction"></div>
+            <div class="pronounce-note" id="guideNote"></div>
+
+            <div class="record-zone">
+              <div class="meter" id="meter"><i></i></div>
+              <div class="row" style="justify-content:center">
+                <button id="recordBtn" class="button primary big">● Record this sound</button>
+                <button id="stopRecordBtn" class="button secondary big" disabled>■ Stop</button>
+              </div>
+              <div class="small" style="margin:10px 0">or</div>
+              <label class="button secondary file-button">Upload a take<input id="sampleUpload" type="file" accept="audio/*,.wav,.mp3,.m4a,.ogg,.opus,.webm,.flac" /></label>
+              <p class="small">Use your normal speaking voice. Record only the target sound when possible. Stops like P/T/K cannot be held; one tiny release is exactly what we want.</p>
+            </div>
+
+            <div id="takeArea" class="take-area hidden">
+              <div id="waveInfo" class="small" style="margin-bottom:10px">sample ready</div>
+              <div class="row">
+                <button id="playTakeBtn" class="button secondary">▶ Play saved take</button>
+                <button id="editTakeBtn" class="button primary">✂ Edit waveform</button>
+                <button id="redoBtn" class="button secondary">↻ Re-record</button>
+                <button id="deleteTakeBtn" class="button danger ghost">Delete take</button>
+              </div>
+            </div>
+
+            <div id="audioEditorPanel" class="audio-editor hidden">
+              <div class="audio-editor-head">
+                <div>
+                  <div class="eyebrow">PHONEME AUDIO EDITOR</div>
+                  <h3><span id="editorCode">IY</span> waveform</h3>
+                </div>
+                <button id="closeEditorBtn" class="button secondary">Close editor</button>
+              </div>
+
+              <p class="small">Drag the orange start/end handles to keep only the useful sound. This is ideal for chopping off mouse clicks. Double-click the waveform to place the purple click-repair cursor if a click is stuck in the middle.</p>
+              <div class="wave-editor-wrap">
+                <canvas id="waveEditorCanvas" width="1200" height="240" aria-label="Editable phoneme waveform"></canvas>
+              </div>
+              <div class="wave-timeline">
+                <span>0 ms</span><strong id="editorSelectionInfo">selection</strong><span id="editorTotalTime">0 ms</span>
+              </div>
+
+              <div class="editor-grid">
+                <div class="control">
+                  <label>start trim <output id="editorStartVal">0 ms</output></label>
+                  <input id="editorStart" type="range" min="0" max="1000" step="1" value="0" />
+                </div>
+                <div class="control">
+                  <label>end trim <output id="editorEndVal">0 ms</output></label>
+                  <input id="editorEnd" type="range" min="0" max="1000" step="1" value="1000" />
+                </div>
+                <div class="control">
+                  <label>fade in <output id="editorFadeInVal">6 ms</output></label>
+                  <input id="editorFadeIn" type="range" min="0" max="30" step="1" value="6" />
+                </div>
+                <div class="control">
+                  <label>fade out <output id="editorFadeOutVal">6 ms</output></label>
+                  <input id="editorFadeOut" type="range" min="0" max="30" step="1" value="6" />
+                </div>
+              </div>
+
+              <div class="editor-options">
+                <label><input id="editorSnapZero" type="checkbox" checked /> snap saved trims to nearby zero crossings</label>
+                <span id="editorRecommendation" class="small"></span>
+              </div>
+
+              <div class="click-repair-row">
+                <div>
+                  <b>Middle-click repair</b>
+                  <div class="small">Double-click a click/spike in the waveform, then remove a tiny slice around it and crossfade the gap.</div>
+                </div>
+                <label class="compact-label">repair width
+                  <select id="editorRepairWidth">
+                    <option value="4">4 ms</option>
+                    <option value="8">8 ms</option>
+                    <option value="12" selected>12 ms</option>
+                    <option value="18">18 ms</option>
+                    <option value="24">24 ms</option>
+                    <option value="30">30 ms</option>
+                  </select>
+                </label>
+                <button id="healClickBtn" class="button secondary" disabled>Heal click at cursor</button>
+              </div>
+
+              <div class="row editor-actions">
+                <button id="previewEditBtn" class="button primary">▶ Preview edited selection</button>
+                <button id="previewRawBtn" class="button secondary">▶ Play current raw sample</button>
+                <button id="resetEditBtn" class="button secondary">Reset handles</button>
+                <button id="undoAudioEditBtn" class="button secondary" disabled>↶ Undo last saved edit</button>
+                <button id="saveAudioEditBtn" class="button primary">Save edited sample</button>
+              </div>
+              <div id="editorStatus" class="notice" style="margin-top:12px"><b>Non-destructive until you press Save.</b> Preview as much as you want first.</div>
+            </div>
+
+            <div class="guide-nav">
+              <button id="prevBtn" class="button secondary">← Previous</button>
+              <button id="nextBtn" class="button primary">Next →</button>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="panel" id="tab-bank">
+        <div class="card">
+          <div class="section-head">
+            <div><div class="eyebrow">AUDITION / FIX</div><h2>All 39 phonemes</h2></div>
+            <div class="bank-tools">
+              <input id="bankSearch" class="search" placeholder="code or example…" />
+              <select id="bankFilter">
+                <option value="all">all sounds</option><option value="recorded">recorded</option><option value="missing">missing</option><option value="vowel">vowels</option><option value="consonant">consonants</option>
+              </select>
+            </div>
+          </div>
+          <div id="bankGrid" class="bank-grid"></div>
+          <p class="small">Click a tile to jump back to its recording guide. Green tiles have a saved take.</p>
+        </div>
+      </section>
+
+      <section class="panel" id="tab-details">
+        <div class="two-col">
+          <div class="card">
+            <div class="eyebrow">PACK IDENTITY</div>
+            <h2>What should this voice be called?</h2>
+            <label class="field-label" for="voiceName">Voice name</label>
+            <input id="voiceName" class="text-input" maxlength="80" value="My Voice" />
+            <label class="field-label" for="voiceAuthor">Creator / credit</label>
+            <input id="voiceAuthor" class="text-input" maxlength="80" placeholder="optional" />
+            <label class="field-label" for="voiceDescription">Description</label>
+            <textarea id="voiceDescription" maxlength="400" placeholder="What is this voice pack?"></textarea>
+            <label class="field-label" for="voiceIntro">Intro sentence</label>
+            <textarea id="voiceIntro" maxlength="280" placeholder="Hello! This is my custom voice.">Hello! This is my custom voice.</textarea>
+            <p class="small">This becomes the default text whenever somebody selects the voice in the main synth.</p>
+            <div class="mini-fields">
+              <div>
+                <label class="field-label" for="voiceIcon">Icon / emoji</label>
+                <input id="voiceIcon" class="text-input" maxlength="12" placeholder="🎙️" />
+              </div>
+              <div>
+                <label class="field-label" for="voiceTags">Tags</label>
+                <input id="voiceTags" class="text-input" maxlength="140" placeholder="retro, goofy, bright" />
+              </div>
+            </div>
+            <p class="small">Tags are comma-separated and purely descriptive. They show up in the voice library.</p>
+
+            <div class="character-art-editor">
+              <div class="eyebrow">CHARACTER ART</div>
+              <h3>Give the voice a little character card</h3>
+              <p class="muted">Optional. Upload an image or doodle one right here. It is resized into a transparent-friendly 512×512 PNG and packed as <code>character.png</code>.</p>
+              <div class="character-art-layout">
+                <div class="character-art-preview-wrap">
+                  <img id="characterArtPreview" class="character-art-preview hidden" alt="Character art preview" />
+                  <div id="characterArtEmpty" class="character-art-empty">no character art yet</div>
+                </div>
+                <div class="stack">
+                  <label class="button secondary file-button">↥ Upload character art<input id="characterArtUpload" type="file" accept="image/png,image/jpeg,image/webp,image/gif" /></label>
+                  <button id="openDoodleBtn" class="button primary">✎ Draw character art</button>
+                  <button id="clearCharacterArtBtn" class="button danger ghost">Remove character art</button>
+                  <p class="small">Transparent PNGs work great. The hosted synth shows this in the little box under the voice selector and in the voice library.</p>
+                </div>
+              </div>
+
+              <div id="doodlePanel" class="doodle-panel hidden">
+                <div class="section-head">
+                  <div><div class="eyebrow">TINY DOODLE PAD</div><h3>Draw the voice gremlin</h3></div>
+                  <button id="doodleEraserBtn" class="button secondary">Eraser: off</button>
+                </div>
+                <div class="doodle-toolbar">
+                  <label>ink <input id="doodleColor" type="color" value="#ffffff" /></label>
+                  <label>brush <input id="doodleSize" type="range" min="2" max="64" step="1" value="12" /></label>
+                  <button id="doodleClearBtn" class="button secondary">Clear canvas</button>
+                  <button id="saveDoodleBtn" class="button primary">✓ Use this drawing</button>
+                </div>
+                <div class="doodle-stage"><canvas id="doodleCanvas" width="512" height="512"></canvas></div>
+                <p class="small">The checkerboard is only the editor background; erased areas stay transparent in the exported PNG.</p>
+              </div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="eyebrow">DEFAULT SYNTH SETTINGS</div>
+            <h2>How should the main app start?</h2>
+            <div class="controls-grid">
+              <div class="control"><label>speed <output id="defSpeedVal">1.00×</output></label><input id="defSpeed" type="range" min="0.55" max="2" step="0.01" value="1" /></div>
+              <div class="control"><label>overlap <output id="defOverlapVal">22 ms</output></label><input id="defOverlap" type="range" min="0" max="100" step="1" value="22" /></div>
+              <div class="control"><label>word gap <output id="defWordGapVal">45 ms</output></label><input id="defWordGap" type="range" min="0" max="200" step="5" value="45" /></div>
+              <div class="control"><label>voice pitch <output id="defPitchVal">0 st</output></label><input id="defPitch" type="range" min="-8" max="8" step="1" value="0" /></div>
+              <div class="notice" style="grid-column:1/-1"><b>Pitch-safe timing:</b> changing pitch keeps each sample at the same speech duration. Only the speed control changes duration.</div>
+            </div>
+            <div class="notice">These are just defaults stored in <code>voice.json</code>. Anyone using the voice can still change the controls in the main synthesizer.</div>
+          </div>
+        </div>
+      </section>
+
+
+      <section class="panel" id="tab-test">
+        <div class="two-col">
+          <div class="card test-card">
+            <div class="eyebrow">QUICK VIBE CHECK</div>
+            <h2>Hello world ↗</h2>
+            <p class="muted">A short intelligibility test with a gentle rising pitch across the phrase. It uses your current pack defaults, then rises about three semitones from start to finish.</p>
+            <div class="codebox">HH AH L OW / W ER L D</div>
+            <div class="transport">
+              <button id="testHelloBtn" class="button primary big">▶ Diagnostic hello world</button>
+              <button id="stopTestBtn" class="button secondary">■ Stop</button>
+            </div>
+            <div id="helloTestStatus" class="notice" style="margin-top:14px">Checking the phonemes needed for this test…</div>
+          </div>
+          <div class="card test-card">
+            <div class="eyebrow">PRONUNCIATION CHECK</div>
+            <h2>The quick brown fox jumped over the lazy dog</h2>
+            <p class="muted">This longer test hits a broad mix of vowels, consonants, stops, fricatives, and transitions so obvious bad takes are much easier to hear.</p>
+            <div class="codebox">DH AH / K W IH K / B R AW N / F AA K S / JH AH M P T / OW V ER / DH AH / L EY Z IY / D AO G</div>
+            <div class="transport">
+              <button id="testFoxBtn" class="button primary big">▶ Diagnostic pronunciation test</button>
+              <button id="fixSoundsBtn" class="button secondary">← Go fix phonemes</button>
+            </div>
+            <div id="foxTestStatus" class="notice" style="margin-top:14px">Checking the phonemes needed for this test…</div>
+          </div>
+        </div>
+        <div class="card continuous-card" style="margin-top:18px">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow">CONTINUOUS SPEECH / OVERLAP TUNER</div>
+              <h2>Now make the samples actually talk</h2>
+            </div>
+            <div class="continuous-badge">speech mode</div>
+          </div>
+          <p class="muted">The tests above are useful for noticing a bad individual take. This mode trims long recordings down to speech-sized chunks and crossfades neighboring phonemes, so you can hear how the bank behaves when it is actually speaking.</p>
+          <div class="continuous-controls">
+            <div class="control">
+              <label>phoneme overlap <output id="continuousOverlapVal">22 ms</output></label>
+              <input id="continuousOverlap" type="range" min="0" max="120" step="1" value="22" />
+              <p class="small">This is linked to the pack's default overlap. Drag it, replay, and stop when the sentence sounds the least choppy without turning mushy.</p>
+            </div>
+          </div>
+          <div class="transport">
+            <button id="continuousHelloBtn" class="button primary big">▶ Continuous hello world ↗</button>
+            <button id="continuousFoxBtn" class="button primary big">▶ Continuous quick brown fox</button>
+            <button id="stopContinuousBtn" class="button secondary">■ Stop</button>
+          </div>
+          <div id="continuousTestStatus" class="notice" style="margin-top:14px">Complete the phonemes needed by a sentence, then run it here.</div>
+          <div class="analysis-strip">
+            <span class="chip">0–15 ms = crisp / choppy</span>
+            <span class="chip">20–40 ms = good starting zone</span>
+            <span class="chip">50+ ms = smoother / may smear consonants</span>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:18px">
+          <div class="section-head">
+            <div><div class="eyebrow">IF SOMETHING SOUNDS WRONG</div><h2>Jump straight back and repair it</h2></div>
+            <button id="testToBankBtn" class="button secondary">Open phoneme bank →</button>
+          </div>
+          <p class="muted">Listen for a sound that is too quiet, clipped, buzzy, or obviously the wrong phoneme. Open the bank, click that phoneme, re-record it, then return here and replay the same test. Exporting does not lock the pack — you can import the ZIP again later and keep editing it.</p>
+          <div id="testPhonemeButtons" class="bank-audition"></div>
+          <p class="small">These are the phonemes used by the two tests. Click one to jump directly to its recording screen; Alt+click auditions the raw saved sample.</p>
+        </div>
+      </section>
+
+      <section class="panel" id="tab-export">
+        <div class="two-col">
+          <div class="card">
+            <div class="eyebrow">EXPORT MAINVOICE</div>
+            <h2>Make the installable ZIP</h2>
+            <div id="exportStatus" class="notice">Record all 39 sounds first.</div>
+            <p class="small">Tip: run both tests in <b>4. Test voice</b> before exporting. If you later notice a bad phoneme, just load this ZIP back into MainPack Setup and redo it.</p>
+            <div class="divider"></div>
+            <button id="exportZipBtn" class="button primary big">↓ Export mainvoice ZIP</button>
+            <p class="small">The ZIP contains one folder with <code>voice.json</code> and a <code>samples/</code> directory. No recordings leave your browser.</p>
+          </div>
+          <div class="card">
+            <div class="eyebrow">USE / PUBLISH IT</div>
+            <h2>Test now or add it to an official build</h2>
+            <div class="codebox">STATIC HOSTED SITE
+├─ main.html
+├─ mainpack setup.html   ← this editor
+└─ mainvoices/
+   ├─ voices.json
+   └─ official-voice-folders/</div>
+            <p class="muted">To test your export immediately, return to the synthesizer and use <b>Test a MainVoice ZIP</b>. To publish it as an official bundled voice, put the inner folder into the source project’s <code>mainvoices/</code> folder and run <code>build-static.bat</code> again so <code>voices.json</code> is regenerated.</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>Static browser editor · recordings stay in this browser until export · 39-phoneme ARPAbet voicebank</footer>
+  </div>
+  <script src="phonemes.js"></script>
+  <script src="dsp.js"></script>
+  <script src="setup.js"></script>
+</body>
+</html>
