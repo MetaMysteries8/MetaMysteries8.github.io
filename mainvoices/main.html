@@ -16,7 +16,7 @@
         <p>Type normal English, pick a voice pack, shape the performance, and export WAV. The expressive renderer adds stress, intonation, rhythm, and phoneme-aware joins without changing the voicebank.</p>
       </div>
       <div class="navlinks">
-        <a href="mainpack%20setup.html">✎ Build / edit a voice pack</a><span class="status-pill">STATIC HOSTED BUILD</span>
+        <a href="mainpack%20setup.html">+ Build a voice pack</a>
         <span class="status-pill"><span id="statusDot" class="dot"></span><span id="globalStatus">loading</span></span>
       </div>
     </header>
@@ -24,6 +24,7 @@
     <nav class="tabs">
       <button class="tab active" data-tab="synth">Synthesizer</button>
       <button class="tab" data-tab="song">Song editor</button>
+      <button class="tab" data-tab="conversation">Conversation Studio</button>
       <button class="tab" data-tab="voices">Voices</button>
       <button class="tab" data-tab="bank">Phoneme bank</button>
       <button class="tab" data-tab="advanced">Advanced pronunciation</button>
@@ -239,28 +240,105 @@
         </div>
       </section>
 
+      <section class="panel" id="tab-conversation">
+        <div class="conversation-shell">
+          <div class="card conversation-commandbar">
+            <div>
+              <div class="eyebrow">MULTI-VOICE DIALOGUE WORKSPACE</div>
+              <h2>Conversation Studio</h2>
+              <p class="muted">Build conversations from any installed or browser-loaded MainVoice. Give every line its own speaker, delivery, pitch, speed, stereo position, and timing — including interruptions and overlapping speech.</p>
+            </div>
+            <div class="conversation-transport">
+              <button id="convPlayBtn" class="button primary big">▶ Play all</button>
+              <button id="convStopBtn" class="button secondary">■ Stop</button>
+              <button id="convExportBtn" class="button secondary">↓ Stereo WAV</button>
+            </div>
+          </div>
+
+          <div class="conversation-layout">
+            <div class="conversation-main">
+              <div class="card conversation-projectbar">
+                <div class="conversation-project-fields">
+                  <label class="mini-field grow">Project title<input id="convTitle" class="text-input" value="Untitled Conversation"></label>
+                  <label class="mini-field">Default gap (ms)<input id="convDefaultGap" class="number-input" type="number" min="-1200" max="5000" step="25" value="260"></label>
+                  <label class="mini-field">Master gain (dB)<input id="convMasterGain" class="number-input" type="number" min="-18" max="6" step="1" value="0"></label>
+                </div>
+                <div class="row wrap conversation-project-actions">
+                  <button id="convAddLineBtn" class="button primary">+ Add line</button>
+                  <button id="convAlternateBtn" class="button secondary">⇄ Alternate voices</button>
+                  <button id="convDemoBtn" class="button secondary">Load demo</button>
+                  <button id="convSaveBtn" class="button secondary">↓ Save project</button>
+                  <label class="button secondary file-button">↥ Load project<input id="convLoadInput" type="file" accept=".json,.mainvoice-conversation.json,application/json"></label>
+                  <button id="convClearBtn" class="button danger">Clear</button>
+                </div>
+              </div>
+
+              <div id="convTimeline" class="conversation-timeline"></div>
+              <div id="convEmpty" class="card conversation-empty">
+                <div class="conversation-empty-icon">☏</div>
+                <h3>No dialogue yet</h3>
+                <p class="muted">Add a line, paste a script, or load the demo. Each line can use a completely different MainVoice.</p>
+                <button id="convEmptyAddBtn" class="button primary">+ Add first line</button>
+              </div>
+              <div id="convMessage" class="small conversation-message" aria-live="polite"></div>
+            </div>
+
+            <aside class="conversation-sidebar">
+              <div class="card">
+                <div class="eyebrow">SCRIPT IMPORTER</div>
+                <h3>Paste a conversation</h3>
+                <p class="small">One line per message. Use <code>Voice Name: dialogue</code> to choose a speaker, or omit the name and alternate available voices automatically.</p>
+                <textarea id="convScriptImport" class="conversation-script" placeholder="Doxi: bro what did you do\nSol: I have absolutely no idea.\nDoxi: that is not reassuring"></textarea>
+                <div class="row wrap">
+                  <button id="convImportScriptBtn" class="button primary">Import script</button>
+                  <button id="convAppendScriptBtn" class="button secondary">Append</button>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="eyebrow">LIVE CHAT PREVIEW</div>
+                <h3>Transcript</h3>
+                <div id="convChatPreview" class="conversation-chat-preview"></div>
+              </div>
+
+              <div class="card conversation-tips">
+                <div class="eyebrow">TIMING TRICKS</div>
+                <h3>Make it feel conversational</h3>
+                <div class="stack small">
+                  <div><b>Pause after:</b> positive values leave silence before the next line.</div>
+                  <div><b>Interrupt:</b> use a negative pause, like <code>-300 ms</code>, so the next speaker starts early.</div>
+                  <div><b>Pan:</b> slightly separate speakers in stereo without making them sound hard-left/right.</div>
+                  <div><b>Expression:</b> punctuation still matters — <code>?</code>, <code>!</code>, commas, and ellipses shape the delivery.</div>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </section>
+
       <section class="panel" id="tab-voices">
         <div class="two-col">
           <div class="card">
-            <div class="eyebrow">PUBLIC VOICE LIBRARY</div>
-            <h2>Available voice packs</h2>
+            <div class="eyebrow">MAINVOICES FOLDER</div>
+            <h2>Installed voice packs</h2>
             <div id="voiceList" class="voice-list"></div>
           </div>
           <div class="card">
-            <div class="eyebrow">STATIC SITE</div>
-            <h2>Official packs + your local test pack</h2>
-            <div class="codebox">hosted/
-├─ main.html
-├─ mainpack setup.html   ← full recorder + waveform editor
-└─ mainvoices/
-   ├─ voices.json
-   └─ official voice folders...</div>
-            <p class="muted">Official packs are bundled into <code>mainvoices/</code> by the site owner. Your own ZIP can be tested or edited entirely in this browser without being uploaded or installed.</p>
+            <div class="eyebrow">HOW VOICES APPEAR HERE</div>
+            <h2>Drop in a folder, refresh</h2>
+            <div class="codebox">mainvoices/
+└─ doxi/
+   ├─ voice.json
+   └─ samples/
+      ├─ IY.wav
+      ├─ IH.wav
+      └─ ...</div>
+            <p class="muted">The included <code>server.py</code> scans <code>mainvoices/</code>. That is why you do not have to manually edit a manifest every time you add a voice.</p>
             <div class="row">
-              <label class="button primary file-button">↥ Test your MainVoice ZIP<input id="browserPackImportVoices" type="file" accept=".zip,application/zip" /></label>
-              <a class="button secondary" href="mainpack%20setup.html">✂ Open pack editor</a>
+              <a class="button primary" href="mainpack%20setup.html">Open MainPack Setup</a>
+              <label class="button secondary file-button">↥ Test a ZIP here<input id="browserPackImportVoices" type="file" accept=".zip,application/zip" /></label>
             </div>
-            <p class="small">A browser-loaded ZIP disappears on refresh. The editor can load an old pack, repair waveform timing/clicks, test it, and export a new ZIP.</p>
+            <p class="small">Browser-loaded ZIPs are temporary test voices. Refreshing the page removes them; installed voices are unchanged.</p>
           </div>
         </div>
       </section>
@@ -304,11 +382,12 @@
       </section>
     </main>
 
-    <footer>Static hosted build · expressive prosody runs in your browser · full pack editor included · pronunciation uses bundled CMUdict data</footer>
+    <footer>Runs locally · expressive prosody happens in the browser · voice folders stay ordinary WAV files + JSON · normal-text pronunciation uses bundled CMUdict data</footer>
   </div>
   <script src="phonemes.js"></script>
   <script src="dsp.js"></script>
   <script src="main.js"></script>
   <script src="song.js"></script>
+  <script src="conversation.js"></script>
 </body>
 </html>
