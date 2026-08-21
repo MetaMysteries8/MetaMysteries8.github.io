@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="dark" />
   <title>MainVoice Synth</title>
-  <link rel="stylesheet" href="style.css?v=20260817-qol-v3" />
+  <link rel="stylesheet" href="style.css?v=20260821-qol-v6" />
 </head>
 <body>
   <div class="shell">
@@ -17,6 +17,7 @@
       </div>
       <div class="navlinks">
         <a href="mainpack%20setup.html">✎ Build / edit a voice pack</a><span class="status-pill">STATIC HOSTED BUILD</span>
+        <a href="agentpatch.html">◆ AgentPatch</a>
         <span class="status-pill"><span id="statusDot" class="dot"></span><span id="globalStatus">loading</span></span>
       </div>
     </header>
@@ -86,6 +87,14 @@
               <div id="emphasisWords" class="emphasis-words"><span class="small">Type something above and its words will appear here.</span></div>
             </div>
 
+            <div class="synth-preset-strip">
+              <div class="synth-preset-copy"><div class="eyebrow">QUICK SETUPS</div><span class="small">Save the entire delivery setup — timing, pitch, overlap, expression, and humanize — as one reusable browser preset.</span></div>
+              <select id="synthPresetSelect" title="Saved synth setup"><option value="">Choose a synth setup…</option></select>
+              <button id="synthPresetApplyBtn" class="button secondary">Apply</button>
+              <button id="synthPresetSaveBtn" class="button secondary">+ Save current</button>
+              <button id="synthPresetDeleteBtn" class="button danger">Delete</button>
+            </div>
+
             <div class="transport">
               <button id="speakBtn" class="button primary big">▶ Speak</button>
               <button id="stopBtn" class="button secondary">■ Stop</button>
@@ -153,7 +162,7 @@
                 <span class="continuous-badge">VOICE DAW</span>
               </div>
               <div class="song-settings-grid daw-settings-grid">
-                <label class="expression-field"><span>voice</span><select id="songVoiceSelect"><option>Loading voices…</option></select></label>
+                <label class="expression-field"><span>active track singer</span><select id="songVoiceSelect"><option>Loading voices…</option></select></label>
                 <label class="expression-field"><span>tempo (BPM)</span><input id="songBpm" class="text-input" type="number" min="30" max="300" step="1" value="120"></label>
                 <label class="expression-field"><span>song length</span><select id="songBars"><option value="4">4 bars</option><option value="8" selected>8 bars</option><option value="16">16 bars</option><option value="32">32 bars</option><option value="64">64 bars</option></select></label>
                 <label class="expression-field"><span>snap</span><select id="songSnap"><option value="1">quarter</option><option value="0.5">eighth</option><option value="0.25" selected>sixteenth</option><option value="0.125">thirty-second</option></select></label>
@@ -168,6 +177,7 @@
               </div>
               <div class="daw-loop-row">
                 <label class="check"><input id="songLoop" type="checkbox"> loop playback</label>
+                 <label class="check"><input id="songFollowPlayhead" type="checkbox" checked> follow playhead</label>
                 <label>from <input id="songLoopStart" class="mini-number" type="number" min="0" step="0.25" value="0"></label>
                 <label>to <input id="songLoopEnd" class="mini-number" type="number" min="0.25" step="0.25" value="8"></label>
                 <span class="small">Click the ruler to move the playback cursor.</span>
@@ -197,9 +207,9 @@
           </div>
 
           <div class="daw-track-rack card">
-            <div class="section-head tight"><div><div class="eyebrow">VOCAL LAYERS</div><h2>Tracks</h2></div><div class="row"><button id="songAddTrackBtn" class="button secondary small-button">+ Add track</button><button id="songRenameTrackBtn" class="button secondary small-button">Rename</button><button id="songRemoveTrackBtn" class="button danger small-button">Remove</button></div></div>
+            <div class="section-head tight"><div><div class="eyebrow">VOCAL LAYERS</div><h2>Tracks</h2></div><div class="row"><button id="songAddTrackBtn" class="button secondary small-button">+ Add track</button><button id="songDuplicateTrackBtn" class="button secondary small-button">Duplicate track</button><button id="songRenameTrackBtn" class="button secondary small-button">Rename</button><button id="songRemoveTrackBtn" class="button danger small-button">Remove</button></div></div>
             <div id="songTrackList" class="daw-track-list"></div>
-            <p class="small">Tracks share the selected MainVoice but have independent volume, pan, mute, and solo. Use them for harmonies, doubles, call-and-response, or chaos.</p>
+            <p class="small">Each track can use its own MainVoice, plus independent volume, pan, mute, and solo. Use this for duets, harmonies, doubles, call-and-response, or chaos.</p>
           </div>
 
           <div class="song-editor-grid daw-editor-grid">
@@ -312,6 +322,20 @@
                 <div id="convChatPreview" class="conversation-chat-preview"></div>
               </div>
 
+              <div class="card">
+                <div class="eyebrow">SPEAKER TOOLS</div>
+                <h3>Replace or swap a speaker</h3>
+                <p class="small">Useful after importing a long script or when you decide a character should use a different voice.</p>
+                <div class="speaker-swap-grid">
+                  <label class="mini-field">From<select id="convReplaceFrom" class="text-input"></select></label>
+                  <label class="mini-field">To<select id="convReplaceTo" class="text-input"></select></label>
+                </div>
+                <div class="row wrap" style="margin-top:10px">
+                  <button id="convReplaceSpeakerBtn" class="button secondary">Replace all</button>
+                  <button id="convSwapSpeakersBtn" class="button secondary">⇄ Swap</button>
+                </div>
+              </div>
+
               <div class="card conversation-tips">
                 <div class="eyebrow">TIMING TRICKS</div>
                 <h3>Make it feel conversational</h3>
@@ -332,6 +356,7 @@
           <div class="card">
             <div class="eyebrow">PUBLIC VOICE LIBRARY</div>
             <h2>Available voice packs</h2>
+            <input id="voiceSearch" class="search" placeholder="search name, author, tag…" style="margin-bottom:10px" />
             <div id="voiceList" class="voice-list"></div>
           </div>
           <div class="card">
@@ -347,6 +372,7 @@
             <div class="row">
               <label class="button primary file-button">↥ Test your MainVoice ZIP<input id="browserPackImportVoices" type="file" accept=".zip,application/zip" /></label>
               <a class="button secondary" href="mainpack%20setup.html">✂ Open pack editor</a>
+              <a class="button secondary" href="agentpatch.html">◆ AgentPatch</a>
             </div>
             <p class="small">A browser-loaded ZIP disappears on refresh. The editor can load an old pack, repair waveform timing/clicks, test it, and export a new ZIP.</p>
           </div>
@@ -396,8 +422,8 @@
   </div>
   <script src="phonemes.js"></script>
   <script src="dsp.js"></script>
-  <script src="main.js?v=20260817-qol-v3"></script>
-  <script src="song.js?v=20260817-qol-v3"></script>
-  <script src="conversation.js?v=20260817-qol-v3"></script>
+  <script src="main.js?v=20260821-qol-v6"></script>
+  <script src="song.js?v=20260821-qol-v6"></script>
+  <script src="conversation.js?v=20260821-qol-v6"></script>
 </body>
 </html>

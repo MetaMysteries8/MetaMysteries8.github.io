@@ -36,10 +36,12 @@
     return await new Promise((res,rej)=>{const u=URL.createObjectURL(blob),im=new Image();im.onload=()=>{URL.revokeObjectURL(u);res(im)};im.onerror=()=>{URL.revokeObjectURL(u);rej(new Error('I could not decode that image.'))};im.src=u});
   }
   async function normalizeCharacterArt(blob){
+    const name=String(blob?.name||'').toLowerCase(),isSvg=blob?.type==='image/svg+xml'||name.endsWith('.svg');
+    if(isSvg){const text=await blob.text();if(!/<svg[\s>]/i.test(text))throw new Error('That file does not appear to contain SVG artwork.');return {bytes:await blob.arrayBuffer(),mime:'image/svg+xml',fileName:'character.svg',updated:Date.now()}}
     const image=await decodeImage(blob),w=image.width||image.naturalWidth,h=image.height||image.naturalHeight;if(!w||!h)throw new Error('That image has no usable size.');
     const c=document.createElement('canvas');c.width=c.height=512;const x=c.getContext('2d');x.clearRect(0,0,512,512);x.imageSmoothingEnabled=true;x.imageSmoothingQuality='high';const scale=Math.min(512/w,512/h),dw=w*scale,dh=h*scale;x.drawImage(image,(512-dw)/2,(512-dh)/2,dw,dh);if(image.close)image.close();
     const out=await new Promise((res,rej)=>c.toBlob(b=>b?res(b):rej(new Error('Could not encode character art.')),'image/png'));
-    return {bytes:await out.arrayBuffer(),mime:'image/png',width:512,height:512,updated:Date.now()};
+    return {bytes:await out.arrayBuffer(),mime:'image/png',fileName:'character.png',width:512,height:512,updated:Date.now()};
   }
   async function saveCharacterArt(item){state.art=item;try{await dbPut('art',item)}catch(e){console.warn(e)}renderCharacterArt();saveMeta()}
   async function handleCharacterArtUpload(file){if(!file)return;setStatus('processing character art','busy');try{await saveCharacterArt(await normalizeCharacterArt(file));setStatus('character art saved')}catch(e){setStatus('art failed','bad');alert(e.message)}finally{$('characterArtUpload').value=''}}
@@ -58,7 +60,7 @@
     $('doodlePanel').scrollIntoView({behavior:'smooth',block:'nearest'});
   }
   function clearDoodle(){const c=$('doodleCanvas');c.getContext('2d').clearRect(0,0,c.width,c.height)}
-  async function saveDoodle(){const c=$('doodleCanvas'),blob=await new Promise((res,rej)=>c.toBlob(b=>b?res(b):rej(new Error('Could not save drawing.')),'image/png'));await saveCharacterArt({bytes:await blob.arrayBuffer(),mime:'image/png',width:512,height:512,updated:Date.now()});$('doodlePanel').classList.add('hidden');setStatus('drawing saved')}
+  async function saveDoodle(){const c=$('doodleCanvas'),blob=await new Promise((res,rej)=>c.toBlob(b=>b?res(b):rej(new Error('Could not save drawing.')),'image/png'));await saveCharacterArt({bytes:await blob.arrayBuffer(),mime:'image/png',fileName:'character.png',width:512,height:512,updated:Date.now()});$('doodlePanel').classList.add('hidden');setStatus('drawing saved')}
 
   function encodeWav(samples,sampleRate){
     const ab=new ArrayBuffer(44+samples.length*2),dv=new DataView(ab);const put=(o,s)=>{for(let i=0;i<s.length;i++)dv.setUint8(o+i,s.charCodeAt(i))};
@@ -265,8 +267,8 @@
       const entries=await readZipEntries(file),voicePath=[...entries.keys()].find(n=>/(^|\/)voice\.json$/i.test(n));if(!voicePath)throw new Error('I could not find voice.json inside that ZIP. Choose a MainVoice pack ZIP, not the whole app ZIP.');
       const meta=JSON.parse(new TextDecoder().decode(entries.get(voicePath))),prefix=voicePath.slice(0,-'voice.json'.length),imported=new Map();
       for(const ph of P){const key=[...entries.keys()].find(n=>n.toLowerCase()===(prefix+'samples/'+ph.c+'.wav').toLowerCase());if(!key)continue;const u8=entries.get(key),wav=u8.slice().buffer,buf=await getAudioCtx().decodeAudioData(wav.slice(0));imported.set(ph.c,{wav,duration:buf.duration,sampleRate:buf.sampleRate,updated:Date.now()})}
-      let importedArt=null;const artCandidates=[meta.artFile,'character.png','character.webp','character.jpg','art.png'].filter(Boolean).map(x=>String(x).replace(/^\/+/,''));
-      for(const artName of artCandidates){const key=[...entries.keys()].find(n=>n.toLowerCase()===(prefix+artName).toLowerCase());if(key){const ext=artName.toLowerCase().split('.').pop(),mime=ext==='webp'?'image/webp':ext==='jpg'||ext==='jpeg'?'image/jpeg':'image/png';importedArt={bytes:entries.get(key).slice().buffer,mime,updated:Date.now()};break}}
+      let importedArt=null;const artCandidates=[meta.artFile,'character.svg','character.png','character.webp','character.jpg','character.jpeg','character.gif','art.svg','art.png'].filter(Boolean).map(x=>String(x).replace(/^\/+/,''));
+      for(const artName of artCandidates){const key=[...entries.keys()].find(n=>n.toLowerCase()===(prefix+artName).toLowerCase());if(key){const ext=artName.toLowerCase().split('.').pop(),mime=ext==='svg'?'image/svg+xml':ext==='webp'?'image/webp':ext==='gif'?'image/gif':ext==='jpg'||ext==='jpeg'?'image/jpeg':'image/png';importedArt={bytes:entries.get(key).slice().buffer,mime,fileName:artName.split('/').pop(),updated:Date.now()};break}}
       if(!imported.size)throw new Error('voice.json was present, but I could not find any samples/*.wav phoneme recordings.');
       await dbClear();state.samples=imported;state.art=importedArt;renderCharacterArt();$('voiceName').value=meta.name||'My Voice';$('voiceAuthor').value=meta.author||'';$('voiceDescription').value=meta.description||'';$('voiceIntro').value=meta.introSentence||'Hello! This is my custom voice.';$('voiceIcon').value=meta.icon||'';$('voiceTags').value=Array.isArray(meta.tags)?meta.tags.join(', '):(meta.tags||'');const d=meta.defaults||{};$('defSpeed').value=d.speed??1;$('defOverlap').value=d.overlapMs??22;$('defWordGap').value=d.wordGapMs??45;$('defPitch').value=d.pitchSemitones??0;['defSpeed','defOverlap','defWordGap','defPitch'].forEach(id=>$(id).dispatchEvent(new Event('input')));
       await Promise.all([...imported].map(([c,item])=>dbPut('sample:'+c,item)));if(importedArt)await dbPut('art',importedArt);await saveMeta();refreshAll();switchTab('bank');$('importStatus').className='notice good';$('importStatus').innerHTML=`<b>Loaded ${meta.name||'previous pack'}.</b> Restored ${imported.size}/${P.length} recordings. Click any phoneme tile to redo it, then use <b>4. Test voice</b>.`;setStatus(`loaded ${imported.size}/${P.length} takes`);
@@ -299,9 +301,9 @@
   async function exportZip(){
     if(progress()!==P.length)return alert('Finish all 39 recordings first.');setStatus('building ZIP','busy');
     try{
-      const name=$('voiceName').value.trim()||'My Voice',id=slug(name),folder=id,tags=$('voiceTags').value.split(',').map(x=>x.trim()).filter(Boolean).slice(0,12),meta={format:'mainvoice-pack-1',id,name,author:$('voiceAuthor').value.trim(),description:$('voiceDescription').value.trim(),introSentence:$('voiceIntro').value.trim(),icon:$('voiceIcon').value.trim(),tags,artFile:state.art?'character.png':'',created:new Date().toISOString(),phonemeSet:'ARPAbet-39',phonemes:P.map(p=>p.c),sampleFormat:'mono PCM16 WAV',defaults:packDefaults()};
-      const enc=new TextEncoder(),entries=[{name:`${folder}/voice.json`,data:enc.encode(JSON.stringify(meta,null,2))},{name:`${folder}/README.txt`,data:enc.encode(`MainVoice Synth voice pack: ${name}\n\nInstall: copy this entire folder into the app's mainvoices/ folder and refresh main.html.\nCharacter art, when present, is stored as character.png.\n`)}];
-      if(state.art?.bytes)entries.push({name:`${folder}/character.png`,data:new Uint8Array(state.art.bytes)});
+      const name=$('voiceName').value.trim()||'My Voice',id=slug(name),folder=id,tags=$('voiceTags').value.split(',').map(x=>x.trim()).filter(Boolean).slice(0,12),artFile=state.art?(state.art.fileName||(state.art.mime==='image/svg+xml'?'character.svg':'character.png')):'',meta={format:'mainvoice-pack-1',id,name,author:$('voiceAuthor').value.trim(),description:$('voiceDescription').value.trim(),introSentence:$('voiceIntro').value.trim(),icon:$('voiceIcon').value.trim(),tags,artFile,created:new Date().toISOString(),phonemeSet:'ARPAbet-39',phonemes:P.map(p=>p.c),sampleFormat:'mono PCM16 WAV',defaults:packDefaults()};
+      const enc=new TextEncoder(),entries=[{name:`${folder}/voice.json`,data:enc.encode(JSON.stringify(meta,null,2))},{name:`${folder}/README.txt`,data:enc.encode(`MainVoice Synth voice pack: ${name}\n\nInstall: copy this entire folder into the app's mainvoices/ folder and refresh main.html.\nCharacter art keeps its supported image format (including SVG).\n`)}];
+      if(state.art?.bytes)entries.push({name:`${folder}/${artFile}`,data:new Uint8Array(state.art.bytes)});
       for(const p of P){entries.push({name:`${folder}/samples/${p.c}.wav`,data:new Uint8Array(state.samples.get(p.c).wav)})}
       const zip=makeZip(entries);download(new Blob([zip],{type:'application/zip'}),`${id}-mainvoice.zip`);setStatus('ZIP exported');
     }catch(e){console.error(e);setStatus('export failed','bad');alert(e.message)}

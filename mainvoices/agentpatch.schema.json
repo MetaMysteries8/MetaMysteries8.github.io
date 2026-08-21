@@ -1,0 +1,282 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mainvoice.local/agentpatch.schema.json",
+  "title": "AgentPatch 3 recipe",
+  "type": "object",
+  "required": [
+    "format",
+    "id",
+    "name"
+  ],
+  "properties": {
+    "format": {
+      "enum": [
+        "agentpatch-recipe-3"
+      ]
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-]+$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "author": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "introSentence": {
+      "type": "string"
+    },
+    "icon": {
+      "type": "string"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 20
+    },
+    "engine": {
+      "type": "object",
+      "required": [
+        "type",
+        "id"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "builtin",
+            "command"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "config": {
+          "type": "object"
+        },
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "description": "Required for type=command. Supports {recipe}, {output}, {samples}, {project} placeholders."
+        }
+      },
+      "additionalProperties": true
+    },
+    "preset": {
+      "type": "string"
+    },
+    "style": {
+      "type": "object",
+      "additionalProperties": {
+        "type": [
+          "number",
+          "string",
+          "boolean",
+          "null"
+        ]
+      }
+    },
+    "variation": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number"
+      }
+    },
+    "timing": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number"
+      }
+    },
+    "phonemeOverrides": {
+      "type": "object"
+    },
+    "characterArt": {
+      "$ref": "#/$defs/assetSpecOrNull"
+    },
+    "profile": {
+      "type": "object",
+      "properties": {
+        "theme": {
+          "enum": [
+            "default",
+            "glass",
+            "terminal",
+            "sticker",
+            "neon",
+            "minimal"
+          ]
+        },
+        "accent": {
+          "type": "string",
+          "pattern": "^#[0-9A-Fa-f]{3,8}$"
+        },
+        "accent2": {
+          "type": "string",
+          "pattern": "^#[0-9A-Fa-f]{3,8}$"
+        },
+        "bio": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "badges": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "label": {
+                    "type": "string"
+                  },
+                  "icon": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "label"
+                ]
+              }
+            ]
+          }
+        },
+        "links": {
+          "type": "array",
+          "maxItems": 12,
+          "items": {
+            "type": "object",
+            "required": [
+              "label",
+              "url"
+            ],
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "banner": {
+          "$ref": "#/$defs/assetSpecOrNull"
+        },
+        "background": {
+          "$ref": "#/$defs/assetSpecOrNull"
+        },
+        "extraAssets": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/assetSpec"
+          }
+        },
+        "stickers": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "required": [
+              "source"
+            ],
+            "properties": {
+              "source": {
+                "type": "string",
+                "minLength": 1
+              },
+              "outputName": {
+                "type": "string"
+              },
+              "x": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "y": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "size": {
+                "type": "number",
+                "minimum": 16,
+                "maximum": 180
+              },
+              "rotate": {
+                "type": "number",
+                "minimum": -180,
+                "maximum": 180
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "seed": {
+      "type": "integer"
+    },
+    "sampleRate": {
+      "type": "integer",
+      "minimum": 16000,
+      "maximum": 48000
+    },
+    "defaults": {
+      "type": "object"
+    }
+  },
+  "$defs": {
+    "assetSpec": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "object",
+          "required": [
+            "source"
+          ],
+          "properties": {
+            "source": {
+              "type": "string",
+              "minLength": 1
+            },
+            "outputName": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "assetSpecOrNull": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/assetSpec"
+        }
+      ]
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,1 +1,429 @@
-<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=main.html"><title>MainVoice Synth</title><p><a href="main.html">Open MainVoice Synth</a></p>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>MainVoice Synth</title>
+  <link rel="stylesheet" href="style.css?v=20260821-qol-v6" />
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">LOCAL CONCATENATIVE SPEECH SYNTH</div>
+        <h1><span class="brandmark">▰</span> MAINVOICE SYNTH</h1>
+        <p>Type normal English, pick a voice pack, shape the performance, and export WAV. The expressive renderer adds stress, intonation, rhythm, and phoneme-aware joins without changing the voicebank.</p>
+      </div>
+      <div class="navlinks">
+        <a href="mainpack%20setup.html">✎ Build / edit a voice pack</a><span class="status-pill">STATIC HOSTED BUILD</span>
+        <a href="agentpatch.html">◆ AgentPatch</a>
+        <span class="status-pill"><span id="statusDot" class="dot"></span><span id="globalStatus">loading</span></span>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="synth">Synthesizer</button>
+      <button class="tab" data-tab="song">Song editor</button>
+      <button class="tab" data-tab="conversation">Conversation Studio</button>
+      <button class="tab" data-tab="voices">Voices</button>
+      <button class="tab" data-tab="bank">Phoneme bank</button>
+      <button class="tab" data-tab="advanced">Advanced pronunciation</button>
+    </nav>
+
+    <main>
+      <section class="panel active" id="tab-synth">
+        <div class="hero-grid">
+          <div class="card">
+            <div class="eyebrow">TEXT TO SPEECH</div>
+            <label class="field-label" for="textInput">What should it say?</label>
+            <textarea id="textInput" placeholder="hello, this is my incredibly cursed custom voice">Hello! This is my custom voice.</textarea>
+            <div id="analysisStrip" class="analysis-strip"></div>
+
+            <div class="controls-grid">
+              <div class="control"><label>speed <output id="speedVal">1.00×</output></label><input id="speed" type="range" min="0.55" max="2.2" step="0.01" value="1" /></div>
+              <div class="control"><label>base pitch <output id="pitchVal">0 st</output></label><input id="pitch" type="range" min="-8" max="8" step="1" value="0" /></div>
+              <div class="notice" style="grid-column:1/-1"><b>Independent pitch/time:</b> pitch shifting does not shorten or lengthen phonemes. The expression engine can move pitch per phoneme while speed remains independent.</div>
+              <div class="control"><label>base overlap <output id="overlapVal">22 ms</output></label><input id="overlap" type="range" min="0" max="110" step="1" value="22" /></div>
+              <div class="control"><label>word gap <output id="wordGapVal">45 ms</output></label><input id="wordGap" type="range" min="0" max="220" step="5" value="45" /></div>
+              <div class="control"><label>punctuation pause <output id="punctGapVal">260 ms</output></label><input id="punctGap" type="range" min="60" max="850" step="10" value="260" /></div>
+              <div class="control"><label>output gain <output id="gainVal">0 dB</output></label><input id="gain" type="range" min="-12" max="6" step="1" value="0" /></div>
+            </div>
+
+            <div class="expression-panel">
+              <div class="expression-head">
+                <div>
+                  <div class="eyebrow">EXPRESSION ENGINE</div>
+                  <h3>Make the samples perform the sentence</h3>
+                  <p class="small">Uses dictionary stress, punctuation, phrase shape, vowel timing, smart coarticulation, and tiny repeatable humanization. No voicebank changes needed.</p>
+                </div>
+                <button id="newVariationBtn" class="button secondary">↻ New variation <span id="variationVal">#1</span></button>
+              </div>
+              <div class="expression-grid">
+                <label class="expression-field"><span>performance</span><select id="expressionPreset">
+                  <option value="natural" selected>Natural</option>
+                  <option value="friendly">Friendly</option>
+                  <option value="excited">Excited</option>
+                  <option value="calm">Calm</option>
+                  <option value="dramatic">Dramatic</option>
+                  <option value="storyteller">Storyteller</option>
+                  <option value="deadpan">Deadpan</option>
+                  <option value="neutral">Neutral / almost flat</option>
+                </select></label>
+                <div class="control"><label>expression strength <output id="expressionAmountVal">72%</output></label><input id="expressionAmount" type="range" min="0" max="100" step="1" value="72" /></div>
+                <div class="control"><label>intonation range <output id="intonationVal">100%</output></label><input id="intonation" type="range" min="0" max="200" step="5" value="100" /></div>
+                <div class="control"><label>rhythm / stress timing <output id="rhythmVal">100%</output></label><input id="rhythm" type="range" min="0" max="200" step="5" value="100" /></div>
+                <div class="control"><label>humanize <output id="humanizeVal">18%</output></label><input id="humanize" type="range" min="0" max="100" step="1" value="18" /></div>
+              </div>
+              <div class="expression-toggles">
+                <label><input id="autoStress" type="checkbox" checked /> dictionary stress + content-word rhythm</label>
+                <label><input id="smartOverlap" type="checkbox" checked /> smart phoneme-aware overlap</label>
+                <label><input id="autoPunctuation" type="checkbox" checked /> punctuation + phrase intonation</label>
+              </div>
+              <div class="emphasis-head">
+                <div><b>Word emphasis</b><span>click any word to punch it harder; ALL CAPS is emphasized automatically</span></div>
+                <button id="clearEmphasisBtn" class="button ghost">clear</button>
+              </div>
+              <div id="emphasisWords" class="emphasis-words"><span class="small">Type something above and its words will appear here.</span></div>
+            </div>
+
+            <div class="synth-preset-strip">
+              <div class="synth-preset-copy"><div class="eyebrow">QUICK SETUPS</div><span class="small">Save the entire delivery setup — timing, pitch, overlap, expression, and humanize — as one reusable browser preset.</span></div>
+              <select id="synthPresetSelect" title="Saved synth setup"><option value="">Choose a synth setup…</option></select>
+              <button id="synthPresetApplyBtn" class="button secondary">Apply</button>
+              <button id="synthPresetSaveBtn" class="button secondary">+ Save current</button>
+              <button id="synthPresetDeleteBtn" class="button danger">Delete</button>
+            </div>
+
+            <div class="transport">
+              <button id="speakBtn" class="button primary big">▶ Speak</button>
+              <button id="stopBtn" class="button secondary">■ Stop</button>
+              <button id="exportWavBtn" class="button secondary">↓ Export WAV</button>
+              <button id="refreshPronBtn" class="button secondary">↻ Rebuild pronunciation</button>
+            </div>
+            <div id="synthMessage" class="small" style="margin-top:12px"></div>
+          </div>
+
+          <aside class="card voice-card">
+            <div class="eyebrow">ACTIVE VOICE</div>
+            <select id="voiceSelect"><option value="">Scanning mainvoices…</option></select>
+            <div class="browser-pack-row">
+              <label class="button secondary file-button browser-pack-button">↥ Test a MainVoice ZIP<input id="browserPackImport" type="file" accept=".zip,application/zip" /></label>
+            </div>
+            <div id="browserPackStatus" class="small">Loads only in this browser tab. It does not install or upload the voice.</div>
+            <div id="voiceInfo" class="voice-empty">No voice loaded yet.</div>
+            <div class="divider"></div>
+            <div class="eyebrow">GENERATED PRONUNCIATION</div>
+            <div id="phonemePreview" class="codebox phoneme-preview">—</div>
+            <p class="small">This comes from CMUdict when possible. Unknown words use a lightweight fallback and are marked so you can fix them in Advanced pronunciation.</p>
+          </aside>
+        </div>
+      </section>
+
+      <section class="panel" id="tab-song">
+        <div class="daw-shell">
+          <div class="card daw-commandbar">
+            <div class="daw-brand">
+              <div class="eyebrow">MAINVOICE VOCAL DAW</div>
+              <h2>Song Studio</h2>
+              <p class="muted">Layer vocals, draw slides, automate pitch, add vibrato, mix a backing track, loop sections, and export a stereo WAV — all from the same MainVoice phoneme bank.</p>
+            </div>
+            <div class="daw-transport-main">
+              <button id="songRewindBtn" class="button secondary" title="Return cursor to beat 0">↤</button>
+              <button id="songPlayBtn" class="button primary big">▶ Play</button>
+              <button id="songStopBtn" class="button secondary">■ Stop</button>
+              <button id="songExportBtn" class="button secondary">↓ Stereo WAV</button>
+              <span id="songCursorVal" class="status-pill">beat 0</span>
+            </div>
+          </div>
+
+          <div class="daw-toolbar card">
+            <div class="daw-tool-group" aria-label="Piano roll tools">
+              <button class="daw-tool" data-song-tool="select" title="Select / marquee (1)">↖ Select</button>
+              <button class="daw-tool active" data-song-tool="pencil" title="Draw notes (2)">✎ Pencil</button>
+              <button class="daw-tool" data-song-tool="eraser" title="Erase notes (3)">⌫ Erase</button>
+              <button class="daw-tool" data-song-tool="slide" title="Connect two notes with portamento (4)">〰 Slide</button>
+            </div>
+            <div class="daw-tool-group">
+              <button id="songUndoBtn" class="daw-tool">↶ Undo</button><button id="songRedoBtn" class="daw-tool">↷ Redo</button>
+              <button id="songCopyBtn" class="daw-tool">Copy</button><button id="songPasteBtn" class="daw-tool">Paste</button>
+              <button id="songSelectAllBtn" class="daw-tool">Select all</button><button id="songDuplicateToolbarBtn" class="daw-tool">Duplicate</button>
+              <button id="songQuantizeBtn" class="daw-tool">Quantize</button><button id="songAutoSlidesBtn" class="daw-tool">Auto slides</button>
+            </div>
+            <div class="daw-tool-group compact">
+              <button id="songOctaveDownBtn" class="daw-tool">−12</button><button id="songSemiDownBtn" class="daw-tool">−1</button><button id="songSemiUpBtn" class="daw-tool">+1</button><button id="songOctaveUpBtn" class="daw-tool">+12</button>
+            </div>
+          </div>
+
+          <div class="daw-top-grid">
+            <div class="card">
+              <div class="section-head">
+                <div><div class="eyebrow">SESSION</div><h2>Singer + timeline</h2></div>
+                <span class="continuous-badge">VOICE DAW</span>
+              </div>
+              <div class="song-settings-grid daw-settings-grid">
+                <label class="expression-field"><span>active track singer</span><select id="songVoiceSelect"><option>Loading voices…</option></select></label>
+                <label class="expression-field"><span>tempo (BPM)</span><input id="songBpm" class="text-input" type="number" min="30" max="300" step="1" value="120"></label>
+                <label class="expression-field"><span>song length</span><select id="songBars"><option value="4">4 bars</option><option value="8" selected>8 bars</option><option value="16">16 bars</option><option value="32">32 bars</option><option value="64">64 bars</option></select></label>
+                <label class="expression-field"><span>snap</span><select id="songSnap"><option value="1">quarter</option><option value="0.5">eighth</option><option value="0.25" selected>sixteenth</option><option value="0.125">thirty-second</option></select></label>
+                <label class="expression-field"><span>recorded base note</span><select id="songBaseNote"></select></label>
+                <label class="expression-field"><span>transpose</span><select id="songTranspose"></select></label>
+              </div>
+              <div class="song-performance-grid daw-performance-grid">
+                <div class="control"><label>phoneme legato <output id="songLegatoVal">18 ms</output></label><input id="songLegato" type="range" min="0" max="100" step="1" value="18"></div>
+                <div class="control"><label>consonant pre-roll <output id="songLeadVal">45 ms</output></label><input id="songLead" type="range" min="0" max="180" step="5" value="45"></div>
+                <div class="control"><label>master gain <output id="songGainVal">0 dB</output></label><input id="songGain" type="range" min="-18" max="6" step="1" value="0"></div>
+                <div class="control"><label>timing humanize <output id="songHumanizeVal">0%</output></label><input id="songHumanize" type="range" min="0" max="100" step="1" value="0"></div>
+              </div>
+              <div class="daw-loop-row">
+                <label class="check"><input id="songLoop" type="checkbox"> loop playback</label>
+                 <label class="check"><input id="songFollowPlayhead" type="checkbox" checked> follow playhead</label>
+                <label>from <input id="songLoopStart" class="mini-number" type="number" min="0" step="0.25" value="0"></label>
+                <label>to <input id="songLoopEnd" class="mini-number" type="number" min="0.25" step="0.25" value="8"></label>
+                <span class="small">Click the ruler to move the playback cursor.</span>
+              </div>
+            </div>
+
+            <aside class="card daw-project-card">
+              <div class="eyebrow">PROJECT + BACKING TRACK</div>
+              <label class="field-label" for="songTitle">Title</label>
+              <input id="songTitle" class="text-input" value="Untitled MainVoice Song">
+              <div class="daw-backing-box">
+                <div class="section-head tight"><b>Instrumental / backing audio</b><label class="button secondary file-button small-button">↥ Load audio<input id="songBackingInput" type="file" accept="audio/*"></label></div>
+                <div id="songBackingName" class="small">No backing track loaded</div>
+                <div class="control"><label>backing gain <output id="songBackingGainVal">-8 dB</output></label><input id="songBackingGain" type="range" min="-30" max="6" step="1" value="-8"></div>
+                <div class="daw-loop-row"><label>offset beats <input id="songBackingOffset" class="mini-number" type="number" step="0.25" value="0"></label><label class="check"><input id="songBackingMute" type="checkbox"> mute</label><button id="songBackingRemove" class="button secondary small-button" disabled>Remove</button></div>
+              </div>
+              <div class="divider"></div>
+              <label class="field-label" for="songLyricsBatch">Quick lyric fill</label>
+              <textarea id="songLyricsBatch" class="song-lyrics-batch" placeholder="hel lo world&#10;one token per note"></textarea>
+              <button id="songApplyLyricsBtn" class="button secondary" style="width:100%">Apply lyrics left → right</button>
+              <div class="row" style="margin-top:12px"><button id="songSaveBtn" class="button secondary">↓ Save project</button><label class="button secondary file-button">↥ Load project<input id="songLoadInput" type="file" accept=".json,application/json"></label></div>
+              <div class="row" style="margin-top:8px"><button id="songRestoreDraftBtn" class="button secondary">↻ Restore autosave</button><button id="songClearDraftBtn" class="button secondary">⌫ Clear autosave</button></div>
+              <div id="songAutosaveStatus" class="small qol-autosave-status">Autosave is ready.</div>
+              <div class="row" style="margin-top:8px"><button id="songDemoBtn" class="button secondary">♪ DAW demo</button><button id="songClearBtn" class="button danger">Clear vocals</button></div>
+              <p class="small">Project JSON stores notes, tracks, slides, vibrato, pitch curves, and mixer settings. Backing audio is not embedded; reattach that file when reopening. Drafts are also autosaved locally in your browser.</p>
+            </aside>
+          </div>
+
+          <div class="daw-track-rack card">
+            <div class="section-head tight"><div><div class="eyebrow">VOCAL LAYERS</div><h2>Tracks</h2></div><div class="row"><button id="songAddTrackBtn" class="button secondary small-button">+ Add track</button><button id="songDuplicateTrackBtn" class="button secondary small-button">Duplicate track</button><button id="songRenameTrackBtn" class="button secondary small-button">Rename</button><button id="songRemoveTrackBtn" class="button danger small-button">Remove</button></div></div>
+            <div id="songTrackList" class="daw-track-list"></div>
+            <p class="small">Each track can use its own MainVoice, plus independent volume, pan, mute, and solo. Use this for duets, harmonies, doubles, call-and-response, or chaos.</p>
+          </div>
+
+          <div class="song-editor-grid daw-editor-grid">
+            <div class="card song-roll-card">
+              <div class="section-head">
+                <div><div class="eyebrow">PIANO ROLL</div><h2>Notes + slides</h2></div>
+                <div class="daw-roll-controls">
+                  <label>horizontal zoom <output id="songZoomXVal">82 px/beat</output><input id="songZoomX" type="range" min="42" max="150" step="2" value="82"></label>
+                  <label>key height <output id="songZoomYVal">24 px/key</output><input id="songZoomY" type="range" min="18" max="34" step="1" value="24"></label>
+                  <button id="songFitBtn" class="button secondary small-button">Fit notes</button>
+                </div>
+              </div>
+              <div class="song-roll-help daw-shortcuts">1 select · 2 pencil · 3 erase · 4 slide · Space play/stop · Ctrl/Cmd+C/V · Ctrl/Cmd+Z/Y · ↑/↓ transpose · Shift+↑/↓ octave</div>
+              <div id="songRuler" class="song-ruler daw-ruler"></div>
+              <div id="songRollViewport" class="song-roll-viewport daw-roll-viewport"><canvas id="songRollCanvas" width="2400" height="1176"></canvas></div>
+              <div id="songMessage" class="small" style="margin-top:10px">Pencil notes in, then use the Slide tool to click a source note and a target note.</div>
+            </div>
+
+            <aside class="card song-note-card daw-inspector-card">
+              <div class="section-head tight"><div><div class="eyebrow">NOTE INSPECTOR</div><h2 id="songSelectionCount">no selection</h2></div></div>
+              <div id="songNoSelection" class="voice-empty">Select a note to edit its lyric, pitch motion, vibrato, and track.</div>
+              <div id="songNoteInspector" hidden>
+                <div id="songSelectedPitch" class="song-big-note">C4</div>
+                <label class="field-label" for="songNoteTrack">vocal track</label><select id="songNoteTrack"></select>
+                <label class="field-label" for="songNoteLyric">lyric / syllable</label><input id="songNoteLyric" class="text-input" value="la">
+                <label class="field-label" for="songNotePhones">ARPAbet override <span class="small">(optional)</span></label><input id="songNotePhones" class="text-input arpabet" placeholder="automatic pronunciation"><div id="songNoteAutoPhones" class="codebox" style="margin-top:8px">L AA</div>
+                <div class="song-note-numbers"><label class="expression-field"><span>start beat</span><input id="songNoteStart" class="text-input" type="number" min="0" step="0.25"></label><label class="expression-field"><span>length (beats)</span><input id="songNoteDuration" class="text-input" type="number" min="0.125" step="0.25"></label></div>
+                <div class="control"><label>note volume <output id="songNoteVelocityVal">100%</output></label><input id="songNoteVelocity" type="range" min="20" max="160" step="1" value="100"></div>
+                <div class="control"><label>fine tune <output id="songNoteFineVal">0¢</output></label><input id="songNoteFine" type="range" min="-100" max="100" step="1" value="0"></div>
+
+                <div class="daw-inspector-section"><div class="section-head tight"><b>〰 Portamento / slide</b><button id="songUnlinkSlideBtn" class="button secondary small-button">Unlink</button></div><div id="songSlideStatus" class="small">No incoming slide</div><div class="control"><label>glide time <output id="songNoteSlideVal">0.35 beat</output></label><input id="songNoteSlideBeats" type="range" min="0" max="4" step="0.05" value="0.35"></div><label class="expression-field"><span>curve</span><select id="songNoteSlideCurve"><option value="smooth">smooth S-curve</option><option value="linear">linear</option><option value="fast">fast arrival</option><option value="late">late arrival</option></select></label><p class="small">Use the Slide tool in the piano roll to choose where this note glides from.</p></div>
+
+                <div class="daw-inspector-section"><b>〽 Vibrato</b><div class="control"><label>depth <output id="songVibratoDepthVal">0¢</output></label><input id="songVibratoDepth" type="range" min="0" max="200" step="1" value="0"></div><div class="control"><label>rate <output id="songVibratoRateVal">5.5 Hz</output></label><input id="songVibratoRate" type="range" min="2" max="9" step="0.1" value="5.5"></div><div class="control"><label>delay <output id="songVibratoDelayVal">45%</output></label><input id="songVibratoDelay" type="range" min="0" max="90" step="1" value="45"></div><div class="control"><label>fade-in <output id="songVibratoFadeVal">20%</output></label><input id="songVibratoFade" type="range" min="1" max="80" step="1" value="20"></div></div>
+
+                <div class="daw-inspector-section"><div class="section-head tight"><b>Pitch automation</b><button id="songPitchResetBtn" class="button secondary small-button">Reset</button></div><canvas id="songPitchCurve" width="300" height="150"></canvas><p class="small">Click to add pitch-bend points (±1200¢). Drag points to shape the note. Right-click a point to remove it. Slide + pitch automation + vibrato are combined.</p></div>
+
+                <div class="row" style="margin-top:14px"><button id="songNoteAuditionBtn" class="button primary">▶ Audition</button><button id="songNoteDuplicateBtn" class="button secondary">Duplicate</button><button id="songNoteDeleteBtn" class="button danger">Delete</button></div>
+                <p id="songNoteHint" class="small" style="margin-top:10px"></p>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="tab-conversation">
+        <div class="conversation-shell">
+          <div class="card conversation-commandbar">
+            <div>
+              <div class="eyebrow">MULTI-VOICE DIALOGUE WORKSPACE</div>
+              <h2>Conversation Studio</h2>
+              <p class="muted">Build conversations from any installed or browser-loaded MainVoice. Give every line its own speaker, delivery, pitch, speed, stereo position, and timing — including interruptions and overlapping speech.</p>
+            </div>
+            <div class="conversation-transport">
+              <button id="convPlayBtn" class="button primary big">▶ Play all</button>
+              <button id="convStopBtn" class="button secondary">■ Stop</button>
+              <button id="convExportBtn" class="button secondary">↓ Stereo WAV</button>
+            </div>
+          </div>
+
+          <div class="conversation-layout">
+            <div class="conversation-main">
+              <div class="card conversation-projectbar">
+                <div class="conversation-project-fields">
+                  <label class="mini-field grow">Project title<input id="convTitle" class="text-input" value="Untitled Conversation"></label>
+                  <label class="mini-field">Default gap (ms)<input id="convDefaultGap" class="number-input" type="number" min="-1200" max="5000" step="25" value="260"></label>
+                  <label class="mini-field">Master gain (dB)<input id="convMasterGain" class="number-input" type="number" min="-18" max="6" step="1" value="0"></label>
+                </div>
+                <div class="row wrap conversation-project-actions">
+                  <button id="convAddLineBtn" class="button primary">+ Add line</button>
+                  <button id="convAlternateBtn" class="button secondary">⇄ Alternate voices</button>
+                  <button id="convDemoBtn" class="button secondary">Load demo</button>
+                  <button id="convSaveBtn" class="button secondary">↓ Save project</button>
+                  <label class="button secondary file-button">↥ Load project<input id="convLoadInput" type="file" accept=".json,.mainvoice-conversation.json,application/json"></label>
+                  <button id="convTranscriptBtn" class="button secondary">↓ Transcript</button>
+                  <button id="convSrtBtn" class="button secondary">↓ SRT</button>
+                  <button id="convRestoreDraftBtn" class="button secondary">↻ Restore autosave</button>
+                  <button id="convClearDraftBtn" class="button secondary">⌫ Clear autosave</button>
+                  <label class="qol-check"><input id="convCompact" type="checkbox"> compact lines</label>
+                  <button id="convClearBtn" class="button danger">Clear</button>
+                </div>
+                <div id="convAutosaveStatus" class="small qol-autosave-status">Autosave is ready.</div>
+                <div class="small qol-shortcuts">Tip: drag the ⋮⋮ handle to reorder · Ctrl/Cmd+Enter previews the current line · Alt+Enter adds a line below.</div>
+              </div>
+
+              <div id="convTimeline" class="conversation-timeline"></div>
+              <div id="convEmpty" class="card conversation-empty">
+                <div class="conversation-empty-icon">☏</div>
+                <h3>No dialogue yet</h3>
+                <p class="muted">Add a line, paste a script, or load the demo. Each line can use a completely different MainVoice.</p>
+                <button id="convEmptyAddBtn" class="button primary">+ Add first line</button>
+              </div>
+              <div id="convMessage" class="small conversation-message" aria-live="polite"></div>
+            </div>
+
+            <aside class="conversation-sidebar">
+              <div class="card">
+                <div class="eyebrow">SCRIPT IMPORTER</div>
+                <h3>Paste a conversation</h3>
+                <p class="small">One line per message. Use <code>Voice Name: dialogue</code> to choose a speaker, or omit the name and alternate available voices automatically.</p>
+                <textarea id="convScriptImport" class="conversation-script" placeholder="Doxi: bro what did you do\nSol: I have absolutely no idea.\nDoxi: that is not reassuring"></textarea>
+                <div class="row wrap">
+                  <button id="convImportScriptBtn" class="button primary">Import script</button>
+                  <button id="convAppendScriptBtn" class="button secondary">Append</button>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="eyebrow">LIVE CHAT PREVIEW</div>
+                <h3>Transcript</h3>
+                <div id="convChatPreview" class="conversation-chat-preview"></div>
+              </div>
+
+              <div class="card">
+                <div class="eyebrow">SPEAKER TOOLS</div>
+                <h3>Replace or swap a speaker</h3>
+                <p class="small">Useful after importing a long script or when you decide a character should use a different voice.</p>
+                <div class="speaker-swap-grid">
+                  <label class="mini-field">From<select id="convReplaceFrom" class="text-input"></select></label>
+                  <label class="mini-field">To<select id="convReplaceTo" class="text-input"></select></label>
+                </div>
+                <div class="row wrap" style="margin-top:10px">
+                  <button id="convReplaceSpeakerBtn" class="button secondary">Replace all</button>
+                  <button id="convSwapSpeakersBtn" class="button secondary">⇄ Swap</button>
+                </div>
+              </div>
+
+              <div class="card conversation-tips">
+                <div class="eyebrow">TIMING TRICKS</div>
+                <h3>Make it feel conversational</h3>
+                <div class="stack small">
+                  <div><b>Pause after:</b> positive values leave silence before the next line.</div>
+                  <div><b>Interrupt:</b> use a negative pause, like <code>-300 ms</code>, so the next speaker starts early.</div>
+                  <div><b>Pan:</b> slightly separate speakers in stereo without making them sound hard-left/right.</div>
+                  <div><b>Expression:</b> punctuation still matters — <code>?</code>, <code>!</code>, commas, and ellipses shape the delivery.</div>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="tab-voices">
+        <div class="two-col">
+          <div class="card">
+            <div class="eyebrow">PUBLIC VOICE LIBRARY</div>
+            <h2>Available voice packs</h2>
+            <input id="voiceSearch" class="search" placeholder="search name, author, tag…" style="margin-bottom:10px" />
+            <div id="voiceList" class="voice-list"></div>
+          </div>
+          <div class="card">
+            <div class="eyebrow">STATIC SITE</div>
+            <h2>Official packs + your local test pack</h2>
+            <div class="codebox">hosted/
+├─ main.html
+├─ mainpack setup.html   ← full recorder + waveform editor
+└─ mainvoices/
+   ├─ voices.json
+   └─ official voice folders...</div>
+            <p class="muted">Official packs are bundled into <code>mainvoices/</code> by the site owner. Your own ZIP can be tested or edited entirely in this browser without being uploaded or installed.</p>
+            <div class="row">
+              <label class="button primary file-button">↥ Test your MainVoice ZIP<input id="browserPackImportVoices" type="file" accept=".zip,application/zip" /></label>
+              <a class="button secondary" href="mainpack%20setup.html">✂ Open pack editor</a>
+              <a class="button secondary" href="agentpatch.html">◆ AgentPatch</a>
+            </div>
+            <p class="small">A browser-loaded ZIP disappears on refresh. The editor can load an old pack, repair waveform timing/clicks, test it, and export a new ZIP.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="tab-bank">
+        <div class="card">
+          <div class="section-head">
+            <div><div class="eyebrow">AUDITION PHONEMES</div><h2 id="bankTitle">Loaded voice bank</h2></div>
+            <input id="bankSearch" class="search" placeholder="filter…" />
+          </div>
+          <div id="bankAudition" class="bank-audition"></div>
+          <p class="small">Click a tile to hear that raw recorded unit. This is useful when one sound in a sentence is obviously wrong.</p>
+        </div>
+      </section>
+
+      <section class="panel" id="tab-advanced">
+        <div class="two-col">
+          <div class="card">
+            <div class="eyebrow">EDIT THE PHONEMES DIRECTLY</div>
+            <h2>Pronunciation override</h2>
+            <p class="muted">Normal mode generates this for you. Edit it only when a name, acronym, username, or weird word is pronounced badly.</p>
+            <textarea id="advancedInput" class="arpabet" spellcheck="false"></textarea>
+            <div class="row">
+              <button id="useAdvancedBtn" class="button primary">Use this pronunciation</button>
+              <button id="resetAdvancedBtn" class="button secondary">Reset from text</button>
+            </div>
+            <div class="notice" style="margin-top:16px"><code>/</code> = normal word gap. <code>|250|</code> = a 250 ms pause. Phonemes are standard 39-sound ARPAbet codes such as <code>HH EH L OW</code>.</div>
+          </div>
+          <div class="card">
+            <div class="eyebrow">QUICK EXAMPLES</div>
+            <h2>ARPAbet without the pain</h2>
+            <div class="stack">
+              <div class="codebox">hello → HH AH L OW</div>
+              <div class="codebox">cat → K AE T</div>
+              <div class="codebox">this is my voice → DH IH S / IH Z / M AY / V OY S</div>
+              <div class="codebox">wait... what → W EY T |500| W AH T</div>
+            </div>
+            <p class="muted">The main editor is intentionally the easy layer; this exists for the same kind of phoneme-level control that makes retro speech synths fun.</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>Static hosted build · expressive prosody runs in your browser · full pack editor included · pronunciation uses bundled CMUdict data</footer>
+  </div>
+  <script src="phonemes.js"></script>
+  <script src="dsp.js"></script>
+  <script src="main.js?v=20260821-qol-v6"></script>
+  <script src="song.js?v=20260821-qol-v6"></script>
+  <script src="conversation.js?v=20260821-qol-v6"></script>
+</body>
+</html>

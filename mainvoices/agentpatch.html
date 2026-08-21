@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>AgentPatch 3 · MainVoice</title>
+  <link rel="stylesheet" href="style.css?v=20260821-qol-v6" />
+</head>
+<body>
+  <div class="shell agentpatch-shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">AI-AGENT VOICE TOOLKIT · V3</div>
+        <h1><span class="brandmark">◆</span> AGENTPATCH</h1>
+        <p>Choose or plug in a voice engine, design a genuinely distinct MainVoice identity, decorate its profile, then let an AI agent build, validate, and package the 39-phoneme bank. SVG stays SVG end-to-end.</p>
+      </div>
+      <div class="navlinks"><a href="main.html">← MainVoice</a><a href="AGENTPATCH.md">Agent docs</a><a href="agentpatch.schema.json">Recipe schema</a></div>
+    </header>
+
+    <main class="agentpatch-grid">
+      <section class="stack">
+        <section class="card">
+          <div class="section-head"><div><div class="eyebrow">VOICE RECIPE</div><h2>Identity + metadata</h2></div><button id="apRandomize" class="button secondary">⚄ Randomize identity</button></div>
+          <div class="agentpatch-form">
+            <label class="mini-field">Voice ID<input id="apId" class="text-input" value="agent-voice"></label>
+            <label class="mini-field">Display name<input id="apName" class="text-input" value="Agent Voice"></label>
+            <label class="mini-field">Author<input id="apAuthor" class="text-input" value="AI agent"></label>
+            <label class="mini-field">Icon<input id="apIcon" class="text-input" value="✦"></label>
+            <label class="mini-field wide">Description<input id="apDescription" class="text-input" value="An original synthetic MainVoice created with AgentPatch."></label>
+            <label class="mini-field wide">Intro sentence<input id="apIntro" class="text-input" value="Hello! This voice was made with AgentPatch."></label>
+            <label class="mini-field wide">Tags<input id="apTags" class="text-input" value="agentpatch, synthetic"></label>
+            <label class="mini-field">Starting preset<select id="apPreset"></select></label>
+            <label class="mini-field">Source shape<select id="apSourceShape"><option>smooth</option><option>siney</option><option>buzz</option><option>hollow</option><option>square</option><option>reed</option><option>pulse</option><option>metallic</option></select></label>
+            <label class="mini-field">Seed<input id="apSeed" class="number-input" type="number" step="1" value="5606"></label>
+            <label class="mini-field wide">Character art path <span class="small">(optional · relative to recipe)</span><input id="apArt" class="text-input" placeholder="character.svg"></label>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="eyebrow">VOICE ENGINE</div><h2>Use AgentPatch's engine — or replace it completely</h2>
+          <div class="agentpatch-form">
+            <label class="mini-field">Engine mode<select id="apEngineType"><option value="builtin">Built-in engine</option><option value="command">External command / agent engine</option></select></label>
+            <label class="mini-field" id="apBuiltinEngineWrap">Built-in engine<select id="apEngineId"><option value="formant">Formant / source-filter</option><option value="chip">Chip / wavetable</option><option value="whisper">Whisper / noise-resonator</option></select></label>
+            <label class="mini-field" id="apCustomEngineIdWrap" hidden>External engine ID<input id="apEngineCustomId" class="text-input" value="my-engine"></label>
+            <label class="mini-field wide">Engine config JSON<textarea id="apEngineConfig" class="arpabet" rows="4" spellcheck="false" placeholder='{"waveform":"triangle","bitDepth":8}'></textarea></label>
+            <label class="mini-field wide" id="apEngineCommandWrap" hidden>External command JSON array<textarea id="apEngineCommand" class="arpabet" rows="4" spellcheck="false" placeholder='["python","my_engine.py","--recipe","{recipe}","--output","{output}"]'></textarea></label>
+          </div>
+          <div class="agentpatch-engine-note" style="margin-top:12px"><b>External engines are real plug-ins.</b> AgentPatch does not synthesize those WAVs itself. The command gets the resolved recipe/output paths and must create <code>samples/IY.wav ... JH.wav</code>. The CLI requires <code>--allow-external-engine</code> so an untrusted recipe cannot silently run a command.</div>
+        </section>
+
+        <section class="card">
+          <div class="eyebrow">EXCITATION / SOURCE</div><h2>What the synthetic throat sounds like</h2>
+          <div class="agentpatch-form">
+            <label class="mini-field">Base pitch Hz<input id="apPitch" class="number-input" type="number" min="70" max="420" step="1" value="185"></label>
+            <label class="mini-field">Brightness<input id="apBrightness" class="number-input" type="number" min="0.4" max="2" step="0.01" value="1"></label>
+            <label class="mini-field">Warmth<input id="apWarmth" class="number-input" type="number" min="0.4" max="2" step="0.01" value="1"></label>
+            <label class="mini-field">Breath<input id="apBreath" class="number-input" type="number" min="0" max="0.4" step="0.005" value="0.035"></label>
+            <label class="mini-field">Roughness<input id="apRough" class="number-input" type="number" min="0" max="0.18" step="0.005" value="0.015"></label>
+            <label class="mini-field">Harmonic tilt<input id="apTilt" class="number-input" type="number" min="0.5" max="2" step="0.01" value="1.15"></label>
+            <label class="mini-field">Odd/even bias<input id="apOddEven" class="number-input" type="number" min="-0.9" max="0.9" step="0.01" value="0"></label>
+            <label class="mini-field">Pitch drift ¢<input id="apDrift" class="number-input" type="number" min="0" max="70" step="1" value="4"></label>
+            <label class="mini-field">Built-in vibrato ¢<input id="apVibrato" class="number-input" type="number" min="0" max="60" step="1" value="0"></label>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="eyebrow">VOCAL TRACT</div><h2>Move the formants, not just the pitch</h2>
+          <div class="agentpatch-form">
+            <label class="mini-field">Tract scale<input id="apTract" class="number-input" type="number" min="0.6" max="1.5" step="0.01" value="1"></label>
+            <label class="mini-field">Vowel space<input id="apVowelSpace" class="number-input" type="number" min="0.5" max="1.7" step="0.01" value="1"></label>
+            <label class="mini-field">F1 scale<input id="apF1" class="number-input" type="number" min="0.65" max="1.4" step="0.01" value="1"></label>
+            <label class="mini-field">F2 scale<input id="apF2" class="number-input" type="number" min="0.65" max="1.45" step="0.01" value="1"></label>
+            <label class="mini-field">F3 scale<input id="apF3" class="number-input" type="number" min="0.65" max="1.45" step="0.01" value="1"></label>
+            <label class="mini-field">Nasal darkness<input id="apNasal" class="number-input" type="number" min="0.4" max="2" step="0.01" value="1"></label>
+            <label class="mini-field">Liquid darkness<input id="apLiquid" class="number-input" type="number" min="0.4" max="2" step="0.01" value="1"></label>
+            <label class="mini-field">Diphthong glide start<input id="apGlideStart" class="number-input" type="number" min="0.15" max="0.85" step="0.01" value="0.52"></label>
+            <label class="mini-field">Diphthong curve<input id="apGlideCurve" class="number-input" type="number" min="0.25" max="3" step="0.05" value="1"></label>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="eyebrow">CONSONANTS + TIMING</div><h2>Stop every voice sharing the same articulation</h2>
+          <div class="agentpatch-form">
+            <label class="mini-field">Consonant edge<input id="apConsonant" class="number-input" type="number" min="0.3" max="2" step="0.01" value="1"></label>
+            <label class="mini-field">Fricative sharpness<input id="apFricative" class="number-input" type="number" min="0.3" max="2" step="0.01" value="1"></label>
+            <label class="mini-field">Stop punch<input id="apStopPunch" class="number-input" type="number" min="0.3" max="2" step="0.01" value="1"></label>
+            <label class="mini-field">Stop voicing<input id="apStopVoice" class="number-input" type="number" min="0.1" max="1.8" step="0.01" value="1"></label>
+            <label class="mini-field">Duration scale<input id="apDuration" class="number-input" type="number" min="0.5" max="1.7" step="0.01" value="1"></label>
+            <label class="mini-field">Identity variation<input id="apIdentityVar" class="number-input" type="number" min="0" max="1" step="0.01" value="0.16"></label>
+            <label class="mini-field">Per-phone pitch ±¢<input id="apPhonePitch" class="number-input" type="number" min="0" max="80" step="1" value="4"></label>
+            <label class="mini-field">Per-phone formants ±<input id="apPhoneFormant" class="number-input" type="number" min="0" max="0.2" step="0.002" value="0.012"></label>
+            <label class="mini-field">Per-phone duration ±<input id="apPhoneDuration" class="number-input" type="number" min="0" max="0.35" step="0.005" value="0.025"></label>
+          </div>
+          <details class="agentpatch-advanced" style="margin-top:14px">
+            <summary>Advanced timing + per-phoneme overrides</summary>
+            <div class="agentpatch-form" style="margin-top:12px">
+              <label class="mini-field">Vowels<input id="apTimeVowels" class="number-input" type="number" min="0.5" max="2" step="0.01" value="1"></label>
+              <label class="mini-field">Diphthongs<input id="apTimeDiph" class="number-input" type="number" min="0.5" max="2" step="0.01" value="1"></label>
+              <label class="mini-field">Nasals<input id="apTimeNasals" class="number-input" type="number" min="0.5" max="2" step="0.01" value="1"></label>
+              <label class="mini-field">Fricatives<input id="apTimeFric" class="number-input" type="number" min="0.5" max="2" step="0.01" value="1"></label>
+              <label class="mini-field">Stops<input id="apTimeStops" class="number-input" type="number" min="0.5" max="2" step="0.01" value="1"></label>
+              <label class="mini-field">Affricates<input id="apTimeAff" class="number-input" type="number" min="0.5" max="2" step="0.01" value="1"></label>
+              <label class="mini-field">Glides/liquids<input id="apTimeGlides" class="number-input" type="number" min="0.5" max="2" step="0.01" value="1"></label>
+              <label class="mini-field wide">Phoneme overrides JSON<textarea id="apOverrides" class="arpabet" rows="6" spellcheck="false" placeholder='{"R":{"durationScale":0.75,"pitchCents":-10},"AE":{"formants":[700,1650,2400]}}'></textarea></label>
+            </div>
+          </details>
+        </section>
+
+        <section class="card">
+          <div class="eyebrow">PROFILE DECORATION</div><h2>Let the voice have an actual profile</h2>
+          <div class="agentpatch-form">
+            <label class="mini-field">Theme<select id="apProfileTheme"><option>default</option><option>glass</option><option>terminal</option><option>sticker</option><option>neon</option><option>minimal</option></select></label>
+            <label class="mini-field">Accent<input id="apProfileAccent" class="text-input" value="#ff7a18"></label>
+            <label class="mini-field">Accent 2<input id="apProfileAccent2" class="text-input" value="#ff9e42"></label>
+            <label class="mini-field">Status<input id="apProfileStatus" class="text-input" placeholder="currently inventing noises"></label>
+            <label class="mini-field wide">Bio<textarea id="apProfileBio" class="text-input" rows="3" placeholder="A tiny bio shown on the voice card."></textarea></label>
+            <label class="mini-field wide">Badges <span class="small">comma separated</span><input id="apProfileBadges" class="text-input" placeholder="default voice, singing-ready, silly"></label>
+            <label class="mini-field wide">Links JSON<textarea id="apProfileLinks" class="arpabet" rows="4" spellcheck="false" placeholder='[{"label":"Project page","url":"https://example.com"}]'></textarea></label>
+            <label class="mini-field wide">Banner asset path<input id="apProfileBanner" class="text-input" placeholder="banner.svg"></label>
+            <label class="mini-field wide">Background asset path<input id="apProfileBackground" class="text-input" placeholder="background.webp"></label>
+            <label class="mini-field wide">Sticker decorations JSON<textarea id="apProfileStickers" class="arpabet" rows="4" spellcheck="false" placeholder='[{"source":"sparkle.svg","x":84,"y":12,"size":54,"rotate":12}]'></textarea></label>
+            <label class="mini-field wide">Extra profile assets JSON<textarea id="apProfileExtras" class="arpabet" rows="3" spellcheck="false" placeholder='[{"source":"extra.svg","outputName":"extra.svg"}]'></textarea></label>
+          </div>
+          <p class="small">Profile assets can be SVG, PNG, WebP, JPG/JPEG, or GIF. Stickers can be positioned by x/y percentage, pixel size, and rotation. Banner/background/sticker assets are packed under <code>profile-assets/</code>. Links render only for HTTP(S).</p>
+        </section>
+
+        <section class="card">
+          <div class="row">
+            <button id="apDownload" class="button primary">↓ Download recipe</button>
+            <button id="apCopyTask" class="button secondary">Copy task for an AI agent</button>
+            <button id="apCopyJson" class="button secondary">Copy JSON</button>
+          </div>
+          <div id="apStatus" class="small" style="margin-top:10px">Nothing leaves your browser from this page.</div>
+        </section>
+      </section>
+
+      <aside class="stack">
+        <section class="card">
+          <div class="eyebrow">PROFILE PREVIEW</div><h2>Decoration preview</h2>
+          <div id="apProfilePreview" class="agentpatch-profile-preview"><div class="profile-preview-name">✦ Agent Voice</div></div>
+        </section>
+        <section class="card">
+          <div class="eyebrow">IDENTITY SUMMARY</div><h2>Engine + timbre + articulation</h2>
+          <div id="apIdentitySummary" class="codebox"></div>
+          <p class="small">The recipe now records the engine separately from the voice identity. A custom engine can ignore AgentPatch synthesis entirely while still using the same pack validator, metadata, SVG/profile system, and ZIP format.</p>
+        </section>
+        <section class="card">
+          <div class="eyebrow">ONE-SHOT CLI</div><h2>Agent workflow</h2>
+          <div id="apCommands" class="codebox"></div>
+          <p class="small">The full source includes <code>agentpatch.py</code>. It uses only Python's standard library.</p>
+        </section>
+        <section class="card">
+          <div class="eyebrow">PROFILE ASSETS</div><h2>SVG works everywhere</h2>
+          <p class="small">Character art, banners, and backgrounds can be SVG, PNG, WebP, JPG/JPEG, or GIF. SVG stays SVG. AgentPatch also validates SVG XML and rejects script/event/foreignObject content before recommending publication.</p>
+          <div class="codebox">"characterArt": {\n  "source": "character.svg"\n}</div>
+        </section>
+        <section class="card">
+          <div class="eyebrow">WHAT IT MAKES</div><h2>39 required phonemes</h2>
+          <div id="apPhones" class="agentpatch-phones"></div>
+        </section>
+        <section class="card">
+          <div class="eyebrow">VARIANT COMMAND</div><h2>Branch an existing voice identity</h2>
+          <div class="codebox">python agentpatch.py variant base.agentpatch.json --strength 0.75 --seed 92817 --out weird.agentpatch.json</div>
+          <p class="small">This bakes visibly different tract, source, articulation, timing, and pitch settings into a new recipe.</p>
+        </section>
+      </aside>
+    </main>
+  </div>
+  <script src="agentpatch.js?v=20260821-qol-v6"></script>
+</body>
+</html>
