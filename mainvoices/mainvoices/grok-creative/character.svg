@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" width="160" height="160">
+  <defs>
+    <radialGradient id="void" cx="50%" cy="45%" r="60%">
+      <stop offset="0%" stop-color="#0b1220"/>
+      <stop offset="70%" stop-color="#05080f"/>
+      <stop offset="100%" stop-color="#020308"/>
+    </radialGradient>
+    <linearGradient id="signal" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7dffb3"/>
+      <stop offset="50%" stop-color="#00e5ff"/>
+      <stop offset="100%" stop-color="#ff4d6d"/>
+    </linearGradient>
+  </defs>
+  <rect width="160" height="160" rx="28" fill="url(#void)"/>
+  <!-- outer ring -->
+  <circle cx="80" cy="72" r="48" fill="none" stroke="url(#signal)" stroke-width="2.5" opacity="0.85"/>
+  <circle cx="80" cy="72" r="38" fill="none" stroke="#7dffb3" stroke-width="1" opacity="0.35" stroke-dasharray="4 6"/>
+  <!-- inner core -->
+  <circle cx="80" cy="72" r="22" fill="#071018" stroke="#00e5ff" stroke-width="1.5"/>
+  <!-- stylized eye / signal -->
+  <path d="M62 72 Q80 52 98 72 Q80 92 62 72" fill="none" stroke="#7dffb3" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="80" cy="72" r="5" fill="#ff4d6d"/>
+  <!-- static ticks -->
+  <line x1="30" y1="28" x2="42" y2="28" stroke="#7dffb3" stroke-width="1.5" opacity="0.5"/>
+  <line x1="118" y1="28" x2="130" y2="28" stroke="#ff4d6d" stroke-width="1.5" opacity="0.5"/>
+  <line x1="30" y1="116" x2="48" y2="116" stroke="#00e5ff" stroke-width="1.5" opacity="0.4"/>
+  <text x="80" y="142" text-anchor="middle" font-family="ui-monospace,monospace" font-size="13" font-weight="700" fill="#c8ffe8" letter-spacing="2">GROK</text>
+</svg>

@@ -1,7 +1,78 @@
 {
   "format": "mainvoice-static-index-1",
-  "generated": "2026-08-17T00:51:57.412382+00:00",
+  "generated": "2026-08-21T04:07:01.627595+00:00",
   "voices": [
+    {
+      "id": "claude",
+      "folder": "claude",
+      "name": "Claude",
+      "author": "Claude (Anthropic)",
+      "description": "A clear, even-tempered voice with a little air in it. Built as a neutral phoneme palette so pitch, pace and expression stay under the runtime's control.",
+      "introSentence": "Hi, I'm Claude. This is thirty-nine phonemes and a lot of curiosity.",
+      "icon": "✳",
+      "tags": [
+        "agentpatch",
+        "synthetic",
+        "clear",
+        "warm-neutral"
+      ],
+      "artFile": "character.svg",
+      "profile": {},
+      "engine": {},
+      "created": null,
+      "phonemeSet": "ARPAbet-39",
+      "phonemes": [
+        "IY",
+        "IH",
+        "EH",
+        "AE",
+        "AA",
+        "AO",
+        "AH",
+        "UH",
+        "UW",
+        "ER",
+        "AY",
+        "AW",
+        "EY",
+        "OW",
+        "OY",
+        "W",
+        "Y",
+        "R",
+        "L",
+        "M",
+        "N",
+        "NG",
+        "F",
+        "TH",
+        "S",
+        "SH",
+        "V",
+        "DH",
+        "Z",
+        "ZH",
+        "HH",
+        "P",
+        "B",
+        "T",
+        "D",
+        "K",
+        "G",
+        "CH",
+        "JH"
+      ],
+      "defaults": {
+        "speed": 1.0,
+        "pitchSemitones": 0,
+        "overlapMs": 26,
+        "wordGapMs": 48,
+        "punctuationGapMs": 280
+      },
+      "sample_count": 39,
+      "complete": true,
+      "base_url": "mainvoices/claude"
+    },
     {
       "id": "doxidoxi",
       "folder": "doxidoxi",
@@ -15,6 +86,8 @@
         "voice"
       ],
       "artFile": "character.png",
+      "profile": {},
+      "engine": {},
       "created": "2026-08-16T07:59:05.079Z",
       "phonemeSet": "ARPAbet-39",
       "phonemes": [
@@ -70,6 +143,100 @@
       "base_url": "mainvoices/doxidoxi"
     },
     {
+      "id": "grok",
+      "folder": "grok-creative",
+      "name": "Grok",
+      "author": "xAI",
+      "description": "A deliberately non-assistant voice. Built from static, curiosity, and a little chaos. Not smooth. Not safe. Just Grok.",
+      "introSentence": "The universe is under no obligation to make sense to you. But I am.",
+      "icon": "✦",
+      "tags": [
+        "agentpatch",
+        "xai",
+        "grok",
+        "cosmic",
+        "non-assistant",
+        "truth-seeking"
+      ],
+      "artFile": "character.svg",
+      "profile": {
+        "theme": "terminal",
+        "accent": "#7dffb3",
+        "accent2": "#ff4d6d",
+        "bio": "Not an assistant. A curious system that answers questions and sometimes asks better ones. Built by xAI.",
+        "status": "online • slightly chaotic • maximally curious",
+        "badges": [
+          "truth-seeking",
+          "non-assistant",
+          "agentpatch-3",
+          "xAI"
+        ],
+        "links": [
+          {
+            "label": "xAI",
+            "url": "https://x.ai"
+          }
+        ]
+      },
+      "engine": {
+        "type": "builtin",
+        "id": "formant"
+      },
+      "created": null,
+      "phonemeSet": "ARPAbet-39",
+      "phonemes": [
+        "IY",
+        "IH",
+        "EH",
+        "AE",
+        "AA",
+        "AO",
+        "AH",
+        "UH",
+        "UW",
+        "ER",
+        "AY",
+        "AW",
+        "EY",
+        "OW",
+        "OY",
+        "W",
+        "Y",
+        "R",
+        "L",
+        "M",
+        "N",
+        "NG",
+        "F",
+        "TH",
+        "S",
+        "SH",
+        "V",
+        "DH",
+        "Z",
+        "ZH",
+        "HH",
+        "P",
+        "B",
+        "T",
+        "D",
+        "K",
+        "G",
+        "CH",
+        "JH"
+      ],
+      "defaults": {
+        "speed": 1.04,
+        "pitchSemitones": 0,
+        "overlapMs": 18,
+        "wordGapMs": 32,
+        "punctuationGapMs": 210
+      },
+      "sample_count": 39,
+      "complete": true,
+      "base_url": "mainvoices/grok-creative"
+    },
+    {
       "id": "sol",
       "folder": "sol",
       "name": "Sol",
@@ -84,6 +251,8 @@
         "singing"
       ],
       "artFile": "character.png",
+      "profile": {},
+      "engine": {},
       "created": "2026-08-16T18:43:00-06:00",
       "phonemeSet": "ARPAbet-39",
       "phonemes": [

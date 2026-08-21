@@ -1,0 +1,2 @@
+Generated/packaged by AgentPatch 3 using engine builtin:formant.
+You may replace any WAV with audio from a completely different engine, then validate and pack normally.
