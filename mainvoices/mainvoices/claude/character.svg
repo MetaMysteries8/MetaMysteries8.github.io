@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<rect width="512" height="512" rx="64" fill="#111821"/><circle cx="256" cy="236" r="154" fill="#ff8a2d" opacity=".92"/>
+<circle cx="256" cy="236" r="118" fill="#111821"/><path d="M170 242h35l18-52 31 104 28-78 21 45h39" fill="none" stroke="#ffd3ae" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="256" y="432" text-anchor="middle" font-family="system-ui,sans-serif" font-size="34" font-weight="800" fill="#f5f7fa">Claude</text>
+<text x="256" y="104" text-anchor="middle" font-family="system-ui,sans-serif" font-size="54" fill="#fff0e3">✳</text></svg>
