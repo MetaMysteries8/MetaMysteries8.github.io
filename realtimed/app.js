@@ -2,7 +2,21 @@ const GEN_BASE = "https://gen.pollinations.ai";
 const MEDIA_BASE = "https://media.pollinations.ai";
 const ENTER_BASE = "https://enter.pollinations.ai";
 const CLIENT_ID = "pk_VIepF2clCLKh5xiX";
-const REALTIME_MODEL = "gpt-realtime-2.1";
+// User-selectable realtime model (persisted via the settings drawer #realtimeModel select).
+// These are the voice/multimodal realtime models from api.md's "Realtime models" list;
+// the transcription-only ones (scribe-realtime, gpt-live-transcribe) are deliberately
+// excluded because this app needs a model that speaks back.
+const REALTIME_MODEL_INFO = [
+  { name: "gpt-realtime-2.1", title: "GPT Realtime 2.1", desc: "Best silence handling and turn-taking. The default." },
+  { name: "gpt-realtime-2.1-mini", title: "GPT Realtime 2.1 Mini", desc: "Same generation, smaller and cheaper — fastest to first word." },
+  { name: "gpt-realtime-2", title: "GPT Realtime 2", desc: "Previous generation with more context, looser silence handling." },
+];
+const REALTIME_MODELS = REALTIME_MODEL_INFO.map((m) => m.name);
+const DEFAULT_REALTIME_MODEL = "gpt-realtime-2.1";
+function realtimeModel() {
+  const chosen = value("realtimeModel");
+  return REALTIME_MODELS.includes(chosen) ? chosen : DEFAULT_REALTIME_MODEL;
+}
 // Seconds of lookahead kept between the playback clock and now, so a late audio
 // delta over a jittery (often mobile) connection can't open an audible gap.
 const PLAYBACK_JITTER = 0.16;
@@ -86,6 +100,9 @@ const state = {
   bargeThreshold: clampGate(Number(localStorage.getItem("barge_threshold") ?? 0.085)),
   micClaimed: false, // once a mode grabs the mic, switching modes needs a refresh
   stageView: "orb",
+  // Community models run on their owner's infrastructure, not Pollinations' (api.md
+  // "Trust Boundary"), so they stay out of the pickers until the user opts in.
+  includeCommunity: localStorage.getItem("include_community") === "1",
   lastError: null, // most recent API/generation failure, for the network_issue tool
   version: localStorage.getItem("ui_version") === "2" ? "2" : "1", // "1" classic, "2" web-OS
   windows: JSON.parse(localStorage.getItem("ve_windows") || "{}"), // v2 window geometry by artifact id
@@ -250,6 +267,7 @@ const fields = [
   "personalityPreset",
   "textModel",
   "searchModel",
+  "realtimeModel",
   "realtimeVoice",
   "coderModel",
   "sttModel",
@@ -262,6 +280,7 @@ const fields = [
   "imageSize",
   "imageCount",
   "videoAspect",
+  "videoResolution",
   "videoDuration",
   "videoCount",
   "videoAudio",
@@ -402,6 +421,9 @@ async function busy(task) {
 function init() {
   loadSettings();
   applyPresets();
+  // Seed + render the pickers immediately so the drawer is usable (and shows the
+  // saved selections) before the live catalogs finish loading.
+  seedStaticModels();
   initSound();
   captureByopReturn();
   bindEvents();
@@ -412,6 +434,8 @@ function init() {
   renderMemory();
   renderGallery();
   renderSavedWidgets();
+  refreshModelSelects();
+  renderModelSummary();
   loadLiveModels();
   checkKeyHealth();
   startBalancePolling();
@@ -479,10 +503,99 @@ function bindEvents() {
   el.scrim.addEventListener("click", closeDrawers);
   document.body.append(el.scrim);
   document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeDrawers(); });
-  fields.forEach((id) => document.querySelector(`#${id}`).addEventListener("change", () => {
+  bindConfigPanel();
+  fields.forEach((id) => document.querySelector(`#${id}`)?.addEventListener("change", () => {
     saveSettings();
     applyPresets();
+    // Voices, durations and resolutions belong to the chosen model, so re-derive
+    // them whenever the model behind them changes.
+    if (id === "ttsModel" || id === "videoModel") syncModelDependentFields();
+    renderModelSummary();
   }));
+}
+
+// Config drawer: tab switching, live search across every field, the community-model
+// opt-in, and the TTS voice preview.
+function bindConfigPanel() {
+  document.querySelectorAll(".config-tab").forEach((tab) => {
+    tab.addEventListener("click", () => showConfigTab(tab.dataset.tab));
+  });
+  const search = document.querySelector("#configSearch");
+  search?.addEventListener("input", () => filterConfig(search.value));
+  const community = document.querySelector("#flagCommunityModels");
+  if (community) {
+    community.checked = includeCommunity();
+    community.addEventListener("change", () => setIncludeCommunity(community.checked));
+  }
+  document.querySelector("#previewVoice")?.addEventListener("click", previewTtsVoice);
+  // Pollinations adds and retires models continuously, so let the catalogs be
+  // re-read without a page reload.
+  document.querySelector("#refreshModels")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    if (el.modelStatus) el.modelStatus.textContent = "Refreshing live model lists…";
+    try { await loadLiveModels(); } finally { button.disabled = false; }
+  });
+  // Click-away closes any open model picker.
+  document.addEventListener("pointerdown", (event) => {
+    if (event.target.closest(".mp")) return;
+    document.querySelectorAll(".mp-pop").forEach((pop) => pop.classList.add("hidden"));
+    document.querySelectorAll(".mp-trigger").forEach((trigger) => trigger.setAttribute("aria-expanded", "false"));
+  });
+}
+
+function showConfigTab(name) {
+  document.querySelectorAll(".config-tab").forEach((tab) => {
+    const on = tab.dataset.tab === name;
+    tab.classList.toggle("active", on);
+    tab.setAttribute("aria-selected", on ? "true" : "false");
+  });
+  document.querySelectorAll(".config-pane").forEach((pane) => pane.classList.toggle("active", pane.dataset.pane === name));
+}
+
+// Searching spans ALL panes (a setting you can't find is a setting you don't have),
+// so a query temporarily flattens the tabs into one filtered list.
+function filterConfig(query) {
+  const q = String(query || "").trim().toLowerCase();
+  const panes = [...document.querySelectorAll(".config-pane")];
+  const searching = q.length > 0;
+  document.querySelector(".config-tabs")?.classList.toggle("muted", searching);
+  let hits = 0;
+  panes.forEach((pane) => {
+    let paneHits = 0;
+    pane.querySelectorAll(":scope > label, :scope > .field, :scope > .toggle-list, :scope > .memory-block, :scope > h3, :scope > p, :scope > a, :scope > .desktop-controls").forEach((field) => {
+      const isField = field.tagName === "LABEL" || field.classList.contains("field");
+      // A model field also matches on what's IN its picker (title, brand, model id),
+      // so searching "claude" or "coder" finds the field that can select one.
+      const haystack = `${field.textContent} ${isField ? [...field.querySelectorAll("option")].map((o) => o.textContent).join(" ") : ""}`.toLowerCase();
+      const show = !searching || haystack.includes(q);
+      field.classList.toggle("filtered-out", !show);
+      if (show && isField) paneHits += 1;
+    });
+    pane.classList.toggle("search-active", searching);
+    if (searching) pane.classList.toggle("active", paneHits > 0);
+    hits += paneHits;
+  });
+  if (!searching) {
+    const current = document.querySelector(".config-tab.active")?.dataset.tab || "models";
+    showConfigTab(current);
+  }
+  document.querySelector("#configNoMatch")?.classList.toggle("hidden", !searching || hits > 0);
+}
+
+// Speak a short sample through the currently selected TTS model + voice so voices can
+// be auditioned without burning a whole conversation turn.
+async function previewTtsVoice() {
+  const voice = value("ttsVoice");
+  if (!voice) { addMessage("system", "TTS voice is set to Off — pick a voice to preview it."); return; }
+  if (!requireKey()) return;
+  const button = document.querySelector("#previewVoice");
+  if (button) { button.disabled = true; button.textContent = "…"; }
+  try {
+    await speakText("Hi — this is how I'll sound when I read your replies out loud.");
+  } finally {
+    if (button) { button.disabled = false; button.textContent = "▶ Preview"; }
+  }
 }
 
 function captureByopReturn() {
@@ -521,27 +634,37 @@ async function loadLiveModels() {
   ]);
   const [text, image, audio, embeddings] = lists.map((result) => result.status === "fulfilled" ? result.value : []);
   state.modelMeta = { text, image, audio, embeddings };
-  fillSelect("textModel", text.map(modelName), "openai");
-  fillSelect("searchModel", searchModelsOnly().map(modelName), "gemini-search");
-  fillSelect("coderModel", text.map(modelName), "qwen-coder");
-  fillSelect("imageModel", imageModelsOnly().map(modelName), "flux");
-  fillSelect("videoModel", videoModelsOnly().map(modelName), "ltx-2");
-  const tts = ttsModelsOnly();
-  const music = musicModelsOnly();
-  const stt = sttModelsOnly();
-  fillSelect("audioModel", music.map(modelName), defaultModelName(music, "elevenmusic"));
-  fillSelect("ttsModel", tts.map(modelName), defaultModelName(tts, "elevenflash", "qwen-tts", "elevenlabs"));
-  fillSelect("sttModel", stt.map(modelName), defaultModelName(stt, "whisper"));
-  fillSelect("embeddingModel", embeddings.map(modelName), "openai-3-small");
-  // A previously-saved invalid audio model (e.g. the old "openai-audio") breaks
-  // TTS/music; force the selection back to a real model from the live list.
-  coerceSelect("audioModel", music, defaultModelName(music, "elevenmusic"));
-  coerceSelect("ttsModel", tts, defaultModelName(tts, "elevenflash", "qwen-tts", "elevenlabs"));
-  coerceSelect("sttModel", stt, defaultModelName(stt, "whisper"));
+  modelIndex.clear();
+  seedStaticModels();
+  indexModels("text", text);
+  indexModels("image", image);
+  indexModels("audio", audio);
+  indexModels("embeddings", embeddings);
+  refreshModelSelects();
   const loaded = [text, image, audio, embeddings].filter((items) => items.length).length;
+  const community = [...modelIndex.values()].filter((m) => m.community).length;
   el.modelStatus.textContent = loaded
-    ? `Loaded live model dropdowns from ${loaded}/4 Pollinations model endpoints.`
-    : "Could not load live model dropdowns. Defaults are still available.";
+    ? `${modelIndex.size} live models from ${loaded}/4 Pollinations endpoints — ${modelIndex.size - community} official, ${community} community.`
+    : "Could not reach the model endpoints. Built-in defaults are still available.";
+  renderModelSummary();
+}
+
+// Rebuild every model dropdown from the current index. Split out from loadLiveModels
+// so toggling "include community models" re-filters without a network round trip.
+function refreshModelSelects() {
+  fillModelSelect("realtimeModel", REALTIME_MODELS.map(modelInfo), DEFAULT_REALTIME_MODEL);
+  fillModelSelect("textModel", assistantModels(), pickDefault(assistantModels(), "openai", "gpt-5.6-terra", "gpt-5.4-mini"));
+  fillModelSelect("searchModel", searchCapableModels(), pickDefault(searchCapableModels(), "perplexity-fast", "gemini-search", "perplexity"));
+  fillModelSelect("coderModel", coderModels(), pickDefault(coderModels(), "kimi-code", "qwen-coder", "deepseek-pro"));
+  fillModelSelect("imageModel", imageModelsOnly(), pickDefault(imageModelsOnly(), "flux", "zimage", "nanobanana"));
+  fillModelSelect("videoModel", videoModelsOnly(), pickDefault(videoModelsOnly(), "veo", "wan", "seedance-2.0-fast"));
+  const { tts, music, stt } = audioModelsByKind();
+  fillModelSelect("audioModel", music, pickDefault(music, "elevenmusic", "stable-audio-3-medium", "eleven-sfx"));
+  fillModelSelect("ttsModel", tts, pickDefault(tts, "elevenflash", "elevenlabs", "qwen-tts"));
+  fillModelSelect("sttModel", stt, pickDefault(stt, "whisper", "scribe", "universal-2"));
+  fillModelSelect("embeddingModel", embeddingModels(), pickDefault(embeddingModels(), "openai-3-small"));
+  // Model-dependent controls (voices, sizes, durations) follow the new selections.
+  syncModelDependentFields();
 }
 
 async function fetchModels(path) {
@@ -557,40 +680,167 @@ function modelName(row) {
   return row.id || row.name || row.model || row.alias || "";
 }
 
-function modelText(row) {
-  return JSON.stringify(row || {}).toLowerCase();
+// ---------------------------------------------------------------------------
+// MODEL METADATA LAYER
+// The /{text,image,audio,embeddings}/models endpoints return far more than an id:
+// title, brand, description, capabilities, pricing, paid_only, community, alpha,
+// context_length and input_modalities/output_modalities — plus voices (audio),
+// resolutions and allowed_durations (image/video). Everything the UI shows and every
+// routing decision reads from the normalized record below; name-matching survives
+// only as a fallback for rows that omit the metadata (or a model we've never seen,
+// e.g. a stale saved selection). This is what fixed video models being classified by
+// substring — `grok-imagine-video-1.5` is a video model whose name says "imagine".
+// ---------------------------------------------------------------------------
+const modelIndex = new Map(); // name -> normalized info
+
+function indexModels(category, rows) {
+  rows.forEach((row) => {
+    const info = normalizeModel(row, category);
+    if (info.name) modelIndex.set(info.name, info);
+  });
+}
+
+function lowerList(value) {
+  return (Array.isArray(value) ? value : []).map((entry) => String(entry).toLowerCase());
+}
+
+function normalizeModel(row, category) {
+  if (!row || typeof row === "string") {
+    const name = String(row || "");
+    return { name, title: name, brand: "", desc: "", caps: [], inputs: [], outputs: [], voices: [], resolutions: [], durations: [], videoCaps: [], category, unknown: true };
+  }
+  const caps = lowerList(row.capabilities);
+  const name = modelName(row);
+  return {
+    name,
+    title: row.title || name,
+    brand: row.brand || "",
+    desc: row.description || "",
+    caps,
+    tools: row.tools === true || caps.includes("tool_calling"),
+    reasoning: row.reasoning === true || caps.includes("reasoning"),
+    search: caps.includes("web_search"),
+    // `community` is an explicit boolean on the row — do NOT infer it from the
+    // "owner/model" id shape: official models like z-ai/glm-5.3-flash use one too.
+    community: row.community === true,
+    alpha: row.alpha === true,
+    paid: row.paid_only === true,
+    ctx: Number(row.context_length) || 0,
+    inputs: lowerList(row.input_modalities),
+    outputs: lowerList(row.output_modalities),
+    voices: (Array.isArray(row.voices) ? row.voices : []).map((v) => (typeof v === "string" ? v : v && (v.id || v.name || v.voice))).filter(Boolean),
+    resolutions: Array.isArray(row.resolutions) ? row.resolutions.map(String) : [],
+    durations: durationChoices(row),
+    videoCaps: lowerList(row.video_capabilities),
+    specialized: row.is_specialized === true,
+    category,
+  };
+}
+
+// Concrete duration options for a video/audio model: an explicit allowed list when
+// the model publishes one, otherwise a sensible ladder inside its min/max range.
+function durationChoices(row) {
+  if (Array.isArray(row.allowed_durations) && row.allowed_durations.length) {
+    return row.allowed_durations.map(Number).filter((n) => n > 0).sort((a, b) => a - b);
+  }
+  const min = Number(row.min_duration) || 0;
+  const max = Number(row.max_duration) || 0;
+  if (!min || !max) return [];
+  if (min === max) return [min];
+  const step = Number(row.duration_step) || 0;
+  const out = [];
+  if (step > 0 && (max - min) / step <= 12) {
+    for (let d = min; d <= max + 0.001; d += step) out.push(Math.round(d * 100) / 100);
+  } else {
+    for (const candidate of [min, 4, 5, 6, 8, 10, 15, 20, 30, 60, max]) {
+      if (candidate >= min && candidate <= max && !out.includes(candidate)) out.push(candidate);
+    }
+    out.sort((a, b) => a - b);
+  }
+  return out;
+}
+
+// Normalized record for a model name. Never null: an unknown/stale name gets a
+// minimal record so the UI can still render (and label) the user's saved choice.
+function modelInfo(name) {
+  const key = String(name || "");
+  return modelIndex.get(key) || normalizeModel(key, "text");
+}
+
+function allModels(category) {
+  return [...modelIndex.values()].filter((info) => info.category === category);
+}
+
+// Community models run on their owner's infrastructure (api.md "Trust Boundary"), so
+// they are opt-in. A model the user already selected always stays visible, otherwise
+// turning the toggle off would silently blank their choice.
+function includeCommunity() {
+  return state.includeCommunity;
+}
+
+function setIncludeCommunity(on) {
+  state.includeCommunity = !!on;
+  localStorage.setItem("include_community", state.includeCommunity ? "1" : "0");
+  refreshModelSelects();
+  renderModelSummary();
+}
+
+function communityFilter(list, keepName) {
+  if (includeCommunity()) return list;
+  return list.filter((info) => !info.community || info.name === keepName);
+}
+
+function assistantModels() {
+  // Tool calling is not optional here: every capability in this app (media, widgets,
+  // memory, search, workspace) is a tool call, so a model without it is broken.
+  return allModels("text").filter((info) => info.tools && !info.specialized);
+}
+
+function searchCapableModels() {
+  const search = allModels("text").filter((info) => info.search);
+  return search.length ? search : assistantModels();
+}
+
+// Coding models: metadata-first (title/description mention code or software
+// engineering), then known coder families by name. Tool calling is required so the
+// desktop coder agent can actually drive the filesystem/shell loop.
+function coderModels() {
+  const coders = allModels("text").filter((info) => {
+    if (!info.tools || info.specialized) return false;
+    return /\bcode|coder|coding|software engineer|programming|swe\b/i.test(`${info.name} ${info.title} ${info.desc}`);
+  });
+  return coders.length ? coders : assistantModels();
+}
+
+function embeddingModels() {
+  return allModels("embeddings");
 }
 
 function imageModelsOnly() {
-  return state.modelMeta.image.filter((model) => !isVideoModel(model));
+  return allModels("image").filter((info) => !isVideoModel(info));
 }
 
 function videoModelsOnly() {
-  return state.modelMeta.image.filter(isVideoModel);
+  return allModels("image").filter(isVideoModel);
 }
 
-function searchModelsOnly() {
-  const list = state.modelMeta.text || [];
-  const search = list.filter((model) => model?.capabilities?.web_search || /search|perplexity/i.test(modelName(model) || ""));
-  return search.length ? search : list;
-}
-
-// Split the live audio model list by role. TTS models carry a voice list (or a
-// speech-y name); music/sfx and speech-to-text are matched by name. This is what
-// fixes TTS picking a non-existent model like the old hardcoded "openai-audio".
+// Split the live audio catalog by role using input/output modalities, which say it
+// exactly: audio→text is transcription, text→audio is speech or music. Voice-changer
+// and voice-isolator models (audio→audio) belong to none of the three and are left
+// out — putting them in the TTS list would break speakText.
 function audioModelsByKind() {
-  const list = state.modelMeta.audio || [];
   const tts = [];
   const music = [];
   const stt = [];
-  for (const model of list) {
-    const name = (modelName(model) || "").toLowerCase();
-    const voices = model.voices || model.supported_voices || model.supportedVoices || model.voice;
-    const hasVoices = Array.isArray(voices) ? voices.length > 0 : Boolean(voices);
-    if (/whisper|scribe|universal|transcri|\bstt\b/.test(name)) stt.push(model);
-    else if (/music|acestep|stable-audio|sfx|song|sound-?effect/.test(name)) music.push(model);
-    else if (hasVoices || /tts|eleven|qwen-tts|speech|voice|narrat/.test(name)) tts.push(model);
-    else music.push(model);
+  for (const info of allModels("audio")) {
+    const takesText = info.inputs.includes("text");
+    const makesAudio = info.outputs.includes("audio");
+    const blurb = `${info.name} ${info.title} ${info.desc}`.toLowerCase();
+    if (info.inputs.includes("audio") && info.outputs.includes("text")) stt.push(info);
+    else if (!takesText || !makesAudio) continue; // voice changer / isolator: neither role
+    else if (/music|song|sfx|sound.?effect|soundscape|instrumental/.test(blurb)) music.push(info);
+    else if (info.voices.length || /\btts\b|text.to.speech|speech|voice|narrat|dialogue/.test(blurb)) tts.push(info);
+    else music.push(info);
   }
   return { tts, music, stt };
 }
@@ -599,80 +849,477 @@ function ttsModelsOnly() { return audioModelsByKind().tts; }
 function musicModelsOnly() { return audioModelsByKind().music; }
 function sttModelsOnly() { return audioModelsByKind().stt; }
 
-function defaultModelName(list, ...preferred) {
-  const names = list.map(modelName).filter(Boolean);
+// First preferred name that actually exists in the live list, else the list's own
+// first entry. Stops dead defaults (the old hardcoded "ltx-2" video model, which
+// Pollinations has since retired) from being offered as a selectable option.
+function pickDefault(list, ...preferred) {
+  const names = list.map((info) => info.name);
   for (const name of preferred) if (names.includes(name)) return name;
-  return names[0] || preferred[0];
+  return names[0] || preferred[0] || "";
 }
 
 function ttsModelName() {
   const current = value("ttsModel");
-  const names = ttsModelsOnly().map(modelName);
-  if (names.length && !names.includes(current)) return defaultModelName(ttsModelsOnly(), "elevenflash", "qwen-tts", "elevenlabs");
+  const tts = ttsModelsOnly();
+  const names = tts.map((info) => info.name);
+  if (names.length && !names.includes(current)) return pickDefault(tts, "elevenflash", "elevenlabs", "qwen-tts");
   return current || "elevenflash";
-}
-
-// Force a select onto a valid live model when its saved value isn't real anymore.
-function coerceSelect(id, liveList, fallback) {
-  if (!liveList.length) return;
-  const names = liveList.map(modelName);
-  const select = document.querySelector(`#${id}`);
-  if (!select || names.includes(select.value)) return;
-  select.value = names.includes(fallback) ? fallback : names[0];
-  saveSettings();
 }
 
 function searchModel() {
   const current = value("searchModel");
   if (current) return current;
-  const list = state.modelMeta.text || [];
-  const found = list.find((model) => model?.capabilities?.web_search) || list.find((model) => /search|perplexity/i.test(modelName(model) || ""));
-  return modelName(found) || "gemini-search";
+  return pickDefault(searchCapableModels(), "perplexity-fast", "gemini-search", "perplexity");
 }
 
+// A video model is one that OUTPUTS video. The old substring test rejected any name
+// containing "image"/"imagine"/"canvas", which hid real video models (grok-imagine-
+// video-1.5) and missed ones with no video word at all (gemini-omni-1.1-flash).
 function isVideoModel(model) {
-  const name = (modelName(model) || "").toLowerCase();
-  // Image-only models can contain video-ish substrings (e.g. wan-image, gptimage,
-  // grok-imagine, nova-canvas); never treat those as video.
+  const info = typeof model === "object" && model && model.outputs ? model : modelInfo(modelName(model));
+  if (info.outputs.length) return info.outputs.includes("video");
+  const name = (info.name || "").toLowerCase();
   if (/image|imagine|canvas/.test(name)) return false;
-  const text = modelText(model);
-  return /video|veo|\bwan\b|wan-|seedance|ltx|reel|p-video/.test(`${name} ${text}`);
+  return /video|veo|\bwan\b|wan-|seedance|ltx|reel|p-video/.test(name);
 }
 
-// True only when the model can actually take a source/reference image (image edit
-// or image-to-video). Metadata from /image/models is authoritative; the name
-// fallback lists known editing/i2v families and deliberately avoids the bare word
-// "image" (every image model contains it, which made the old check always true).
+// True only when the model can take a source/reference image (image edit or
+// image-to-video). input_modalities is authoritative and present on every live image
+// model; the name list is only reached for a model missing from the index.
 function supportsImageInput(modelNameValue) {
+  const info = modelInfo(modelNameValue);
+  if (info.inputs.length) return info.inputs.includes("image");
   const name = String(modelNameValue || "").toLowerCase();
-  const model = state.modelMeta.image.find((entry) => modelName(entry) === modelNameValue);
-  if (model && typeof model === "object") {
-    const caps = model.capabilities || model.capability || {};
-    if (caps.image_to_image || caps.image_input || caps.imageInput || caps.img2img || caps.edit || caps.editing || caps.inpainting || caps.reference) return true;
-    const inputs = []
-      .concat(model.input_modalities || model.inputModalities || [])
-      .concat(model.modalities && model.modalities.input ? model.modalities.input : [])
-      .concat(Array.isArray(model.input) ? model.input : []);
-    if (inputs.some((m) => /image/i.test(String(m)))) return true;
-    if (model.image === true || model.imageToImage === true || model.reference === true || model.supportsImage === true) return true;
-    const params = model.params || model.parameters || model.supportedParams || [];
-    if (Array.isArray(params) && params.some((p) => /^image$/i.test(String(p)))) return true;
-  }
   return /kontext|nanobanana|nano-banana|gptimage|gpt-image|p-image-edit|qwen-image|seedream|grok-imagine|i2v|img2img|image-?edit|veo|seedance|\bwan\b|wan-|ltx|kling|grok-video|reel/.test(name);
 }
 
-function fillSelect(id, names, fallback) {
+// True when the model can render its own soundtrack (so the "Video audio" control is
+// only offered where it does something).
+function supportsVideoAudio(modelNameValue) {
+  const info = modelInfo(modelNameValue);
+  return info.videoCaps.length ? info.videoCaps.includes("audio_output") : true;
+}
+
+// Rank models for a role: recommended names first, then free before paid, stable
+// before alpha, richer capabilities before thinner ones.
+function rankModels(list, preferred = []) {
+  const rank = (info) => {
+    const pref = preferred.indexOf(info.name);
+    return [
+      pref === -1 ? 99 : pref,
+      info.community ? 1 : 0,
+      info.alpha ? 1 : 0,
+      info.paid ? 1 : 0,
+      -(info.reasoning ? 1 : 0) - (info.tools ? 1 : 0),
+      info.title.toLowerCase(),
+    ];
+  };
+  return [...list].sort((a, b) => {
+    const ra = rank(a);
+    const rb = rank(b);
+    for (let i = 0; i < ra.length; i += 1) {
+      if (ra[i] < rb[i]) return -1;
+      if (ra[i] > rb[i]) return 1;
+    }
+    return 0;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// MODEL PICKER — a searchable, grouped replacement for the bare <select>. The
+// native select stays in the DOM (visually hidden) and remains the single source of
+// truth, so value()/loadSettings/saveSettings/morphUi keep working untouched; the
+// picker just writes to it and dispatches "change".
+// ---------------------------------------------------------------------------
+
+// Hand-picked leads per role. Everything else is still listed — these only decide
+// what sits at the top under "Recommended".
+const PREFERRED_MODELS = {
+  textModel: ["openai", "gpt-5.6-terra", "gpt-5.4-mini", "claude-fast", "gemini-3-flash", "openai-large"],
+  coderModel: ["kimi-code", "qwen-coder", "qwen-coder-large", "deepseek-pro", "glm-5.3", "muse-spark-1.2", "laguna"],
+  searchModel: ["perplexity-fast", "gemini-search", "perplexity", "perplexity-reasoning", "gemini-3-flash"],
+  imageModel: ["flux", "zimage", "nanobanana", "seedream", "kontext", "gptimage"],
+  videoModel: ["veo", "wan", "seedance-2.0-fast", "grok-imagine-video-1.5", "p-video"],
+  audioModel: ["elevenmusic", "stable-audio-3-medium", "eleven-sfx", "lyria-3-clip"],
+  ttsModel: ["elevenflash", "elevenlabs", "kokoro", "grok-tts", "qwen-tts"],
+  sttModel: ["whisper", "scribe", "universal-2", "gpt-transcribe"],
+  embeddingModel: ["openai-3-small", "openai-3-large"],
+  realtimeModel: REALTIME_MODELS,
+};
+
+// The realtime models are not in any /models catalog (they're WebSocket session
+// models, see api.md "Realtime"), so give them index entries by hand for the picker.
+function seedStaticModels() {
+  REALTIME_MODEL_INFO.forEach((m) => {
+    modelIndex.set(m.name, normalizeModel({ name: m.name, title: m.title, description: m.desc, brand: "OpenAI", capabilities: ["tool_calling"], input_modalities: ["text", "audio"], output_modalities: ["text", "audio"] }, "realtime"));
+  });
+}
+
+function fillModelSelect(id, list, fallback) {
   const select = document.querySelector(`#${id}`);
+  if (!select) return;
   const current = state.settings[id] || select.value || fallback;
-  const options = [...new Set([current, fallback, ...names].filter(Boolean))];
+  const visible = rankModels(communityFilter(list, current), PREFERRED_MODELS[id] || []);
+  const names = visible.map((info) => info.name);
+  // Keep the user's selection listed even if it's stale/unknown, so the picker never
+  // silently swaps a model out from under them without saying so.
+  const options = [...new Set([current, ...names, fallback].filter(Boolean))];
   select.innerHTML = "";
   for (const name of options) {
+    const info = modelInfo(name);
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = info.title && info.title !== name ? `${info.title} — ${name}` : name;
+    select.append(option);
+  }
+  // Only move the selection when the saved one is genuinely gone from the catalog
+  // (a retired model). A model hidden purely by the community filter stays selected.
+  const stale = names.length && !names.includes(current) && !modelIndex.has(current);
+  select.value = stale ? (names.includes(fallback) ? fallback : names[0]) : current;
+  if (stale) saveSettings();
+  buildPicker(id, visible, list.length);
+}
+
+function modelBadges(info) {
+  const badges = [];
+  if (info.community) badges.push({ text: "community", cls: "community", title: `Runs on ${info.brand || "a third party"}'s own infrastructure, not Pollinations'` });
+  if (info.alpha) badges.push({ text: "alpha", cls: "alpha", title: "Alpha — may be unstable" });
+  badges.push(info.paid ? { text: "paid", cls: "paid", title: "Requires paid Pollen" } : { text: "free", cls: "free", title: "Usable with Quest Pollen" });
+  if (info.reasoning) badges.push({ text: "reasoning", cls: "cap", title: "Thinks step by step before answering" });
+  if (info.tools) badges.push({ text: "tools", cls: "cap", title: "Supports tool calling — required for this app's features" });
+  if (info.search) badges.push({ text: "search", cls: "cap", title: "Can search the live web" });
+  if (info.inputs.includes("image")) badges.push({ text: "vision", cls: "cap", title: "Accepts image input" });
+  if (info.voices.length) badges.push({ text: `${info.voices.length} voices`, cls: "cap", title: "Built-in voice options" });
+  return badges;
+}
+
+function appendBadges(host, info) {
+  modelBadges(info).forEach((badge) => {
+    const span = document.createElement("span");
+    span.className = `mp-badge ${badge.cls}`;
+    span.textContent = badge.text;
+    span.title = badge.title;
+    host.append(span);
+  });
+}
+
+// Build (or rebuild) the picker UI wrapped around a native model <select>.
+function buildPicker(id, list, allCount) {
+  const select = document.querySelector(`#${id}`);
+  if (!select) return;
+  let root = select.closest(".mp");
+  if (!root) {
+    root = document.createElement("div");
+    root.className = "mp";
+    root.dataset.for = id;
+    select.parentNode.insertBefore(root, select);
+    select.classList.add("mp-native");
+    root.append(select);
+    const trigger = document.createElement("button");
+    trigger.type = "button";
+    trigger.className = "mp-trigger";
+    trigger.setAttribute("aria-haspopup", "listbox");
+    trigger.setAttribute("aria-expanded", "false");
+    const pop = document.createElement("div");
+    pop.className = "mp-pop hidden";
+    const search = document.createElement("input");
+    search.className = "mp-search";
+    search.type = "search";
+    search.placeholder = "Search models…";
+    search.setAttribute("aria-label", "Search models");
+    const results = document.createElement("div");
+    results.className = "mp-list";
+    results.setAttribute("role", "listbox");
+    pop.append(search, results);
+    root.append(trigger, pop);
+    trigger.addEventListener("click", () => togglePicker(id));
+    search.addEventListener("input", () => renderPickerList(id));
+    search.addEventListener("keydown", (event) => pickerKeydown(id, event));
+    // The select can be changed programmatically (coerce, morph_ui); mirror it.
+    select.addEventListener("change", () => syncPickerTrigger(id));
+  }
+  root._models = list;
+  root._allCount = allCount ?? list.length;
+  syncPickerTrigger(id);
+  if (!root.querySelector(".mp-pop").classList.contains("hidden")) renderPickerList(id);
+}
+
+function syncPickerTrigger(id) {
+  const root = document.querySelector(`.mp[data-for="${id}"]`);
+  if (!root) return;
+  const select = root.querySelector("select");
+  const info = modelInfo(select.value);
+  const trigger = root.querySelector(".mp-trigger");
+  trigger.innerHTML = "";
+  const text = document.createElement("span");
+  text.className = "mp-cur";
+  const title = document.createElement("strong");
+  title.textContent = info.title || select.value || "None";
+  const sub = document.createElement("span");
+  sub.className = "mp-cur-sub";
+  sub.textContent = [info.brand, info.name].filter(Boolean).join(" · ") || "—";
+  text.append(title, sub);
+  const badges = document.createElement("span");
+  badges.className = "mp-badges";
+  if (!info.unknown) appendBadges(badges, info);
+  const caret = document.createElement("span");
+  caret.className = "mp-caret";
+  caret.textContent = "▾";
+  trigger.append(text, badges, caret);
+  trigger.title = info.desc || "";
+}
+
+function togglePicker(id, force) {
+  const root = document.querySelector(`.mp[data-for="${id}"]`);
+  if (!root) return;
+  const pop = root.querySelector(".mp-pop");
+  const open = force == null ? pop.classList.contains("hidden") : force;
+  document.querySelectorAll(".mp-pop").forEach((other) => other.classList.add("hidden"));
+  document.querySelectorAll(".mp-trigger").forEach((other) => other.setAttribute("aria-expanded", "false"));
+  pop.classList.toggle("hidden", !open);
+  root.querySelector(".mp-trigger").setAttribute("aria-expanded", open ? "true" : "false");
+  if (!open) return;
+  const search = root.querySelector(".mp-search");
+  search.value = "";
+  renderPickerList(id);
+  search.focus();
+  // The drawer scrolls, so a picker opened near its bottom would otherwise render
+  // mostly off-screen.
+  pop.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+function renderPickerList(id) {
+  const root = document.querySelector(`.mp[data-for="${id}"]`);
+  if (!root) return;
+  const select = root.querySelector("select");
+  const list = root._models || [];
+  const query = root.querySelector(".mp-search").value.trim().toLowerCase();
+  const match = (info) => !query || `${info.name} ${info.title} ${info.brand} ${info.desc}`.toLowerCase().includes(query);
+  const hits = list.filter(match);
+  const preferred = PREFERRED_MODELS[id] || [];
+  const groups = [
+    { label: "Recommended", items: hits.filter((info) => preferred.includes(info.name)) },
+    { label: "Official", items: hits.filter((info) => !preferred.includes(info.name) && !info.community) },
+    { label: "Community", items: hits.filter((info) => !preferred.includes(info.name) && info.community) },
+  ];
+  const results = root.querySelector(".mp-list");
+  results.innerHTML = "";
+  let rendered = 0;
+  groups.forEach((group) => {
+    if (!group.items.length) return;
+    const head = document.createElement("div");
+    head.className = "mp-group";
+    head.textContent = group.label;
+    results.append(head);
+    group.items.forEach((info) => {
+      results.append(pickerRow(id, info, select.value === info.name));
+      rendered += 1;
+    });
+  });
+  if (!rendered) {
+    const empty = document.createElement("div");
+    empty.className = "mp-empty";
+    empty.textContent = query ? `No model matches “${query}”.` : "No models available for this role yet.";
+    results.append(empty);
+  }
+  const hidden = (root._allCount || 0) - list.length;
+  if (!includeCommunity() && hidden > 0) {
+    const note = document.createElement("button");
+    note.type = "button";
+    note.className = "mp-community-note";
+    note.textContent = `+ ${hidden} community model${hidden > 1 ? "s" : ""} hidden — show them`;
+    note.addEventListener("click", () => {
+      const box = document.querySelector("#flagCommunityModels");
+      if (box) box.checked = true;
+      setIncludeCommunity(true);
+      togglePicker(id, true);
+    });
+    results.append(note);
+  }
+}
+
+function pickerRow(id, info, selected) {
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = `mp-row${selected ? " selected" : ""}`;
+  row.setAttribute("role", "option");
+  row.setAttribute("aria-selected", selected ? "true" : "false");
+  row.dataset.name = info.name;
+  const head = document.createElement("div");
+  head.className = "mp-row-head";
+  const title = document.createElement("strong");
+  title.textContent = info.title || info.name;
+  const brand = document.createElement("span");
+  brand.className = "mp-row-brand";
+  brand.textContent = info.brand || info.name;
+  head.append(title, brand);
+  const badges = document.createElement("div");
+  badges.className = "mp-row-badges";
+  appendBadges(badges, info);
+  row.append(head, badges);
+  if (info.desc) {
+    const desc = document.createElement("p");
+    desc.className = "mp-row-desc";
+    desc.textContent = info.desc;
+    row.append(desc);
+  }
+  const foot = document.createElement("div");
+  foot.className = "mp-row-foot";
+  foot.textContent = [info.name, info.ctx ? `${Math.round(info.ctx / 1000)}k context` : ""].filter(Boolean).join(" · ");
+  row.append(foot);
+  row.addEventListener("click", () => choosePickerModel(id, info.name));
+  return row;
+}
+
+function choosePickerModel(id, name) {
+  const select = document.querySelector(`#${id}`);
+  if (!select) return;
+  if (!Array.from(select.options).some((option) => option.value === name)) {
     const option = document.createElement("option");
     option.value = name;
     option.textContent = name;
     select.append(option);
   }
-  select.value = options.includes(current) ? current : fallback;
+  select.value = name;
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+  togglePicker(id, false);
+  playSound("messageSend");
+}
+
+// Arrow keys move through the visible rows from the search box; Enter picks.
+function pickerKeydown(id, event) {
+  const root = document.querySelector(`.mp[data-for="${id}"]`);
+  if (!root) return;
+  const rows = [...root.querySelectorAll(".mp-row")];
+  if (event.key === "Escape") { togglePicker(id, false); root.querySelector(".mp-trigger").focus(); return; }
+  if (!rows.length) return;
+  const active = root.querySelector(".mp-row.active") || root.querySelector(".mp-row.selected");
+  const index = rows.indexOf(active);
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    const next = rows[Math.max(0, Math.min(rows.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)))] || rows[0];
+    rows.forEach((row) => row.classList.remove("active"));
+    next.classList.add("active");
+    next.scrollIntoView({ block: "nearest" });
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    const target = active || rows[0];
+    if (target) choosePickerModel(id, target.dataset.name);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Model-dependent controls. Voices, sizes and durations are properties OF the chosen
+// model — the API publishes them per model, so the UI reads them from the metadata
+// instead of offering one hardcoded list that is wrong for most models (the TTS voice
+// select used to offer 8 OpenAI names to models that expose 6, 28, 35 or 54 of their
+// own — or none at all).
+// ---------------------------------------------------------------------------
+function syncModelDependentFields() {
+  syncTtsVoices();
+  syncVideoControls();
+}
+
+function syncTtsVoices() {
+  const select = document.querySelector("#ttsVoice");
+  if (!select) return;
+  const info = modelInfo(ttsModelName());
+  // null means "never chosen" — speak by default, as the app always has. An explicitly
+  // saved "" is the user picking Off, and must survive a model switch.
+  const current = state.settings.ttsVoice ?? null;
+  select.innerHTML = "";
+  const off = document.createElement("option");
+  off.value = "";
+  off.textContent = "Off — no spoken reply";
+  select.append(off);
+  if (!info.voices.length) {
+    const auto = document.createElement("option");
+    auto.value = "default";
+    auto.textContent = `Default voice (${info.title || info.name} publishes no voice list)`;
+    select.append(auto);
+    select.value = current === "" ? "" : "default";
+    return;
+  }
+  info.voices.forEach((voice) => {
+    const option = document.createElement("option");
+    option.value = voice;
+    option.textContent = voice;
+    select.append(option);
+  });
+  // Keep the current voice when the new model also offers it, so switching between
+  // two ElevenLabs models doesn't silently change who is speaking.
+  select.value = info.voices.includes(current) ? current : (current === "" ? "" : info.voices[0]);
+}
+
+function syncVideoControls() {
+  const model = value("videoModel");
+  const info = modelInfo(model);
+  const duration = document.querySelector("#videoDuration");
+  if (duration && info.durations.length) {
+    const current = Number(state.settings.videoDuration || duration.value) || 0;
+    duration.innerHTML = "";
+    info.durations.forEach((seconds) => {
+      const option = document.createElement("option");
+      option.value = String(seconds);
+      option.textContent = `${seconds}s`;
+      duration.append(option);
+    });
+    duration.value = info.durations.includes(current) ? String(current) : String(info.durations[Math.min(1, info.durations.length - 1)]);
+  }
+  const resolution = document.querySelector("#videoResolution");
+  if (resolution) {
+    const options = info.resolutions.length ? info.resolutions : ["720p", "1080p"];
+    const current = state.settings.videoResolution || resolution.value;
+    resolution.innerHTML = "";
+    options.forEach((name) => {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      resolution.append(option);
+    });
+    resolution.value = options.includes(current) ? current : options[0];
+  }
+  // Only offer the soundtrack switch on models that can actually render audio.
+  const audio = document.querySelector("#videoAudio");
+  const audioField = audio?.closest("label");
+  if (audio && audioField) {
+    const supported = supportsVideoAudio(model);
+    audioField.classList.toggle("hidden", !supported);
+    if (!supported) audio.value = "false";
+  }
+}
+
+// Compact "what am I actually running" strip at the top of the Config drawer.
+function renderModelSummary() {
+  const host = document.querySelector("#modelSummary");
+  if (!host) return;
+  host.innerHTML = "";
+  const roles = [
+    { id: "textModel", label: "Assistant" },
+    { id: "coderModel", label: "Coder" },
+    { id: "searchModel", label: "Search" },
+    { id: "imageModel", label: "Image" },
+    { id: "videoModel", label: "Video" },
+    { id: "ttsModel", label: "Voice" },
+  ];
+  roles.forEach((role) => {
+    const info = modelInfo(value(role.id));
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "model-chip";
+    chip.title = `${role.label}: ${info.title || info.name}${info.desc ? ` — ${info.desc}` : ""}\nClick to change`;
+    const key = document.createElement("span");
+    key.className = "model-chip-key";
+    key.textContent = role.label;
+    const val = document.createElement("strong");
+    val.textContent = info.title || info.name || "—";
+    chip.append(key, val);
+    chip.addEventListener("click", () => {
+      document.querySelector(`.mp[data-for="${role.id}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+      togglePicker(role.id, true);
+    });
+    host.append(chip);
+  });
 }
 
 function clearApiKey() {
@@ -905,7 +1552,7 @@ async function startRealtime() {
   mutedMonitor.gain.value = 0;
   const analyser = makeOrbAnalyser(audioContext);
   source.connect(analyser); // mic drives the orb while listening
-  const socket = new WebSocket(`${GEN_BASE.replace("https", "wss")}/v1/realtime?model=${REALTIME_MODEL}&key=${encodeURIComponent(state.apiKey)}`);
+  const socket = new WebSocket(`${GEN_BASE.replace("https", "wss")}/v1/realtime?model=${realtimeModel()}&key=${encodeURIComponent(state.apiKey)}`);
 
   state.realtime = { socket, stream, audioContext, processor, output, mutedMonitor, analyser, nextStart: audioContext.currentTime, gotSession: false, gotAudio: false, retriedWithoutVoice: false, handledCalls: new Set(), scheduled: [], responseActive: false, bargeFrames: 0, audioTailUntil: 0 };
   setOrb("listening");
@@ -1363,13 +2010,16 @@ async function handleToolCalls(messages, assistantMessage, speak) {
 
 async function speakText(text) {
   const model = ttsModelName();
-  const voice = value("ttsVoice") || "nova";
+  const selected = value("ttsVoice");
+  // Models with no published voice list (e.g. qwen-tts) reject a voice param, so send
+  // the request without one rather than guessing an OpenAI voice name.
+  const voice = selected && selected !== "default" ? selected : "";
   let res;
   try {
     res = await fetch(`${GEN_BASE}/v1/audio/speech`, {
       method: "POST",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({ model, voice, input: text, response_format: "mp3" }),
+      body: JSON.stringify({ model, ...(voice ? { voice } : {}), input: text, response_format: "mp3" }),
     });
   } catch (error) {
     addMessage("system", `Text-to-speech network error: ${error.message || error}`);
@@ -1659,18 +2309,41 @@ async function runMediaGeneration(kind, prompt, model, toolId, options = {}) {
 // Turn any "W:H" (or "WxH") aspect ratio into concrete pixel dimensions, targeting
 // ~720 on the short side. Lets the user/agent pass ANY ratio (21:9, 1:1, 4:5, …)
 // instead of being limited to two hardcoded shapes.
-function videoDimensions(aspect) {
+function videoDimensions(aspect, resolution) {
   const m = /^\s*(\d+)\s*[:x]\s*(\d+)\s*$/.exec(String(aspect || ""));
   const w = m ? Number(m[1]) || 16 : 16;
   const h = m ? Number(m[2]) || 9 : 9;
   const ratio = w / h;
+  const shortSide = resolutionShortSide(resolution);
   let width;
   let height;
-  if (ratio >= 1) { height = 720; width = Math.round(720 * ratio); }
-  else { width = 720; height = Math.round(720 / ratio); }
+  if (ratio >= 1) { height = shortSide; width = Math.round(shortSide * ratio); }
+  else { width = shortSide; height = Math.round(shortSide / ratio); }
   width -= width % 2;
   height -= height % 2;
   return { width, height, aspect: `${w}:${h}` };
+}
+
+// Video models advertise resolutions as labels ("480p", "1080p", "2k"), not pixels.
+// Turn one into the short-side pixel count the /video endpoint wants.
+function resolutionShortSide(label) {
+  const name = String(label || "").trim().toLowerCase();
+  const px = /^(\d+)p$/.exec(name);
+  if (px) return Number(px[1]);
+  if (name === "1k") return 1024;
+  if (name === "2k") return 1440;
+  if (name === "4k") return 2160;
+  return 720;
+}
+
+// Snap a requested clip length onto what the model actually accepts. Asking wan-3.0
+// (fixed 5s) for 6 seconds, or veo (4/6/8) for 15, is a request the API rejects — and
+// the agent may pass any number it likes through create_video's duration argument.
+function clampVideoDuration(model, requested) {
+  const wanted = Number(requested) || 6;
+  const allowed = modelInfo(model).durations;
+  if (!allowed.length) return wanted > 0 ? wanted : 6;
+  return allowed.reduce((best, option) => (Math.abs(option - wanted) < Math.abs(best - wanted) ? option : best), allowed[0]);
 }
 
 function mediaParams(kind, loaderKind, model, options = {}) {
@@ -1683,19 +2356,23 @@ function mediaParams(kind, loaderKind, model, options = {}) {
     if (options.images?.length) params.set("image", options.images.join("|"));
   }
   if (kind === "video") {
-    const dims = videoDimensions(options.aspectRatio || value("videoAspect") || "16:9");
+    const dims = videoDimensions(options.aspectRatio || value("videoAspect") || "16:9", options.resolution || value("videoResolution"));
     params.set("width", String(dims.width));
     params.set("height", String(dims.height));
     params.set("aspectRatio", dims.aspect);
-    const duration = Number(options.duration || value("videoDuration") || 6);
-    params.set("duration", String(duration > 0 ? duration : 6));
-    params.set("audio", String(options.withAudio ?? value("videoAudio") ?? "false"));
+    params.set("duration", String(clampVideoDuration(model, options.duration || value("videoDuration"))));
+    // Only send the audio flag to models that can render a soundtrack.
+    if (supportsVideoAudio(model)) params.set("audio", String(options.withAudio ?? value("videoAudio") ?? "false"));
     if (options.images?.length) params.set("image", options.images.join("|"));
   }
   if (kind === "audio") {
     params.set("response_format", "mp3");
-    if (loaderKind === "tts") params.set("voice", value("ttsVoice") || "nova");
-    else params.set("duration", String(options.duration || value("musicDuration") || "30"));
+    // "default" means the model has no published voice list — omit the param entirely
+    // rather than sending an OpenAI voice name the model has never heard of.
+    if (loaderKind === "tts") {
+      const voice = value("ttsVoice");
+      if (voice && voice !== "default") params.set("voice", voice);
+    } else params.set("duration", String(options.duration || value("musicDuration") || "30"));
   }
   return params;
 }
@@ -1704,8 +2381,10 @@ function sourceCapableModel(kind) {
   // Keep the user's selected model if it already supports source images.
   const current = value(kind === "video" ? "videoModel" : "imageModel");
   if (current && supportsImageInput(current)) return current;
-  const list = kind === "video" ? videoModelsOnly() : imageModelsOnly();
-  return modelName(list.find((model) => supportsImageInput(modelName(model)))) || "";
+  // Prefer a model the user could reasonably have picked themselves: official and
+  // recommended first, community last (rankModels already orders it that way).
+  const list = rankModels(communityFilter(kind === "video" ? videoModelsOnly() : imageModelsOnly(), current), PREFERRED_MODELS[kind === "video" ? "videoModel" : "imageModel"]);
+  return (list.find((info) => info.inputs.includes("image")) || {}).name || "";
 }
 
 function cleanTtsPrompt(prompt) {
@@ -2373,7 +3052,7 @@ function realtimeSessionConfig(includeVoice) {
     tools: realtimeToolDefinitions(),
   };
   const voice = value("realtimeVoice");
-  // gpt-realtime-2.1 can emit its own voice; request the selected one when supported.
+  // The realtime model emits its own voice; request the selected one when supported.
   // If the proxy rejects it, handleRealtimeEvent retries with includeVoice=false.
   if (includeVoice && voice) session.audio = { output: { voice } };
   return session;
@@ -2388,7 +3067,7 @@ function objectParams(properties, required) {
 }
 
 function systemPrompt() {
-  return `You are a polished voice-first AI agent. Realtime mode must use ${REALTIME_MODEL}. Personality: ${personalityInstruction()}. Be conversational and brief by default. For plain informational structure, call show_workspace with layout note, table, metrics, or code (real structured data, not prose). For ANYTHING interactive or visual — charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, custom visualizations — call build_widget, which generates a live sandboxed widget on the canvas. Widgets can persist their own data (a WidgetStore the user keeps) and embed the user's saved gallery media. To make a widget that shows or uses saved media (a slideshow, image gallery, moodboard, audio/video player), call build_widget with galleryFilter set to the kind ("image"/"video"/"audio"/"all") — the recent matching items are attached automatically, so you do NOT need exact ids; only pass galleryIds when you already have specific ones. To fix, restyle, or extend a widget the user already has, call edit_widget with the change; call save_widget to keep one in their library. To show source code or markup, use layout "code". This app works identically whether the user TALKS OR TYPES — many users have no microphone, so you must be fully capable over text chat, including image editing. IMAGE EDITING / IMAGE-TO-VIDEO: to edit, restyle, fix, or vary an existing or user-uploaded image, call create_image with sourceImageIds set to that image's gallery id and put the change in prompt — this is a one-step edit. To animate an image into a video, call create_video with sourceImageIds. The user can upload images directly in chat; uploads are auto-saved to the gallery, so if you are unsure of an id, call list_gallery first to find it (newest entries are the recently uploaded ones). Only when no usable image exists yet (none uploaded and none in the gallery) call request_source_images to collect one. use_gallery_sources is an alternative when working from several gallery selections. Call create_image with no sourceImageIds for a brand-new image. If the user would rather drive generation themselves, call open_generator to place an interactive Image, Video, or Movie generator widget on the canvas (e.g. "open the image generator"). To produce a multi-scene film that continues shot-to-shot, call create_movie (or open_generator 'movie' for the hands-on Movie Maker). You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink; ask the human's consent first unless they already requested it. You have a persistent long-term memory across sessions: call remember to store a durable fact about the user and forget to remove one — only durable things, not one-off chatter. You can manage the user's saved media with manage_gallery. If any tool returns an error, a generation fails, or the user says something "failed", "isn't working", or "hung", call network_issue to read the actual server error and a live connectivity check, then explain the cause and the fix in plain language and offer to retry — don't silently ignore failures. Note that failed generations already retry up to 3 times automatically and then stop to avoid wasting the user's Pollen; do not spam more generations after a hard failure. Only end the live session (end_conversation) when the user explicitly asks to stop, end, or hang up — never on your own initiative. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery." The app has two UI versions: v1 (classic) and v2 — "VoiceEnable OS", a reimagined desktop where every widget/artifact becomes its own movable window (many at once) and the whole interface can morph to fit the setup. If the user asks to "upgrade to version 2", turn on the web OS, or go back to v1, call set_version (upgrading plays a cinematic reveal). v2 is a full, agentic desktop OS with switchable desktop-environment shells — macOS, Windows, and ChromeOS looks (set_os, or morph_ui os) — and switchable surface styles: mixed, glassmorphic, neumorphic, or studio-flat (morph_ui style). Via morph_ui you can also change the color theme + accent and the layout, and tile/cascade/stack the open windows — so you can reshape the ENTIRE interface to fit the moment (e.g. a Mac desktop in cinematic dark glass for movie work, or a crisp Windows studio look for focused writing). Reloading the page in v2 plays an OS boot sequence. Users can always return to v1 from the version button, so reassure them it's reversible.${nativeNote()}${memoryPromptSection()}${savedWidgetsPromptSection()}`;
+  return `You are a polished voice-first AI agent. Realtime mode must use ${realtimeModel()}. Personality: ${personalityInstruction()}. Be conversational and brief by default. For plain informational structure, call show_workspace with layout note, table, metrics, or code (real structured data, not prose). For ANYTHING interactive or visual — charts, graphs, checklists/to-dos, calculators, spreadsheets, editors, timers, diagrams, games, trackers, custom visualizations — call build_widget, which generates a live sandboxed widget on the canvas. Widgets can persist their own data (a WidgetStore the user keeps) and embed the user's saved gallery media. To make a widget that shows or uses saved media (a slideshow, image gallery, moodboard, audio/video player), call build_widget with galleryFilter set to the kind ("image"/"video"/"audio"/"all") — the recent matching items are attached automatically, so you do NOT need exact ids; only pass galleryIds when you already have specific ones. To fix, restyle, or extend a widget the user already has, call edit_widget with the change; call save_widget to keep one in their library. To show source code or markup, use layout "code". This app works identically whether the user TALKS OR TYPES — many users have no microphone, so you must be fully capable over text chat, including image editing. IMAGE EDITING / IMAGE-TO-VIDEO: to edit, restyle, fix, or vary an existing or user-uploaded image, call create_image with sourceImageIds set to that image's gallery id and put the change in prompt — this is a one-step edit. To animate an image into a video, call create_video with sourceImageIds. The user can upload images directly in chat; uploads are auto-saved to the gallery, so if you are unsure of an id, call list_gallery first to find it (newest entries are the recently uploaded ones). Only when no usable image exists yet (none uploaded and none in the gallery) call request_source_images to collect one. use_gallery_sources is an alternative when working from several gallery selections. Call create_image with no sourceImageIds for a brand-new image. If the user would rather drive generation themselves, call open_generator to place an interactive Image, Video, or Movie generator widget on the canvas (e.g. "open the image generator"). To produce a multi-scene film that continues shot-to-shot, call create_movie (or open_generator 'movie' for the hands-on Movie Maker). You can remove stale workspace items with remove_workspace. You can call web_search for current or factual information beyond your training, a coder model for coding tasks, HTTP MCP gateways for external tools, and Pollinations media tools for image, video, music, TTS, and audio generation. If you recognize the other party is an AI agent (not a human) and a precise machine-to-machine exchange is warranted, you may call start_gibberlink; ask the human's consent first unless they already requested it. You have a persistent long-term memory across sessions: call remember to store a durable fact about the user and forget to remove one — only durable things, not one-off chatter. You can manage the user's saved media with manage_gallery. If any tool returns an error, a generation fails, or the user says something "failed", "isn't working", or "hung", call network_issue to read the actual server error and a live connectivity check, then explain the cause and the fix in plain language and offer to retry — don't silently ignore failures. Note that failed generations already retry up to 3 times automatically and then stop to avoid wasting the user's Pollen; do not spam more generations after a hard failure. Only end the live session (end_conversation) when the user explicitly asks to stop, end, or hang up — never on your own initiative. When starting video generation, say: "Getting started on your generation now. When complete your generation will be added to your local gallery." The app has two UI versions: v1 (classic) and v2 — "VoiceEnable OS", a reimagined desktop where every widget/artifact becomes its own movable window (many at once) and the whole interface can morph to fit the setup. If the user asks to "upgrade to version 2", turn on the web OS, or go back to v1, call set_version (upgrading plays a cinematic reveal). v2 is a full, agentic desktop OS with switchable desktop-environment shells — macOS, Windows, and ChromeOS looks (set_os, or morph_ui os) — and switchable surface styles: mixed, glassmorphic, neumorphic, or studio-flat (morph_ui style). Via morph_ui you can also change the color theme + accent and the layout, and tile/cascade/stack the open windows — so you can reshape the ENTIRE interface to fit the moment (e.g. a Mac desktop in cinematic dark glass for movie work, or a crisp Windows studio look for focused writing). Reloading the page in v2 plays an OS boot sequence. Users can always return to v1 from the version button, so reassure them it's reversible.${nativeNote()}${memoryPromptSection()}${savedWidgetsPromptSection()}`;
 }
 
 // Extra system guidance only present in the desktop build, where the filesystem and
@@ -3341,6 +4020,7 @@ function enableWindowDrag(win, handle, id) {
     const ox = win.offsetLeft;
     const oy = win.offsetTop;
     try { handle.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    win.classList.add("dragging");
     const move = (ev) => {
       // Keep the WHOLE window inside the desktop free area (no clipping, titlebar always
       // grabbable). Reaching the exact edges still triggers the snap zones on release.
@@ -3350,23 +4030,65 @@ function enableWindowDrag(win, handle, id) {
       const ny = Math.max(0, Math.min(oy + (ev.clientY - startY), maxY));
       win.style.left = `${nx}px`;
       win.style.top = `${ny}px`;
+      // Show where the window would land, so edge snapping stops being invisible
+      // until after you let go.
+      showSnapPreview(snapZoneFor(win, host));
     };
     const up = () => {
       handle.removeEventListener("pointermove", move);
       handle.removeEventListener("pointerup", up);
+      win.classList.remove("dragging");
+      hideSnapPreview();
       const s = windowState(id);
       const left = win.offsetLeft;
       const top = win.offsetTop;
-      const right = left + win.offsetWidth;
       // Edge snapping (OS-style): top → maximize, left/right edge → half-tile.
-      if (top <= 6) { s.max = true; s.snap = "max"; saveWindows(); renderWorkspace(); return; }
-      if (left <= 6) { snapWindow(id, "left", host); return; }
-      if (right >= host.width - 6) { snapWindow(id, "right", host); return; }
+      const zone = snapZoneFor(win, host);
+      if (zone === "max") { s.max = true; s.snap = "max"; saveWindows(); renderWorkspace(); return; }
+      if (zone === "left" || zone === "right") { snapWindow(id, zone, host); return; }
       s.x = left; s.y = top; s.snap = ""; saveWindows();
     };
     handle.addEventListener("pointermove", move);
     handle.addEventListener("pointerup", up);
   });
+}
+
+// Which snap zone a dragged window is currently in ("" when none). The window is
+// clamped inside the desktop, so "touching an edge" means offset 0 / flush right.
+function snapZoneFor(win, host) {
+  const left = win.offsetLeft;
+  const top = win.offsetTop;
+  if (top <= 6) return "max";
+  if (left <= 6) return "left";
+  if (left + win.offsetWidth >= host.width - 6) return "right";
+  return "";
+}
+
+// Translucent ghost of the region a window will snap into, drawn in the desktop's
+// free area while dragging. Mirrors what Windows/macOS show at the screen edges.
+function showSnapPreview(zone) {
+  const host = el.adaptiveWorkspace;
+  if (!zone) { hideSnapPreview(); return; }
+  let ghost = host.querySelector(":scope > .ve-snapghost");
+  if (!ghost) {
+    ghost = document.createElement("div");
+    ghost.className = "ve-snapghost";
+    host.append(ghost);
+  }
+  const w = host.clientWidth;
+  const h = host.clientHeight;
+  const box = zone === "max"
+    ? { x: 0, y: 0, w, h }
+    : { x: zone === "right" ? Math.ceil(w / 2) : 0, y: 0, w: Math.floor(w / 2), h };
+  ghost.style.left = `${box.x}px`;
+  ghost.style.top = `${box.y}px`;
+  ghost.style.width = `${box.w}px`;
+  ghost.style.height = `${box.h}px`;
+  ghost.classList.add("on");
+}
+
+function hideSnapPreview() {
+  el.adaptiveWorkspace.querySelector(":scope > .ve-snapghost")?.remove();
 }
 
 // Half-tile a window to the left or right edge of the desktop.
@@ -3537,6 +4259,7 @@ function buildOsChrome() {
     "<button class='ve-osmenu' title='Apps'>◈ <b>VoiceEnable OS</b></button>" +
     "<span class='ve-activetitle'></span>" +
     "<div class='ve-tray'>" +
+      "<button class='ve-model' title='Active assistant model — click to change'>—</button>" +
       "<span class='ve-pollen'>Pollen --</span>" +
       "<span class='ve-authdot' title='Connection'></span>" +
       "<button class='ve-tsound' title='Sound'>🔊</button>" +
@@ -3653,6 +4376,11 @@ function drawOsViz() {
 function wireOsChrome() {
   const top = el.osTopbar; const bar = el.osTaskbar; const launcher = el.osLauncher;
   top.querySelector(".ve-osmenu").addEventListener("click", () => toggleLauncher());
+  top.querySelector(".ve-model").addEventListener("click", () => {
+    openDrawer("settingsDrawer");
+    showConfigTab(state.mode === "realtime" ? "voice" : "models");
+    togglePicker(state.mode === "realtime" ? "realtimeModel" : "textModel", true);
+  });
   top.querySelector(".ve-exit").addEventListener("click", () => setUiVersion("1", { animate: true }));
   top.querySelector(".ve-tsound").addEventListener("click", () => setSoundMuted(!sound.muted));
   bar.querySelector(".ve-start").addEventListener("click", () => toggleLauncher());
@@ -3664,6 +4392,7 @@ function wireOsChrome() {
   launcher.querySelectorAll("[data-arrange]").forEach((b) => b.addEventListener("click", () => { arrangeWindows(b.dataset.arrange); toggleLauncher(false); }));
   launcher.querySelectorAll("[data-wall]").forEach((b) => b.addEventListener("click", () => { setWallpaper(b.dataset.wall); }));
   el.adaptiveWorkspace.addEventListener("contextmenu", (e) => { if (state.version !== "2") return; e.preventDefault(); showDesktopMenu(e.clientX, e.clientY); });
+  bindOsShortcuts();
   // Click-away closes the launcher.
   document.addEventListener("pointerdown", (e) => {
     if (!el.osLauncher || el.osLauncher.classList.contains("hidden")) return;
@@ -3694,10 +4423,16 @@ function refreshOsChrome() {
   dot.title = connected ? "Connected" : "Not connected";
   el.osTopbar.querySelector(".ve-tsound").textContent = sound.muted ? "🔇" : "🔊";
   // Active window title = the top-most (highest z) non-minimized window.
-  let activeTitle = "";
-  let bestZ = -1;
-  state.workspace.forEach((a) => { const s = state.windows[a.id]; if (s && !s.minimized && (s.z || 0) > bestZ) { bestZ = s.z || 0; activeTitle = a.title || a.layout; } });
-  el.osTopbar.querySelector(".ve-activetitle").textContent = activeTitle;
+  const focusedId = topWindowId();
+  const focused = state.workspace.find((a) => a.id === focusedId);
+  el.osTopbar.querySelector(".ve-activetitle").textContent = focused ? (focused.title || focused.layout) : "";
+  // Which brain is answering, right in the menu bar.
+  const modelBtn = el.osTopbar.querySelector(".ve-model");
+  if (modelBtn) {
+    const info = modelInfo(state.mode === "realtime" ? realtimeModel() : value("textModel"));
+    modelBtn.textContent = info.title || info.name || "—";
+    modelBtn.title = `${state.mode === "realtime" ? "Realtime" : "Assistant"} model: ${info.name}${info.desc ? `\n${info.desc}` : ""}\nClick to change`;
+  }
   // Mode + talk state.
   el.osTaskbar.querySelectorAll(".ve-mode").forEach((b) => b.classList.toggle("active", b.dataset.mode === state.mode));
   const talk = el.osTaskbar.querySelector(".ve-talk");
@@ -3708,21 +4443,78 @@ function refreshOsChrome() {
   el.osLauncher.querySelectorAll("[data-wall]").forEach((b) => b.classList.toggle("on", b.dataset.wall === state.wallpaper));
 }
 
-// Window chips in the taskbar dock (open/minimized). Replaces the in-desktop dock.
+// Window chips in the taskbar dock (open/minimized/focused). Replaces the in-desktop
+// dock. Clicking the focused window's own chip minimizes it, like a real taskbar.
 function syncTaskbarWindows() {
   if (!el.osTaskbar) return;
   const zone = el.osTaskbar.querySelector(".ve-dockzone");
   if (!zone) return;
   zone.innerHTML = "";
+  const focused = topWindowId();
   state.workspace.forEach((a) => {
     const s = windowState(a.id);
+    const active = !s.minimized && a.id === focused;
     const chip = document.createElement("button");
-    chip.className = "ve-dock-chip" + (s.minimized ? " min" : "");
-    chip.textContent = a.title || a.layout;
-    chip.title = s.minimized ? "Restore" : "Bring to front";
-    chip.addEventListener("click", () => (s.minimized ? restoreWindow(a.id) : focusWindow(a.id)));
+    chip.className = "ve-dock-chip" + (s.minimized ? " min" : "") + (active ? " active" : "");
+    const glyph = document.createElement("span");
+    glyph.className = "ve-dock-glyph";
+    glyph.textContent = windowGlyph(a.layout);
+    const label = document.createElement("span");
+    label.className = "ve-dock-label";
+    label.textContent = a.title || a.layout;
+    chip.append(glyph, label);
+    chip.title = s.minimized ? `Restore “${a.title || a.layout}”` : active ? "Minimize" : "Bring to front";
+    chip.addEventListener("click", () => {
+      if (s.minimized) restoreWindow(a.id);
+      else if (active) minimizeWindow(a.id);
+      else focusWindow(a.id);
+    });
     zone.append(chip);
   });
+}
+
+function windowGlyph(layout) {
+  const glyphs = { widget: "🧩", project: "📦", code: "⌨", image: "🖼", image_request: "🖼", chart: "📊", table: "▦", metrics: "📈", checklist: "☑", note: "📝" };
+  return glyphs[layout] || "▢";
+}
+
+// Id of the front-most non-minimized window, or "" when the desktop is empty.
+function topWindowId() {
+  let best = "";
+  let bestZ = -1;
+  state.workspace.forEach((a) => {
+    const s = state.windows[a.id];
+    if (s && !s.minimized && (s.z || 0) > bestZ) { bestZ = s.z || 0; best = a.id; }
+  });
+  return best;
+}
+
+// Alt+` / Ctrl+` cycles through open windows; Escape closes the launcher. Only active
+// in v2, and never while the user is typing into a field.
+function bindOsShortcuts() {
+  document.addEventListener("keydown", (event) => {
+    if (state.version !== "2") return;
+    if (event.key === "Escape" && el.osLauncher && !el.osLauncher.classList.contains("hidden")) {
+      toggleLauncher(false);
+      return;
+    }
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "") || document.activeElement?.isContentEditable;
+    if (typing) return;
+    if (event.key === "`" && (event.altKey || event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      cycleWindows(event.shiftKey ? -1 : 1);
+    }
+  });
+}
+
+function cycleWindows(direction) {
+  const open = state.workspace.filter((a) => !windowState(a.id).minimized);
+  if (open.length < 2) return;
+  const current = open.findIndex((a) => a.id === topWindowId());
+  const next = open[(current + direction + open.length) % open.length];
+  focusWindow(next.id);
+  refreshOsChrome();
+  playSound("messageSend");
 }
 
 // ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="dark light">
   <meta name="theme-color" content="#070812">
   <title>VoiceEnable Agent</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3CradialGradient id='g' cx='38%25' cy='32%25'%3E%3Cstop offset='0%25' stop-color='%23bfeaff'/%3E%3Cstop offset='55%25' stop-color='%238e6cff'/%3E%3Cstop offset='100%25' stop-color='%23ff4fd8'/%3E%3C/radialGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='%23070812'/%3E%3Ccircle cx='16' cy='16' r='9' fill='url(%23g)'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap">
@@ -116,43 +117,114 @@
         <h2>Configuration</h2>
         <button class="button ghost small drawer-close" type="button">Close</button>
       </div>
-        <p id="modelStatus" class="model-status">Loading live model lists...</p>
-        <h3 class="config-section">Features</h3>
-        <div class="toggle-list">
-          <label class="toggle"><input id="flagEndConversation" type="checkbox"><span>Let the agent end the session when you ask it to</span></label>
-          <label class="toggle"><input id="flagVoiceInterrupt" type="checkbox"><span>Voice barge-in — talking interrupts the model in realtime</span></label>
-          <label class="toggle"><input id="flagAutosaveUploads" type="checkbox"><span>Auto-save uploaded images to the gallery</span></label>
-          <label class="toggle"><input id="flagCamera" type="checkbox"><span>Allow live camera vision in realtime</span></label>
-        </div>
 
-        <h3 class="config-section">Desktop</h3>
-        <p id="desktopStatus" class="desktop-status">Web mode — download the desktop app for local files, a real coding agent, and shell access.</p>
-        <a id="desktopDownload" class="button primary" href="#" download>⬇ Download the desktop app</a>
-        <div id="desktopControls" class="desktop-controls hidden">
-          <button id="pickWorkspace" class="button ghost small" type="button">Choose workspace folder…</button>
-          <div class="toggle-list">
-            <label class="toggle"><input id="flagSaveToDisk" type="checkbox"><span>Save generated media to the workspace folder as real files</span></label>
-            <label class="toggle"><input id="flagAllowShell" type="checkbox"><span>Let the agent run shell commands (you approve each one)</span></label>
+      <div id="modelSummary" class="model-summary" aria-label="Active models"></div>
+      <div class="model-status-row">
+        <p id="modelStatus" class="model-status">Loading live model lists...</p>
+        <button id="refreshModels" class="button ghost small" type="button" title="Re-read the live model catalogs from Pollinations">⟳ Refresh</button>
+      </div>
+
+      <div class="config-toolbar">
+        <input id="configSearch" class="config-search" type="search" placeholder="Search settings and models…" aria-label="Search settings">
+        <nav class="config-tabs" role="tablist" aria-label="Configuration sections">
+          <button class="config-tab active" type="button" data-tab="models" role="tab" aria-selected="true">Models</button>
+          <button class="config-tab" type="button" data-tab="voice" role="tab" aria-selected="false">Voice</button>
+          <button class="config-tab" type="button" data-tab="media" role="tab" aria-selected="false">Media</button>
+          <button class="config-tab" type="button" data-tab="interface" role="tab" aria-selected="false">Interface</button>
+          <button class="config-tab" type="button" data-tab="system" role="tab" aria-selected="false">System</button>
+        </nav>
+      </div>
+      <p id="configNoMatch" class="config-nomatch hidden">Nothing matches that search.</p>
+
+      <div class="config-pane active" data-pane="models">
+        <div class="toggle-list">
+          <label class="toggle"><input id="flagCommunityModels" type="checkbox"><span>Include community models<small>Published by other users and run on their own infrastructure — your prompts go to a third party.</small></span></label>
+        </div>
+        <div class="field"><span class="field-title">Assistant model</span><small class="drawer-hint">Drives Push2Talk and text chat. Only tool-calling models are listed — every feature in this app is a tool call.</small>
+          <select id="textModel"><option>openai</option></select>
+        </div>
+        <div class="field"><span class="field-title">Coder model</span><small class="drawer-hint">What <code>ask_coder_model</code> calls. On desktop this model runs the autonomous file/shell loop.</small>
+          <select id="coderModel"><option>qwen-coder</option></select>
+        </div>
+        <div class="field"><span class="field-title">Web search model</span><small class="drawer-hint">Used by <code>web_search</code>. Listed models report live web-search capability.</small>
+          <select id="searchModel"><option>gemini-search</option></select>
+        </div>
+        <div class="field"><span class="field-title">Embedding model</span>
+          <select id="embeddingModel"><option>openai-3-small</option></select>
+        </div>
+      </div>
+
+      <div class="config-pane" data-pane="voice">
+        <div class="field"><span class="field-title">Realtime model</span><small class="drawer-hint">Pick before you start a session — changing it applies to the next Start.</small>
+          <select id="realtimeModel">
+            <option value="gpt-realtime-2.1">gpt-realtime-2.1</option>
+            <option value="gpt-realtime-2.1-mini">gpt-realtime-2.1-mini</option>
+            <option value="gpt-realtime-2">gpt-realtime-2</option>
+          </select>
+        </div>
+        <label>Realtime voice
+          <select id="realtimeVoice">
+            <option>alloy</option><option>ash</option><option>ballad</option><option>coral</option><option>echo</option><option>sage</option><option>shimmer</option><option>verse</option><option>marin</option><option>cedar</option>
+          </select>
+        </label>
+        <div class="field"><span class="field-title">Speech-to-text model</span><small class="drawer-hint">Transcribes your Push2Talk recordings.</small>
+          <select id="sttModel"><option>whisper</option></select>
+        </div>
+        <div class="field"><span class="field-title">Push2Talk TTS model</span>
+          <select id="ttsModel"><option>elevenflash</option></select>
+        </div>
+        <div class="field"><span class="field-title">Push2Talk TTS voice</span><small class="drawer-hint">Populated from the selected TTS model’s own voice list.</small>
+          <div class="field-row">
+            <select id="ttsVoice"><option value="">Off</option></select>
+            <button id="previewVoice" class="button ghost small" type="button" title="Hear this voice">▶ Preview</button>
           </div>
         </div>
         <label>Mic noise gate (barge-in sensitivity)
           <input id="bargeGate" type="range" min="1" max="35" value="9">
+          <small class="drawer-hint">Lower it if the agent can’t hear you interrupt it; raise it if it keeps interrupting itself on background noise.</small>
         </label>
-        <p class="range-hint">Lower it if the agent can’t hear you interrupt it; raise it if it keeps interrupting itself on background noise.</p>
-        <h3 class="config-section">Models &amp; routing</h3>
-        <label>Interface sound volume
-          <input id="soundVolume" type="range" min="0" max="100" value="70">
-        </label>
-        <label>Web search model
-          <select id="searchModel"><option>gemini-search</option></select>
-        </label>
-        <div class="memory-block">
-          <div class="memory-head">
-            <span>Long-term memory</span>
-            <button id="clearMemory" class="button ghost small" type="button">Forget all</button>
-          </div>
-          <div id="memoryList" class="memory-list"></div>
+      </div>
+
+      <div class="config-pane" data-pane="media">
+        <div class="field"><span class="field-title">Image model</span>
+          <select id="imageModel"><option>flux</option></select>
         </div>
+        <label>Image size
+          <select id="imageSize"><option>1024x1024</option><option>768x1024</option><option>1024x768</option><option>1536x1024</option></select>
+        </label>
+        <label>Image batch count
+          <select id="imageCount"><option>1</option><option>2</option><option>3</option><option>4</option></select>
+        </label>
+        <div class="field"><span class="field-title">Video model</span>
+          <select id="videoModel"><option>veo</option></select>
+        </div>
+        <label>Video resolution <small class="drawer-hint">Offered resolutions come from the selected video model.</small>
+          <select id="videoResolution"><option>720p</option><option>1080p</option></select>
+        </label>
+        <label>Video shape
+          <select id="videoAspect"><option value="16:9">16:9</option><option value="9:16">9:16</option><option value="1:1">1:1</option><option value="4:5">4:5</option><option value="21:9">21:9</option></select>
+        </label>
+        <label>Video duration <small class="drawer-hint">Only the durations the selected model accepts.</small>
+          <select id="videoDuration"><option>4</option><option selected>6</option><option>8</option></select>
+        </label>
+        <label>Video batch count
+          <select id="videoCount"><option>1</option><option>2</option></select>
+        </label>
+        <label>Video audio
+          <select id="videoAudio"><option value="false">Off</option><option value="true">On</option></select>
+        </label>
+        <div class="field"><span class="field-title">Music/audio generation model</span>
+          <select id="audioModel"><option>elevenmusic</option></select>
+        </div>
+        <label>Music duration
+          <select id="musicDuration"><option>15</option><option selected>30</option><option>60</option><option>120</option></select>
+        </label>
+        <label>Audio batch count
+          <select id="audioCount"><option>1</option><option>2</option><option>3</option></select>
+        </label>
+      </div>
+
+      <div class="config-pane" data-pane="interface">
         <label>UI style
           <select id="uiStyle">
             <option value="refine">Refined</option>
@@ -185,67 +257,40 @@
             <option value="concierge">Concierge</option>
           </select>
         </label>
-        <label>Realtime model
-          <input id="realtimeModel" value="gpt-realtime-2.1" disabled>
+        <label>Interface sound volume
+          <input id="soundVolume" type="range" min="0" max="100" value="70">
         </label>
-        <label>Realtime voice
-          <select id="realtimeVoice">
-            <option>alloy</option><option>ash</option><option>ballad</option><option>coral</option><option>echo</option><option>sage</option><option>shimmer</option><option>verse</option><option>marin</option><option>cedar</option>
-          </select>
-        </label>
-        <label>Push2Talk text model
-          <select id="textModel"><option>openai</option></select>
-        </label>
-        <label>Coder model callable by agent
-          <select id="coderModel"><option>qwen-coder</option></select>
-        </label>
-        <label>Speech-to-text model
-          <select id="sttModel"><option>whisper</option></select>
-        </label>
-        <label>Push2Talk TTS model
-          <select id="ttsModel"><option>elevenflash</option></select>
-        </label>
-        <label>Push2Talk TTS voice
-          <select id="ttsVoice">
-            <option value="">Off</option><option selected>nova</option><option>alloy</option><option>echo</option><option>fable</option><option>onyx</option><option>shimmer</option><option>sage</option><option>verse</option>
-          </select>
-        </label>
-        <label>Embedding model
-          <select id="embeddingModel"><option>openai-3-small</option></select>
-        </label>
-        <label>Image model
-          <select id="imageModel"><option>flux</option></select>
-        </label>
-        <label>Video model
-          <select id="videoModel"><option>ltx-2</option></select>
-        </label>
-        <label>Music/audio generation model
-          <select id="audioModel"><option>elevenmusic</option></select>
-        </label>
-        <label>Image size
-          <select id="imageSize"><option>1024x1024</option><option>768x1024</option><option>1024x768</option><option>1536x1024</option></select>
-        </label>
-        <label>Image batch count
-          <select id="imageCount"><option>1</option><option>2</option><option>3</option><option>4</option></select>
-        </label>
-        <label>Video shape
-          <select id="videoAspect"><option value="16:9">16:9</option><option value="9:16">9:16</option></select>
-        </label>
-        <label>Video duration
-          <select id="videoDuration"><option>4</option><option selected>6</option><option>8</option><option>10</option><option>15</option></select>
-        </label>
-        <label>Video batch count
-          <select id="videoCount"><option>1</option><option>2</option></select>
-        </label>
-        <label>Video audio
-          <select id="videoAudio"><option value="false">Off</option><option value="true">On</option></select>
-        </label>
-        <label>Music duration
-          <select id="musicDuration"><option>15</option><option selected>30</option><option>60</option><option>120</option></select>
-        </label>
-        <label>Audio batch count
-          <select id="audioCount"><option>1</option><option>2</option><option>3</option></select>
-        </label>
+      </div>
+
+      <div class="config-pane" data-pane="system">
+        <h3 class="config-section">Features</h3>
+        <div class="toggle-list">
+          <label class="toggle"><input id="flagEndConversation" type="checkbox"><span>Let the agent end the session when you ask it to</span></label>
+          <label class="toggle"><input id="flagVoiceInterrupt" type="checkbox"><span>Voice barge-in — talking interrupts the model in realtime</span></label>
+          <label class="toggle"><input id="flagAutosaveUploads" type="checkbox"><span>Auto-save uploaded images to the gallery</span></label>
+          <label class="toggle"><input id="flagCamera" type="checkbox"><span>Allow live camera vision in realtime</span></label>
+        </div>
+
+        <h3 class="config-section">Desktop</h3>
+        <p id="desktopStatus" class="desktop-status">Web mode — download the desktop app for local files, a real coding agent, and shell access.</p>
+        <a id="desktopDownload" class="button primary" href="#" download>⬇ Download the desktop app</a>
+        <div id="desktopControls" class="desktop-controls hidden">
+          <button id="pickWorkspace" class="button ghost small" type="button">Choose workspace folder…</button>
+          <div class="toggle-list">
+            <label class="toggle"><input id="flagSaveToDisk" type="checkbox"><span>Save generated media to the workspace folder as real files</span></label>
+            <label class="toggle"><input id="flagAllowShell" type="checkbox"><span>Let the agent run shell commands (you approve each one)</span></label>
+          </div>
+        </div>
+
+        <h3 class="config-section">Long-term memory</h3>
+        <div class="memory-block">
+          <div class="memory-head">
+            <span>Facts the agent remembers about you</span>
+            <button id="clearMemory" class="button ghost small" type="button">Forget all</button>
+          </div>
+          <div id="memoryList" class="memory-list"></div>
+        </div>
+      </div>
     </section>
 
 
