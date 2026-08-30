@@ -2166,7 +2166,10 @@ async function runTool(name, args, realtimeCallId) {
     else if (name === "web_search") result = await webSearch(args.query || args.q || args.prompt || "", toolId);
     else if (name === "network_issue" || name === "networkissue" || name === "diagnose_error" || name === "network_error") result = await diagnoseError();
     else if (name === "open_generator") result = await openGenerator(args.kind || args.type || "image");
-    else if (name === "set_version" || name === "upgrade_version" || name === "set_ui_version" || name === "upgrade" || /upgrade.*version|version\s*2|web\s*os/i.test(name)) result = setVersionTool(args);
+    // Version switching attracts invented tool names ("switch_version", "use_v3",
+    // "change_ui"), so match the intent rather than one exact spelling — and let the
+    // NAME carry the target when the model put it there instead of in the arguments.
+    else if (isVersionToolName(name)) result = setVersionTool({ ...args, version: args.version ?? args.to ?? versionFromToolName(name) });
     else if (name === "morph_ui" || name === "morph" || name === "reshape_ui") result = morphUi(args);
     else if (name === "set_os" || name === "switch_os" || name === "set_desktop") result = morphUi({ os: args.os || args.to || args.desktop });
     else if (name === "set_style" || name === "set_surface" || name === "set_theme_style") result = morphUi({ style: args.style || args.to });
@@ -3607,7 +3610,10 @@ function summarizeToolResult(name, result) {
   if (name === "web_search") return "Web search results returned.";
   if (name === "network_issue") return result?.apiReachable ? "Diagnosed — API reachable." : "Diagnosed — connectivity problem.";
   if (name === "open_generator") return `Opened the ${result?.generator || "image"} generator on the canvas.`;
-  if (name === "set_version") return result?.version === "2" ? "Upgraded to VoiceEnable OS (v2)." : "Switched back to the classic UI (v1).";
+  if (name === "set_version") {
+    const said = { 1: "Switched to the classic v1 layout.", 2: "Switched to VoiceEnable OS (v2).", 3: "Switched to V3 — rail, conversation and canvas." };
+    return said[result?.version] || "Switched UI version.";
+  }
   if (name === "morph_ui" || name === "set_os" || name === "set_style") return result?.note || "UI reshaped.";
   if (name === "create_movie") return result?.movieGalleryId ? "Movie stitched and saved to the gallery." : "Movie scenes saved to the gallery.";
   if (name === "build_widget") return "Custom widget added to the canvas.";
@@ -3865,9 +3871,15 @@ function setUiVersion(version, opts = {}) {
   const changing = state.version !== target;
   const toV2 = target === "2" && changing;
   const toV3 = target === "3" && changing;
-  state.version = target;
-  localStorage.setItem("ui_version", target);
+  // state.version and body[data-version] MUST flip together. Setting state up front
+  // and the DOM only when the cutscene finished left ~14s where renderWorkspace()
+  // dispatched to the V3 renderer while the page was still styled as v1.
+  let swapped = false;
   const finish = () => {
+    if (swapped) return;
+    swapped = true;
+    state.version = target;
+    localStorage.setItem("ui_version", target);
     document.body.dataset.version = target;
     ensureOsChrome();
     // V3 owns three body classes (rail/canvas state); clear them elsewhere so v1
@@ -4280,9 +4292,28 @@ function morphUi(args = {}) {
   return { ok: true, changed, note: changed.length ? `UI morphed: ${changed.join(", ")}.` : "Nothing to change was specified." };
 }
 
+// Version switching attracts invented tool names — set_version, switch_version,
+// change_ui, use_v3, go_to_v1 — so match the intent rather than one exact spelling.
+// Without this a model that guesses a synonym just gets "Unknown tool".
+function isVersionToolName(name) {
+  const n = String(name || "").toLowerCase();
+  if (n === "upgrade" || /web_?\s?os/.test(n)) return true;
+  const verb = /^(set|switch|change|upgrade|downgrade|use|go|revert|toggle|enable)/.test(n);
+  if (/version|layout|shell|(^|_)ui(_|$)/.test(n) && (verb || n.startsWith("version"))) return true;
+  return verb && /(^|[_\-\s])v[123](?!\d)/.test(n); // use_v3, switch_to_v2, go-v1
+}
+
+// A target the model encoded in the tool NAME rather than the arguments.
+function versionFromToolName(name) {
+  const found = /(?:^|[_\-\s])v?([123])(?!\d)/.exec(String(name || "").toLowerCase());
+  return found ? found[1] : undefined;
+}
+
 function setVersionTool(args = {}) {
-  const asked = String(args.version ?? args.to ?? (args.downgrade === true ? "1" : "")).trim();
-  const v = ["1", "2", "3"].includes(asked) ? asked : (args.downgrade === true ? "1" : "3");
+  // Accept whatever shape the model produces: "3", 3, "v3", "V3", "version 3".
+  const asked = String(args.version ?? args.to ?? args.target ?? (args.downgrade === true ? "1" : "")).trim();
+  const digit = /([123])(?!\d)/.exec(asked);
+  const v = digit ? digit[1] : (args.downgrade === true ? "1" : "3");
   setUiVersion(v, { animate: true });
   const notes = {
     3: "Switched to V3, the default shell: conversation history in the left rail, the conversation in the centre, and an artifact canvas beside it that tabs or tiles. Reversible from the version button.",
@@ -7659,28 +7690,33 @@ function playV3Intro(done) {
   document.body.append(overlay);
   const cue = playCue(sound.buffers.v3Intro ? "v3Intro" : "convoStart");
 
-  let finished = false;
   const timers = [];
-  const finish = (skipped) => {
-    if (finished) return;
-    finished = true;
-    timers.forEach(clearTimeout);
-    if (skipped) cue.stop();
+  let swapped = false;
+  // Build V3 EARLY, as soon as the opaque overlay covers the screen. Nobody can see
+  // it happen, but it means the app is never half-switched, and an agent-driven
+  // "switch to V3" takes effect immediately instead of 14 seconds later. The flash at
+  // the climax then reveals a UI that has been ready the whole time.
+  const swap = () => {
+    if (swapped) return;
+    swapped = true;
     try { done && done(); } catch { /* ignore */ }
+  };
+  const bail = () => {
+    timers.forEach(clearTimeout);
+    cue.stop();
+    swap();
     overlay.classList.add("v3i-out");
     setTimeout(() => overlay.remove(), 440);
   };
-  // Swap the real UI in behind the flash at the climax, then let the overlay
-  // dissolve so V3 is already there when the light clears.
-  timers.push(setTimeout(() => { try { done && done(); } catch { /* ignore */ } }, V3_INTRO.climax + 60));
+  timers.push(setTimeout(swap, 900));
   timers.push(setTimeout(() => overlay.classList.add("v3i-out"), V3_INTRO.end));
-  timers.push(setTimeout(() => { finished = true; overlay.remove(); }, V3_INTRO.end + 500));
-  overlay.querySelector(".v3i-skip").addEventListener("click", (event) => { event.stopPropagation(); finish(true); });
-  overlay.addEventListener("click", () => finish(true));
+  timers.push(setTimeout(() => overlay.remove(), V3_INTRO.end + 500));
+  overlay.querySelector(".v3i-skip").addEventListener("click", (event) => { event.stopPropagation(); bail(); });
+  overlay.addEventListener("click", bail);
   document.addEventListener("keydown", function esc(event) {
     if (event.key !== "Escape") return;
     document.removeEventListener("keydown", esc);
-    finish(true);
+    bail();
   });
 }
 
