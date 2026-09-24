@@ -3603,6 +3603,7 @@ function stopRealtimeRL() { if (_rtLoop) { clearInterval(_rtLoop); _rtLoop = nul
 
 // ── FLY MARIO — full MaleCNS in a worker, translated into continuous SM64 control ──
 let _flyLoop = null, _flyPrevFrame = null, _flyBusy = false, _flySpinPhase = 0;
+let _flyJumpStartedAt = 0, _flyAirborneUntil = 0, _flyLastPrimitive = 'idle';
 function _flyHeld(out) {
     if (!out) return [];
     if (out.primitive === 'spin') {
@@ -3635,8 +3636,16 @@ async function _flyTick() {
                 if (motion < 0.035) _stuckCount++; else _stuckCount = 0;
             }
         }
+        const now = performance.now();
         const mem = readGameState();
-        const airborne = !!(mem && mem.actionName && mem.actionName.includes('airborne'));
+        const memoryAirborne = !!(mem && mem.actionName && mem.actionName.includes('airborne'));
+        // Memory reading is experimental/off by default. Fall back to the controller's
+        // own jump timing so multi-step moves (notably Whomp jump -> ground-pound)
+        // can progress for normal users without sm64Memory(true).
+        const timedAirborne = _flyJumpStartedAt > 0 &&
+            now >= _flyJumpStartedAt + 110 &&
+            now < _flyAirborneUntil;
+        const airborne = memoryAirborne || timedAirborne;
         let autoBearing = _lastOpenSide === 'L' ? -0.62 : _lastOpenSide === 'R' ? 0.62 : 0;
         if (_stuckCount >= 3 && !_lastOpenSide) autoBearing = ((_flySpinPhase++) & 1) ? -0.8 : 0.8;
         const targetBearing = window.FlyMarioSM64.targetBearing(autoBearing);
@@ -3649,6 +3658,16 @@ async function _flyTick() {
             airborne, grounded: !airborne, stuck: _stuckCount >= 3,
             speed: mem?.speed || 0, inWater: !!mem?.inWater, motion: motion ?? 0,
         });
+        // Arm an inferred airborne window only on the jump transition; don't keep
+        // extending it every tick while X is held. The next control tick can then
+        // legitimately advance jump -> aerial follow-up even with memory disabled.
+        if (out.primitive === 'jump' && _flyLastPrimitive !== 'jump') {
+            _flyJumpStartedAt = performance.now();
+            _flyAirborneUntil = _flyJumpStartedAt + 900;
+        } else if (out.primitive === 'ground_pound') {
+            _flyAirborneUntil = 0;
+        }
+        _flyLastPrimitive = out.primitive || 'idle';
         _rlSetHeld(_flyHeld(out));
         updateAIStatus(`🪰 Fly Mario: ${flyCtx.strain}.${flyCtx.phase} · ${out.primitive} · steer ${out.steer.toFixed(2)} · assist ${out.assist.toFixed(2)}`);
         updateDebugHUD();
@@ -3659,14 +3678,18 @@ async function _flyTick() {
 }
 function startFlyMario() {
     if (_flyLoop) return;
-    _flyPrevFrame = null; _flyBusy = false; _flySpinPhase = 0; _rlReleaseAll();
+    _flyPrevFrame = null; _flyBusy = false; _flySpinPhase = 0;
+    _flyJumpStartedAt = 0; _flyAirborneUntil = 0; _flyLastPrimitive = 'idle';
+    _rlReleaseAll();
     window.FlyMarioSM64?.showPanel(true);
     _flyLoop = setInterval(_flyTick, Math.max(110, 170 / gameSpeed));
     _flyTick();
 }
 function stopFlyMario() {
     if (_flyLoop) { clearInterval(_flyLoop); _flyLoop = null; }
-    _flyBusy = false; _flyPrevFrame = null; _rlReleaseAll();
+    _flyBusy = false; _flyPrevFrame = null;
+    _flyJumpStartedAt = 0; _flyAirborneUntil = 0; _flyLastPrimitive = 'idle';
+    _rlReleaseAll();
     window.FlyMarioSM64?.showPanel(false);
 }
 
