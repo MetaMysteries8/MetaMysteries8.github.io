@@ -1,6 +1,6 @@
 /* Fly Mario UI/bridge. Real connectome runs in fly-worker.js. */
 (()=>{'use strict';
-const COMMIT='03358c075000af5379e405b244dd31f1a0fd1401',BASE=`https://cdn.jsdelivr.net/gh/alextitonis/fly.ai@${COMMIT}/world/public/connectome/`;
+const COMMIT='03358c075000af5379e405b244dd31f1a0fd1401',BASE=`https://raw.githubusercontent.com/alextitonis/fly.ai/${COMMIT}/world/public/connectome/`;
 const st={ready:false,loading:false,error:null,progress:'',backend:'offline',neurons:0,connections:0,out:{forward:0,backward:0,steer:0,jump:0,attack:0,primitive:'idle'},tel:null,ctx:{strain:'explore',phase:'base',assist:.68,targetMode:'auto'}};
 let w,panel,seq=0,loading;const waits=new Map,S=x=>Math.max(-1,Math.min(1,Number.isFinite(x)?x:0));
 function snap(){return{ready:st.ready,loading:st.loading,error:st.error,progress:st.progress,backend:st.backend,neurons:st.neurons,connections:st.connections,output:st.out,telemetry:st.tel,context:{...st.ctx}}}
