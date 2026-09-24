@@ -5,7 +5,39 @@ let ctx={strain:'explore',phase:'base',assist:.68};
 const DT=.02, C=(x,a=0,b=1)=>Math.max(a,Math.min(b,Number.isFinite(x)?x:0)), S=x=>C(x,-1,1);
 const status=text=>postMessage({type:'progress',text}), sleep=ms=>new Promise(r=>setTimeout(r,ms));
 function rng(seed){let a=seed>>>0;return()=>{a=(a+0x6D2B79F5)|0;let t=Math.imul(a^(a>>>15),1|a);t=(t+Math.imul(t^(t>>>7),61|t))^t;return((t^(t>>>14))>>>0)/4294967296}}
-async function joined(urls,label){const cs=[];let got=0,last=0;for(const u of urls){for(let n=1;;n++)try{const r=await fetch(u,{cache:'force-cache'});if(!r.ok||!r.body)throw Error(`${u}: HTTP ${r.status}`);const rd=r.body.getReader();for(;;){const q=await rd.read();if(q.done)break;cs.push(q.value);got+=q.value.length;if(got-last>2e6){last=got;status(`downloading ${label}: ${(got/1e6).toFixed(0)} MB`)}}break}catch(e){if(n===3)throw e;status(`retrying ${label}`);await sleep(500*n)}}const blob=new Blob(cs),h=cs[0];if(!(h?.[0]===31&&h?.[1]===139))return blob.arrayBuffer();if(!self.DecompressionStream)throw Error('Browser lacks gzip DecompressionStream');status(`decompressing ${label}`);return new Response(blob.stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer()}
+async function joined(urls,label){
+  const cs=[];let got=0,last=0;
+  for(const u of urls){
+    for(let n=1;;n++){
+      const part=[];let partBytes=0;
+      try{
+        const r=await fetch(u,{cache:'force-cache'});
+        if(!r.ok||!r.body)throw Error(`${u}: HTTP ${r.status}`);
+        const rd=r.body.getReader();
+        for(;;){
+          const q=await rd.read();
+          if(q.done)break;
+          part.push(q.value);partBytes+=q.value.length;
+          const seen=got+partBytes;
+          if(seen-last>2e6){last=seen;status(`downloading ${label}: ${(seen/1e6).toFixed(0)} MB`)}
+        }
+        // Only commit bytes after the entire request succeeds. Failed attempts are
+        // thrown away so a retry cannot duplicate a truncated gzip prefix.
+        cs.push(...part);got+=partBytes;break;
+      }catch(e){
+        if(n===3)throw e;
+        last=got;
+        status(`retrying ${label}`);
+        await sleep(500*n);
+      }
+    }
+  }
+  const blob=new Blob(cs),h=cs[0];
+  if(!(h?.[0]===31&&h?.[1]===139))return blob.arrayBuffer();
+  if(!self.DecompressionStream)throw Error('Browser lacks gzip DecompressionStream');
+  status(`decompressing ${label}`);
+  return new Response(blob.stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer()
+}
 function magic(v,s){let g='';for(let i=0;i<4;i++)g+=String.fromCharCode(v.getUint8(i));if(g!==s)throw Error(`bad ${s} file`)}
 function meta(buf){const v=new DataView(buf);magic(v,'FLYM');const n=v.getUint32(8,true),l=v.getUint32(12,true),h=JSON.parse(new TextDecoder().decode(new Uint8Array(buf,16,l)));let a=16+l;const ti=new Uint16Array(buf.slice(a,a+2*n));a+=2*n;const ci=new Uint8Array(buf,a,n);a+=n;return{n,types:h.types,classes:h.superclasses,p:h.params,ti,ci,side:new Uint8Array(buf,a,n)}}
 function weights(buf){const v=new DataView(buf);magic(v,'FLYW');const n=v.getUint32(8,true),nnz=v.getUint32(12,true),ln=v.getFloat32(16,true),b=new Uint8Array(buf);let a=20;const vi=()=>{let x=0,s=0,q;do{q=b[a++];x+=(q&127)*2**s;s+=7}while(q&128);return x};const cp=new Uint32Array(n+1);for(let j=0;j<n;j++)cp[j+1]=cp[j]+vi();const ri=new Uint32Array(nnz);for(let j=0;j<n;j++){let row=0;for(let e=cp[j],f=1;e<cp[j+1];e++,f=0){row=f?vi():row+vi();ri[e]=row}}const code=b.slice(a,a+nnz),lut=new Float32Array(256);for(let q=0;q<128;q++){const z=Math.exp(ln*(1-q/127));lut[q]=z;lut[q|128]=-z}return{n,nnz,cp,ri,code,lut}}
