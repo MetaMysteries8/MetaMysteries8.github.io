@@ -56,27 +56,74 @@ const LAYA_SM64_OPTIONS = [
     { value: 'swim_up',       label: 'swim-up',       description: 'surface while in water' },
 ];
 
+let _layaLoadPromise = null;
+let _layaToastTimer = null;
+
+function _setLayaLoadUI(message, progress = null, state = 'loading') {
+    const toast = document.getElementById('laya-load-toast');
+    const text = document.getElementById('laya-load-text');
+    const bar = document.getElementById('laya-load-bar');
+    if (!toast || !text || !bar) return;
+
+    if (_layaToastTimer) { clearTimeout(_layaToastTimer); _layaToastTimer = null; }
+    toast.classList.add('open');
+    toast.classList.toggle('error', state === 'error');
+    toast.classList.toggle('ready', state === 'ready');
+    text.textContent = message || 'Preparing Local Laya…';
+
+    if (Number.isFinite(progress)) {
+        bar.classList.remove('indeterminate');
+        bar.style.width = Math.max(0, Math.min(100, progress)) + '%';
+    } else {
+        bar.classList.add('indeterminate');
+        bar.style.width = state === 'ready' ? '100%' : '35%';
+    }
+
+    if (state === 'ready') {
+        _layaToastTimer = setTimeout(() => toast.classList.remove('open'), 1400);
+    }
+}
+
 function setLocalLayaEnabled(on) {
     _localLaya = !!on;
     try { localStorage.setItem(LOCAL_LAYA_STORAGE_KEY, _localLaya ? '1' : '0'); } catch {}
     if (typeof updateModelVisionNotice === 'function') updateModelVisionNotice();
-    if (_localLaya) {
-        if (!window.LocalLayaSM64) {
-            if (typeof updateAIStatus === 'function') updateAIStatus('❌ Local Laya runtime script is missing');
-            _localLaya = false;
-            try { localStorage.setItem(LOCAL_LAYA_STORAGE_KEY, '0'); } catch {}
-            return;
-        }
-        window.LocalLayaSM64.preload({
-            onStatus: ({ message }) => {
-                if (!aiPlayerActive && typeof updateAIStatus === 'function') updateAIStatus(`🧠 ${message}`);
-            },
-        }).catch(err => {
-            if (typeof updateAIStatus === 'function') updateAIStatus(`❌ Laya load failed: ${err.message}`);
-        });
-    }
 }
 window.sm64LocalLaya = setLocalLayaEnabled;
+
+async function ensureLocalLayaReady() {
+    if (!window.LocalLayaSM64) {
+        const err = new Error('Local Laya runtime script is missing');
+        _setLayaLoadUI('❌ ' + err.message, null, 'error');
+        throw err;
+    }
+    if (window.LocalLayaSM64.ready) {
+        _setLayaLoadUI(`✅ Local Laya ready (${window.LocalLayaSM64.backend || 'loaded'})`, 100, 'ready');
+        return window.LocalLayaSM64;
+    }
+    if (_layaLoadPromise) return _layaLoadPromise;
+
+    _setLayaLoadUI('🧠 Preparing Local Laya… first load is about 428 MB', null, 'loading');
+    _layaLoadPromise = window.LocalLayaSM64.preload({
+        onStatus: ({ message, progress }) => {
+            const msg = message || 'Preparing Local Laya…';
+            _setLayaLoadUI('🧠 ' + msg, progress, 'loading');
+            if (typeof updateAIStatus === 'function') updateAIStatus('🧠 ' + msg);
+        },
+    }).then(runtime => {
+        _setLayaLoadUI(`✅ Local Laya ready on ${runtime.backend || window.LocalLayaSM64.backend || 'browser runtime'}`, 100, 'ready');
+        return runtime;
+    }).catch(err => {
+        _setLayaLoadUI(`❌ Laya failed to load: ${err.message}`, null, 'error');
+        if (typeof updateAIStatus === 'function') updateAIStatus(`❌ Laya load failed: ${err.message}`);
+        throw err;
+    }).finally(() => {
+        _layaLoadPromise = null;
+    });
+
+    return _layaLoadPromise;
+}
+window.sm64PrepareLaya = ensureLocalLayaReady;
 
 // Minimum ms between AI inference calls (prevents runaway spending)
 const MIN_THINK_INTERVAL_MS = 5000;
@@ -1027,6 +1074,36 @@ function _authSucceeded(key, authStatus, overlay) {
     try { refreshPollenBalance(); } catch {}
 }
 
+async function enterLocalLayaSession() {
+    const overlay = document.getElementById('auth-overlay');
+    const guestBtn = document.getElementById('auth-guest-btn');
+
+    _guestSession = true; // deliberately not persisted: the connection nag returns next visit
+    if (guestBtn) {
+        guestBtn.disabled = true;
+        guestBtn.textContent = '⏳ Preparing Local Laya…';
+    }
+
+    // Dismiss the nag immediately; model loading continues visibly in the app.
+    overlay?.classList.add('hidden');
+    setPlayMode('laya');
+    updateConnectionGates();
+    updateAIStatus('🧠 Local-only session — downloading/loading Laya before it can play.');
+
+    try {
+        await ensureLocalLayaReady();
+        updateAIStatus('✅ Local Laya loaded — Laya Mode is ready. Press Start.');
+    } catch (err) {
+        updateAIStatus(`❌ Local Laya could not load: ${err.message}`);
+    } finally {
+        if (guestBtn) {
+            guestBtn.disabled = false;
+            guestBtn.textContent = '🧠 Continue with Local Laya';
+        }
+    }
+}
+window.sm64EnterLocalSession = enterLocalLayaSession;
+
 async function initAuth() {
     const overlay    = document.getElementById('auth-overlay');
     const authBtn    = document.getElementById('auth-btn');
@@ -1063,16 +1140,15 @@ async function initAuth() {
     if (!cb) tts.speak('Welcome to SM64 AI Player! Connect Pollinations for cloud features, or continue with Local Laya.');
 
     const guestBtn = document.getElementById('auth-guest-btn');
-    guestBtn?.addEventListener('click', () => {
-        _guestSession = true; // deliberately not persisted: the connection nag returns next visit
-        overlay.classList.add('hidden');
-        setPlayMode('laya');
-        updateConnectionGates();
-        updateAIStatus('🧠 Local-only session — Laya/RL/manual modes are available. Connect Pollinations for cloud features.');
-        if (window.LocalLayaSM64) {
-            window.LocalLayaSM64.preload({ onStatus: ({ message }) => updateAIStatus('🧠 ' + message) }).catch(() => {});
-        }
-    });
+    if (guestBtn) guestBtn.onclick = () => enterLocalLayaSession();
+
+    // The auth HTML is visible before this large module finishes loading. If the
+    // user clicked "Continue with Local Laya" early, index.html queues the intent
+    // here so the click is never lost.
+    if (window.__sm64PendingLocalGuest) {
+        window.__sm64PendingLocalGuest = false;
+        enterLocalLayaSession();
+    }
 
     authBtn.addEventListener('click', async () => {
         authStatus.textContent = '🔄 Redirecting to Pollinations…';
@@ -3277,6 +3353,9 @@ function setPlayMode(m) {
     _playMode = m;
     setLocalLayaEnabled(m === 'laya');
     try { localStorage.setItem('sm64_play_mode', m); } catch {}
+    if (m === 'laya' && (_guestSession || !!getActiveKey())) {
+        ensureLocalLayaReady().catch(() => {});
+    }
     const sel = document.getElementById('play-mode'); if (sel) sel.value = m;
     if (!aiPlayerActive) { const b = document.getElementById('ai-player-btn'); if (b) b.textContent = '▶ Start'; }
     updateConnectionGates();
@@ -5053,6 +5132,21 @@ async function toggleAIPlayer() {
     }
 
     if (!aiPlayerActive) {
+        if (_playMode === 'laya') {
+            aiBtn.disabled = true;
+            aiBtn.textContent = window.LocalLayaSM64?.ready ? '🧠 Loading Laya…' : '⬇ Loading Laya…';
+            try {
+                await ensureLocalLayaReady();
+            } catch (err) {
+                aiBtn.disabled = false;
+                aiBtn.textContent = '▶ Start';
+                updateAIStatus(`❌ Cannot start Laya Mode until the local model loads: ${err.message}`);
+                return;
+            }
+            aiBtn.disabled = false;
+            aiBtn.textContent = '▶ Start';
+        }
+
         try {
             aiStream = await acquireVisionStream(5);
             if (!aiStream) throw new Error('no stream');
@@ -5113,7 +5207,7 @@ function _startSelectedMode() {
     aiBtn.textContent = '⏹ Stop';
     if (_playMode === 'laya') {
         setLocalLayaEnabled(true);
-        updateAIStatus('🧠 Laya Mode — local ONNX is playing continuously as fast as inference + movement allow.');
+        updateAIStatus(`🧠 Laya Mode — ${window.LocalLayaSM64?.backend || 'local ONNX'} is loaded and playing continuously as fast as inference + movement allow.`);
         tts.speak('Laya mode active. Local model taking the controller.');
         updateDebugHUD();
         scheduleAILoop();
