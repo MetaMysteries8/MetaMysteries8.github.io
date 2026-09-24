@@ -3602,8 +3602,11 @@ function startRealtimeRL() {
 function stopRealtimeRL() { if (_rtLoop) { clearInterval(_rtLoop); _rtLoop = null; } _rlReleaseAll(); _rtPrevFrame = null; }
 
 // ── FLY MARIO — full MaleCNS in a worker, translated into continuous SM64 control ──
-let _flyLoop = null, _flyPrevFrame = null, _flyBusy = false, _flySpinPhase = 0;
+let _flyLoop = null, _flyPrevFrame = null, _flyBusy = false, _flySpinPhase = 0, _flySession = 0;
 let _flyJumpStartedAt = 0, _flyAirborneUntil = 0, _flyLastPrimitive = 'idle';
+function _flySessionAlive(session) {
+    return session === _flySession && aiPlayerActive && _playMode === 'fly';
+}
 function _flyHeld(out) {
     if (!out) return [];
     if (out.primitive === 'spin') {
@@ -3622,14 +3625,18 @@ function _flyHeld(out) {
     return [...new Set(keys)];
 }
 async function _flyTick() {
-    if (!aiPlayerActive || _playMode !== 'fly' || _flyBusy || !window.FlyMarioSM64?.snapshot().ready) return;
+    const session = _flySession;
+    if (!_flySessionAlive(session) || _flyBusy || !window.FlyMarioSM64?.snapshot().ready) return;
     _flyBusy = true;
     try {
         const ss = await captureScreen(aiStream).catch(() => null);
+        if (!_flySessionAlive(session)) return;
         let depth = null, motion = null;
         if (ss) {
             if (_flyPrevFrame) motion = await _frameDiffScore(_flyPrevFrame, ss);
+            if (!_flySessionAlive(session)) return;
             depth = await _depthAnalyze(ss);
+            if (!_flySessionAlive(session)) return;
             _flyPrevFrame = ss;
             if (motion != null) {
                 _lastVisualPct = Math.round(motion * 100);
@@ -3658,6 +3665,9 @@ async function _flyTick() {
             airborne, grounded: !airborne, stuck: _stuckCount >= 3,
             speed: mem?.speed || 0, inWater: !!mem?.inWater, motion: motion ?? 0,
         });
+        // Stop/mode changes can happen while the worker is thinking. Never let a
+        // stale result re-press keys or mutate the new Fly session.
+        if (!_flySessionAlive(session)) return;
         // Arm an inferred airborne window only on the jump transition; don't keep
         // extending it every tick while X is held. The next control tick can then
         // legitimately advance jump -> aerial follow-up even with memory disabled.
@@ -3672,12 +3682,18 @@ async function _flyTick() {
         updateAIStatus(`🪰 Fly Mario: ${flyCtx.strain}.${flyCtx.phase} · ${out.primitive} · steer ${out.steer.toFixed(2)} · assist ${out.assist.toFixed(2)}`);
         updateDebugHUD();
     } catch (err) {
-        console.warn('[Fly Mario] tick failed:', err);
-        updateAIStatus(`⚠ Fly Mario tick failed: ${err.message}`);
-    } finally { _flyBusy = false; }
+        if (_flySessionAlive(session)) {
+            console.warn('[Fly Mario] tick failed:', err);
+            updateAIStatus(`⚠ Fly Mario tick failed: ${err.message}`);
+        }
+    } finally {
+        // An old async tick must not clear the busy flag of a newly-started session.
+        if (session === _flySession) _flyBusy = false;
+    }
 }
 function startFlyMario() {
     if (_flyLoop) return;
+    _flySession++;
     _flyPrevFrame = null; _flyBusy = false; _flySpinPhase = 0;
     _flyJumpStartedAt = 0; _flyAirborneUntil = 0; _flyLastPrimitive = 'idle';
     _rlReleaseAll();
@@ -3686,6 +3702,8 @@ function startFlyMario() {
     _flyTick();
 }
 function stopFlyMario() {
+    // Invalidate every in-flight capture/analysis/worker response before releasing keys.
+    _flySession++;
     if (_flyLoop) { clearInterval(_flyLoop); _flyLoop = null; }
     _flyBusy = false; _flyPrevFrame = null;
     _flyJumpStartedAt = 0; _flyAirborneUntil = 0; _flyLastPrimitive = 'idle';
