@@ -1104,6 +1104,27 @@ async function enterLocalLayaSession() {
 }
 window.sm64EnterLocalSession = enterLocalLayaSession;
 
+async function enterFlyBrainSession() {
+    const overlay = document.getElementById('auth-overlay');
+    const flyBtn = document.getElementById('auth-fly-btn');
+    _guestSession = true;
+    if (flyBtn) { flyBtn.disabled = true; flyBtn.textContent = '⏳ Loading Fly Brain…'; }
+    overlay?.classList.add('hidden');
+    setPlayMode('fly');
+    updateConnectionGates();
+    updateAIStatus('🪰 Local-only session — loading the MaleCNS connectome (~58 MB compressed).');
+    try {
+        if (!window.FlyMarioSM64) throw new Error('Fly runtime missing — reload the page.');
+        await window.FlyMarioSM64.ensureReady((s) => updateAIStatus(`🪰 ${s}`));
+        updateAIStatus('✅ Fly Brain loaded — select Fly Brain and press Start.');
+    } catch (err) {
+        updateAIStatus(`❌ Fly Brain could not load: ${err.message}`);
+    } finally {
+        if (flyBtn) { flyBtn.disabled = false; flyBtn.textContent = '🪰 Continue with Fly Brain'; }
+    }
+}
+window.sm64EnterFlySession = enterFlyBrainSession;
+
 async function initAuth() {
     const overlay    = document.getElementById('auth-overlay');
     const authBtn    = document.getElementById('auth-btn');
@@ -1137,10 +1158,12 @@ async function initAuth() {
 
     overlay.classList.remove('hidden');
     updateConnectionGates();
-    if (!cb) tts.speak('Welcome to SM64 AI Player! Connect Pollinations for cloud features, or continue with Local Laya.');
+    if (!cb) tts.speak('Welcome to SM64 AI Player! Connect Pollinations for cloud features, or continue with Local Laya or Fly Brain.');
 
     const guestBtn = document.getElementById('auth-guest-btn');
     if (guestBtn) guestBtn.onclick = () => enterLocalLayaSession();
+    const flyGuestBtn = document.getElementById('auth-fly-btn');
+    if (flyGuestBtn) flyGuestBtn.onclick = () => enterFlyBrainSession();
 
     // The auth HTML is visible before this large module finishes loading. If the
     // user clicked "Continue with Local Laya" early, index.html queues the intent
@@ -1148,6 +1171,10 @@ async function initAuth() {
     if (window.__sm64PendingLocalGuest) {
         window.__sm64PendingLocalGuest = false;
         enterLocalLayaSession();
+    }
+    if (window.__sm64PendingFlyGuest) {
+        window.__sm64PendingFlyGuest = false;
+        enterFlyBrainSession();
     }
 
     authBtn.addEventListener('click', async () => {
@@ -3346,10 +3373,10 @@ let _lastGradeTime = 0;
 //                  (clean demonstration signal).
 let _playMode = (() => { try { return localStorage.getItem('sm64_play_mode') || 'ai'; } catch { return 'ai'; } })();
 function _playModeLabel(m) {
-    return { ai: '🤖 AI Play', laya: '🧠 Laya Mode', rl: '🧒 RL Play', 'player-teach': '🧓 Player Teach', 'ai-teach': '👨‍🏫 AI Teach', rtplay: '🎮 RT Realtime' }[m] || '🤖 AI Play';
+    return { ai: '🤖 AI Play', laya: '🧠 Laya Mode', fly: '🪰 Fly Brain', rl: '🧒 RL Play', 'player-teach': '🧓 Player Teach', 'ai-teach': '👨‍🏫 AI Teach', rtplay: '🎮 RT Realtime' }[m] || '🤖 AI Play';
 }
 function setPlayMode(m) {
-    if (!['ai', 'laya', 'rl', 'player-teach', 'ai-teach', 'rtplay'].includes(m)) m = 'ai';
+    if (!['ai', 'laya', 'fly', 'rl', 'player-teach', 'ai-teach', 'rtplay'].includes(m)) m = 'ai';
     _playMode = m;
     setLocalLayaEnabled(m === 'laya');
     try { localStorage.setItem('sm64_play_mode', m); } catch {}
@@ -3573,6 +3600,119 @@ function startRealtimeRL() {
     }, Math.max(150, 230 / gameSpeed));
 }
 function stopRealtimeRL() { if (_rtLoop) { clearInterval(_rtLoop); _rtLoop = null; } _rlReleaseAll(); _rtPrevFrame = null; }
+
+// ── FLY MARIO — full MaleCNS in a worker, translated into continuous SM64 control ──
+let _flyLoop = null, _flyPrevFrame = null, _flyBusy = false, _flySpinPhase = 0, _flySession = 0;
+let _flyJumpStartedAt = 0, _flyAirborneUntil = 0, _flyLastPrimitive = 'idle';
+function _flySessionAlive(session) {
+    return session === _flySession && aiPlayerActive && _playMode === 'fly';
+}
+function _flyHeld(out) {
+    if (!out) return [];
+    if (out.primitive === 'spin') {
+        const ring = ['ArrowUp', 'ArrowRight', 'ArrowDown', 'ArrowLeft'];
+        return ['KeyC', ring[(_flySpinPhase++) & 3]];
+    }
+    const keys = [];
+    if (out.backward > out.forward && out.backward > 0.42) keys.push('ArrowDown');
+    else if (out.forward > 0.24) keys.push('ArrowUp');
+    if (out.steer < -0.18) keys.push('ArrowLeft');
+    else if (out.steer > 0.18) keys.push('ArrowRight');
+    if (out.primitive === 'jump' || out.jump > 0.58) keys.push('KeyX');
+    if (out.primitive === 'grab' || out.primitive === 'attack') keys.push('KeyC');
+    if (out.primitive === 'ground_pound') keys.push('Space');
+    // throw deliberately omits KeyC: releasing B is the throw after a Bowser spin.
+    return [...new Set(keys)];
+}
+async function _flyTick() {
+    const session = _flySession;
+    if (!_flySessionAlive(session) || _flyBusy || !window.FlyMarioSM64?.snapshot().ready) return;
+    _flyBusy = true;
+    try {
+        const ss = await captureScreen(aiStream).catch(() => null);
+        if (!_flySessionAlive(session)) return;
+        let depth = null, motion = null;
+        if (ss) {
+            if (_flyPrevFrame) motion = await _frameDiffScore(_flyPrevFrame, ss);
+            if (!_flySessionAlive(session)) return;
+            depth = await _depthAnalyze(ss);
+            if (!_flySessionAlive(session)) return;
+            _flyPrevFrame = ss;
+            if (motion != null) {
+                _lastVisualPct = Math.round(motion * 100);
+                if (motion < 0.035) _stuckCount++; else _stuckCount = 0;
+            }
+        }
+        const now = performance.now();
+        const mem = readGameState();
+        const memoryAirborne = !!(mem && mem.actionName && mem.actionName.includes('airborne'));
+        // Memory reading is experimental/off by default. Fall back to the controller's
+        // own jump timing so multi-step moves (notably Whomp jump -> ground-pound)
+        // can progress for normal users without sm64Memory(true).
+        const timedAirborne = _flyJumpStartedAt > 0 &&
+            now >= _flyJumpStartedAt + 110 &&
+            now < _flyAirborneUntil;
+        const airborne = memoryAirborne || timedAirborne;
+        let autoBearing = _lastOpenSide === 'L' ? -0.62 : _lastOpenSide === 'R' ? 0.62 : 0;
+        if (_stuckCount >= 3 && !_lastOpenSide) autoBearing = ((_flySpinPhase++) & 1) ? -0.8 : 0.8;
+        const targetBearing = window.FlyMarioSM64.targetBearing(autoBearing);
+        const flyCtx = window.FlyMarioSM64.getContext();
+        const bossish = !['explore', 'friendly'].includes(flyCtx.strain);
+        const targetStrength = bossish ? 0.86 : (_lastOpenSide ? 0.60 : 0.42);
+        const blockedCenter = depth && depth.worst === 1 ? (depth.flat ? 0.78 : 0.42) : 0.08;
+        const out = await window.FlyMarioSM64.tick({
+            targetBearing, targetStrength, loom: blockedCenter,
+            airborne, grounded: !airborne, stuck: _stuckCount >= 3,
+            speed: mem?.speed || 0, inWater: !!mem?.inWater, motion: motion ?? 0,
+        });
+        // Stop/mode changes can happen while the worker is thinking. Never let a
+        // stale result re-press keys or mutate the new Fly session.
+        if (!_flySessionAlive(session)) return;
+        // Arm an inferred airborne window only on the jump transition; don't keep
+        // extending it every tick while X is held. The next control tick can then
+        // legitimately advance jump -> aerial follow-up even with memory disabled.
+        if (out.primitive === 'jump' && _flyLastPrimitive !== 'jump') {
+            _flyJumpStartedAt = performance.now();
+            _flyAirborneUntil = _flyJumpStartedAt + 900;
+        } else if (out.primitive === 'ground_pound') {
+            _flyAirborneUntil = 0;
+        }
+        _flyLastPrimitive = out.primitive || 'idle';
+        _rlSetHeld(_flyHeld(out));
+        updateAIStatus(`🪰 Fly Mario: ${flyCtx.strain}.${flyCtx.phase} · ${out.primitive} · steer ${out.steer.toFixed(2)} · assist ${out.assist.toFixed(2)}`);
+        updateDebugHUD();
+    } catch (err) {
+        if (_flySessionAlive(session)) {
+            // Failed brain ticks are fail-closed: never leave the last movement
+            // latched while the worker/runtime is unhealthy.
+            _rlReleaseAll();
+            console.warn('[Fly Mario] tick failed:', err);
+            updateAIStatus(`⚠ Fly Mario tick failed: ${err.message}`);
+        }
+    } finally {
+        // An old async tick must not clear the busy flag of a newly-started session.
+        if (session === _flySession) _flyBusy = false;
+    }
+}
+function startFlyMario() {
+    if (_flyLoop) return;
+    _flySession++;
+    _flyPrevFrame = null; _flyBusy = false; _flySpinPhase = 0;
+    _flyJumpStartedAt = 0; _flyAirborneUntil = 0; _flyLastPrimitive = 'idle';
+    _rlReleaseAll();
+    window.FlyMarioSM64?.showPanel(true);
+    _flyLoop = setInterval(_flyTick, Math.max(110, 170 / gameSpeed));
+    _flyTick();
+}
+function stopFlyMario() {
+    // Invalidate every in-flight capture/analysis/worker response before releasing keys.
+    _flySession++;
+    if (_flyLoop) { clearInterval(_flyLoop); _flyLoop = null; }
+    _flyBusy = false; _flyPrevFrame = null;
+    _flyJumpStartedAt = 0; _flyAirborneUntil = 0; _flyLastPrimitive = 'idle';
+    _rlReleaseAll();
+    window.FlyMarioSM64?.showPanel(false);
+}
 
 // ── RL SHOW-OFF — the child takes temporary full control to demonstrate, then
 // YOU manually rate that run (👍/👎). This is the ONLY place manual rating
@@ -4054,10 +4194,12 @@ function saveTurboState() {
 }
 
 function startTurboLoop() {
-    if (_turboLoop) return;
+    // Fly Brain owns its own realtime controller. Never start the generic AI
+    // scheduler beside it (that would fight for keys and may spend cloud pollen).
+    if (_playMode === 'fly' || _turboLoop) return;
     const floor = _turboCfg.advanced ? 60 : 200;   // Advanced = absolute max rate
     _turboLoop = setInterval(() => {
-        if (!aiPlayerActive || !_turboMode || _isThinking || _rapidFireActive) return;
+        if (_playMode === 'fly' || !aiPlayerActive || !_turboMode || _isThinking || _rapidFireActive) return;
         aiThinkAndAct();
     }, floor);
 }
@@ -5101,6 +5243,10 @@ function exitRapidFire() {
 }
 
 function scheduleAILoop() {
+    // Fly Brain has a dedicated scheduler in startFlyMario(). Shared controls such
+    // as Speed/Turbo may call this function, so fail closed here rather than relying
+    // on every caller to remember the mode-specific exclusion.
+    if (_playMode === 'fly') return;
     if (_turboMode && _playMode !== 'laya') { startTurboLoop(); return; }   // Laya has its own realtime cadence
     const cycle = _playMode === 'laya'
         ? Math.max(90, 180 / Math.max(0.5, gameSpeed))
@@ -5119,15 +5265,15 @@ async function toggleAIPlayer() {
         // Source of truth for the mode is the dropdown's CURRENT value at press time
         // (don't rely only on the change event having fired).
         const _modeSel = document.getElementById('play-mode');
-        if (_modeSel && ['ai', 'laya', 'rl', 'player-teach', 'ai-teach', 'rtplay'].includes(_modeSel.value)) {
+        if (_modeSel && ['ai', 'laya', 'fly', 'rl', 'player-teach', 'ai-teach', 'rtplay'].includes(_modeSel.value)) {
             _playMode = _modeSel.value;
             try { localStorage.setItem('sm64_play_mode', _playMode); } catch {}
         }
     }
 
-    // Local Laya, RL, and Player-Teach can run without a cloud account.
+    // Local Laya, Fly Brain, RL, and Player-Teach can run without a cloud account.
     if (POLLINATIONS_ONLY_MODES.has(_playMode) && !getActiveKey()) {
-        _showPollinationsNag(`${_playModeLabel(_playMode)} requires a Pollinations account. Laya Mode and RL Play work locally.`);
+        _showPollinationsNag(`${_playModeLabel(_playMode)} requires a Pollinations account. Laya, Fly Brain, and RL Play work locally.`);
         return;
     }
 
@@ -5141,6 +5287,25 @@ async function toggleAIPlayer() {
                 aiBtn.disabled = false;
                 aiBtn.textContent = '▶ Start';
                 updateAIStatus(`❌ Cannot start Laya Mode until the local model loads: ${err.message}`);
+                return;
+            }
+            aiBtn.disabled = false;
+            aiBtn.textContent = '▶ Start';
+        }
+
+        if (_playMode === 'fly') {
+            if (!window.FlyMarioSM64) {
+                updateAIStatus('❌ Fly Brain runtime did not load. Reload the page.');
+                return;
+            }
+            aiBtn.disabled = true;
+            aiBtn.textContent = '⬇ Loading Fly Brain…';
+            try {
+                await window.FlyMarioSM64.ensureReady((s) => updateAIStatus(`🪰 ${s}`));
+            } catch (err) {
+                aiBtn.disabled = false;
+                aiBtn.textContent = '▶ Start';
+                updateAIStatus(`❌ Could not load MaleCNS: ${err.message}`);
                 return;
             }
             aiBtn.disabled = false;
@@ -5189,7 +5354,7 @@ async function toggleAIPlayer() {
 
         // Auto-study the guide before playing (once), in the background. RL Play uses
         // no LLM, so it skips this.
-        if (_playMode !== 'rl' && _playMode !== 'rtplay' && !_localLaya && aiNotes.length === 0 && getActiveKey()) {
+        if (_playMode !== 'rl' && _playMode !== 'rtplay' && _playMode !== 'fly' && !_localLaya && aiNotes.length === 0 && getActiveKey()) {
             updateAIStatus('📚 Studying the guide before playing…');
             runStudy({ silent: true }).catch(() => {});
         }
@@ -5212,6 +5377,14 @@ function _startSelectedMode() {
         updateDebugHUD();
         scheduleAILoop();
         aiThinkAndAct();
+        return;
+    }
+    if (_playMode === 'fly') {
+        updateAIStatus('🪰 Fly Brain — full MaleCNS is in the loop. The machine translates SM64 into fly senses; the fly drives Mario.');
+        tts.speak('Fly brain active. The insect has the controller.');
+        window.FlyMarioSM64?.showPanel(true);
+        startFlyMario();
+        updateDebugHUD();
         return;
     }
     if (_playMode === 'rl') {
@@ -5309,6 +5482,7 @@ function stopAIPlayer() {
     stopLiveLoop();
     stopElderWatch();
     stopRealtimeRL();
+    stopFlyMario();
     if (window.sm64RtPlay) window.sm64RtPlay.stop();
     _showoffRunning = false; _showoffBuffer = [];
     _showElderBanner(false); _showRatingWidget(false);
@@ -5336,7 +5510,7 @@ aiBtn.addEventListener('click', toggleAIPlayer);
 document.getElementById('play-mode')?.addEventListener('change', (e) => {
     if (aiPlayerActive) stopAIPlayer();
     if (!getActiveKey() && POLLINATIONS_ONLY_MODES.has(e.target.value)) {
-        _showPollinationsNag(`${_playModeLabel(e.target.value)} needs Pollinations. Laya Mode works without an account.`);
+        _showPollinationsNag(`${_playModeLabel(e.target.value)} needs Pollinations. Laya and Fly Brain work without an account.`);
         e.target.value = _playMode;
         return;
     }
@@ -6112,8 +6286,8 @@ setInterval(refreshPollenBalance, 60000);
 // agent) so it can drive the app from spoken commands without reaching into internals.
 window.sm64Voice = {
     key: () => { try { return getActiveKey() || ''; } catch { return ''; } },
-    mode: (m) => { if (['ai', 'rl', 'player-teach', 'ai-teach'].includes(m)) setPlayMode(m); },
-    start: (m) => { if (m && ['ai', 'rl', 'player-teach', 'ai-teach'].includes(m)) setPlayMode(m); if (!aiPlayerActive) toggleAIPlayer(); },
+    mode: (m) => { if (['ai', 'laya', 'fly', 'rl', 'player-teach', 'ai-teach'].includes(m)) setPlayMode(m); },
+    start: (m) => { if (m && ['ai', 'laya', 'fly', 'rl', 'player-teach', 'ai-teach'].includes(m)) setPlayMode(m); if (!aiPlayerActive) toggleAIPlayer(); },
     stop: () => { if (aiPlayerActive) stopAIPlayer(); },
     cheater: (on) => { try { setCheater(!!on); } catch {} },
     deepTrain: (on) => { try { grindTrain(!!on); } catch {} },

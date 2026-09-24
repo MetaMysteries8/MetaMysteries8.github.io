@@ -89,6 +89,7 @@
                 <select id="play-mode" title="Pick what the Start button runs">
                     <option value="ai">🤖 AI Play</option>
                     <option value="laya">🧠 Laya Mode (local realtime)</option>
+                    <option value="fly">🪰 Fly Brain (MaleCNS local)</option>
                     <option value="rl">🧒 RL Play</option>
                     <option value="player-teach">🧓 Player Teach</option>
                     <option value="ai-teach">👨‍🏫 AI Teach</option>
@@ -147,7 +148,7 @@
             <div id="provider-panel-wrap">
                 <button id="close-provider-btn" class="modal-close-btn" aria-label="Close">✕</button>
                 <h3>⚙ API Provider Settings</h3>
-                <p class="provider-desc">Local Laya runs fully in-browser. Pollinations unlocks cloud AI, Buddy, Study, and RT Realtime.</p>
+                <p class="provider-desc">Local Laya and Fly Brain run in-browser. Pollinations unlocks cloud AI, Buddy, Study, and RT Realtime.</p>
                 <div id="provider-panel"></div>
             </div>
         </div>
@@ -371,7 +372,7 @@
             <div id="auth-panel">
                 <div id="auth-logo">🍄</div>
                 <h2>SM64 AI Player</h2>
-                <p id="auth-desc">Connect Pollinations for the full cloud feature set, or continue with Local Laya / RL Play without an account.</p>
+                <p id="auth-desc">Connect Pollinations for the full cloud feature set, or continue with Local Laya / Fly Brain / RL Play without an account.</p>
                 <button id="auth-btn">🔑 Connect Pollinations Account</button>
                 <div id="auth-status"></div>
                 <p id="auth-note">Pollinations auth is optional. If you continue locally, this prompt comes back on your next visit and cloud-only features stay locked.</p>
@@ -379,6 +380,10 @@
                     <button id="auth-guest-btn" type="button"
                         onclick="if(window.sm64EnterLocalSession){window.sm64EnterLocalSession();}else{window.__sm64PendingLocalGuest=true;this.disabled=true;this.textContent='⏳ Loading local mode…';}">
                         🧠 Continue with Local Laya
+                    </button>
+                    <button id="auth-fly-btn" type="button"
+                        onclick="if(window.sm64EnterFlySession){window.sm64EnterFlySession();}else{window.__sm64PendingFlyGuest=true;this.disabled=true;this.textContent='⏳ Loading fly brain…';}">
+                        🪰 Continue with Fly Brain
                     </button>
                     <button id="auth-tutorial-btn">❓ How does this work?</button>
                 </div>
@@ -483,6 +488,7 @@
     </script>
     <script src="./sm64.js"></script>
     <script src="./laya-browser.js"></script>
+    <script src="./fly-mario.js"></script>
     <script type="module" src="./main.js"></script>
     <script src="./voice.js" defer></script>
     <script src="./rtplay.js" defer></script>
