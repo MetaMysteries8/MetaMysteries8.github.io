@@ -5,8 +5,58 @@ const st={ready:false,loading:false,error:null,progress:'',backend:'offline',neu
 let w,panel,seq=0,loading;const waits=new Map,S=x=>Math.max(-1,Math.min(1,Number.isFinite(x)?x:0));
 function snap(){return{ready:st.ready,loading:st.loading,error:st.error,progress:st.progress,backend:st.backend,neurons:st.neurons,connections:st.connections,output:st.out,telemetry:st.tel,context:{...st.ctx}}}
 function emit(){dispatchEvent(new CustomEvent('flymario-status',{detail:snap()}))}
-function worker(){if(w)return w;w=new Worker('./fly-worker.js',{name:'fly-mario-malecns'});w.onmessage=({data:m})=>{if(m.type==='progress'){st.progress=m.text;status(m.text);emit()}else if(m.type==='ready'){Object.assign(st,{ready:true,loading:false,error:null,progress:'ready',backend:'MaleCNS v1.0 / worker',neurons:m.neurons,connections:m.connections});status('🪰 MaleCNS ready');refresh();emit();st._ok?.(true);st._ok=st._bad=null}else if(m.type==='tick'){st.out=m.output;st.tel=m.telemetry;refresh();const q=waits.get(m.id);if(q){waits.delete(m.id);q(m.output)}}else if(m.type==='error'){st.error=m.message;st.loading=false;status('❌ '+m.message);refresh();const q=waits.get(m.id);if(q){waits.delete(m.id);q(st.out)}else st._bad?.(Error(m.message))}};w.onerror=e=>{st.error=e.message;st.loading=false;status('❌ '+e.message)};return w}
-function ready(cb){ui();if(st.ready)return Promise.resolve(true);if(loading)return loading;st.loading=true;st.progress='starting fly worker';if(cb){const h=e=>cb(e.detail.progress||e.detail.backend);addEventListener('flymario-status',h);loading=new Promise((ok,bad)=>{st._ok=v=>{removeEventListener('flymario-status',h);ok(v)};st._bad=e=>{removeEventListener('flymario-status',h);bad(e)};worker().postMessage({type:'load',base:BASE})})}else loading=new Promise((ok,bad)=>{st._ok=ok;st._bad=bad;worker().postMessage({type:'load',base:BASE})});emit();return loading.finally(()=>loading=null)}
+function failWorker(err){
+  const e=err instanceof Error?err:Error(String(err||'Fly worker failed'));
+  st.error=e.message;st.loading=false;st.ready=false;
+  status('❌ '+e.message);refresh();emit();
+  const reject=st._bad;st._ok=st._bad=null;
+  if(reject)reject(e);
+  for(const[id,q]of waits){waits.delete(id);q(st.out)}
+}
+function worker(){
+  if(w)return w;
+  try{w=new Worker('./fly-worker.js',{name:'fly-mario-malecns'})}catch(err){w=null;throw err}
+  w.onmessage=({data:m})=>{
+    if(m.type==='progress'){st.progress=m.text;status(m.text);emit()}
+    else if(m.type==='ready'){
+      Object.assign(st,{ready:true,loading:false,error:null,progress:'ready',backend:'MaleCNS v1.0 / worker',neurons:m.neurons,connections:m.connections});
+      status('🪰 MaleCNS ready');refresh();emit();
+      const ok=st._ok;st._ok=st._bad=null;if(ok)ok(true)
+    }
+    else if(m.type==='tick'){
+      st.out=m.output;st.tel=m.telemetry;refresh();
+      const q=waits.get(m.id);if(q){waits.delete(m.id);q(m.output)}
+    }
+    else if(m.type==='error'){
+      const q=waits.get(m.id);
+      if(q){waits.delete(m.id);q(st.out)}
+      else failWorker(Error(m.message||'Fly worker error'))
+    }
+  };
+  w.onerror=e=>{
+    const dead=w;w=null;try{dead?.terminate()}catch{}
+    failWorker(Error(e?.message||'Fly worker failed'));
+  };
+  return w
+}
+function ready(cb){
+  ui();
+  if(st.ready)return Promise.resolve(true);
+  if(loading)return loading;
+  st.loading=true;st.error=null;st.progress='starting fly worker';
+  let h=null;
+  if(cb){
+    h=e=>cb(e.detail.progress||e.detail.backend);
+    addEventListener('flymario-status',h)
+  }
+  loading=new Promise((ok,bad)=>{
+    st._ok=v=>{if(h)removeEventListener('flymario-status',h);ok(v)};
+    st._bad=e=>{if(h)removeEventListener('flymario-status',h);bad(e)};
+    try{worker().postMessage({type:'load',base:BASE})}catch(err){failWorker(err)}
+  });
+  emit();
+  return loading.finally(()=>{loading=null})
+}
 function context(x={}){st.ctx={...st.ctx,...x};w?.postMessage({type:'context',context:st.ctx});sync();refresh();return{...st.ctx}}
 function tick(obs={}){if(!st.ready)return Promise.reject(Error('MaleCNS not loaded'));const id=++seq,payload={...obs,context:{...st.ctx,...(obs.context||{})}};return new Promise(resolve=>{waits.set(id,resolve);worker().postMessage({type:'tick',id,obs:payload,steps:3});setTimeout(()=>{if(waits.delete(id))resolve(st.out)},1800)})}
 function reset(){w?.postMessage({type:'reset'})}
