@@ -3683,6 +3683,9 @@ async function _flyTick() {
         updateDebugHUD();
     } catch (err) {
         if (_flySessionAlive(session)) {
+            // Failed brain ticks are fail-closed: never leave the last movement
+            // latched while the worker/runtime is unhealthy.
+            _rlReleaseAll();
             console.warn('[Fly Mario] tick failed:', err);
             updateAIStatus(`⚠ Fly Mario tick failed: ${err.message}`);
         }
@@ -4191,10 +4194,12 @@ function saveTurboState() {
 }
 
 function startTurboLoop() {
-    if (_turboLoop) return;
+    // Fly Brain owns its own realtime controller. Never start the generic AI
+    // scheduler beside it (that would fight for keys and may spend cloud pollen).
+    if (_playMode === 'fly' || _turboLoop) return;
     const floor = _turboCfg.advanced ? 60 : 200;   // Advanced = absolute max rate
     _turboLoop = setInterval(() => {
-        if (!aiPlayerActive || !_turboMode || _isThinking || _rapidFireActive) return;
+        if (_playMode === 'fly' || !aiPlayerActive || !_turboMode || _isThinking || _rapidFireActive) return;
         aiThinkAndAct();
     }, floor);
 }
@@ -5238,6 +5243,10 @@ function exitRapidFire() {
 }
 
 function scheduleAILoop() {
+    // Fly Brain has a dedicated scheduler in startFlyMario(). Shared controls such
+    // as Speed/Turbo may call this function, so fail closed here rather than relying
+    // on every caller to remember the mode-specific exclusion.
+    if (_playMode === 'fly') return;
     if (_turboMode && _playMode !== 'laya') { startTurboLoop(); return; }   // Laya has its own realtime cadence
     const cycle = _playMode === 'laya'
         ? Math.max(90, 180 / Math.max(0.5, gameSpeed))
