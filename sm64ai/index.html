@@ -355,6 +355,17 @@
         </div>
         <div id="preplan-backdrop" class="modal-backdrop"></div>
 
+        <!-- Local Laya loader/status. The first ONNX load is large, so never
+             pretend the mode is ready until the runtime says it is. -->
+        <div id="laya-load-toast" role="status" aria-live="polite">
+            <div class="laya-load-head">
+                <span>🧠 Local Laya</span>
+                <small>browser ONNX · first load ≈428 MB</small>
+            </div>
+            <div id="laya-load-text">Preparing Local Laya…</div>
+            <div class="laya-load-track"><div id="laya-load-bar" class="indeterminate"></div></div>
+        </div>
+
         <!-- Auth overlay -->
         <div id="auth-overlay">
             <div id="auth-panel">
@@ -365,7 +376,10 @@
                 <div id="auth-status"></div>
                 <p id="auth-note">Pollinations auth is optional. If you continue locally, this prompt comes back on your next visit and cloud-only features stay locked.</p>
                 <div id="auth-alt-row">
-                    <button id="auth-guest-btn">🧠 Continue with Local Laya</button>
+                    <button id="auth-guest-btn" type="button"
+                        onclick="if(window.sm64EnterLocalSession){window.sm64EnterLocalSession();}else{window.__sm64PendingLocalGuest=true;this.disabled=true;this.textContent='⏳ Loading local mode…';}">
+                        🧠 Continue with Local Laya
+                    </button>
                     <button id="auth-tutorial-btn">❓ How does this work?</button>
                 </div>
                 <p id="auth-credit">
