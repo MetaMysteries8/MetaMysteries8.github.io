@@ -8,7 +8,7 @@
     // - Q4 ONNX graph comes from m1rhan's browser export.
     // - tokenizer + calibrated decision config come from the upstream typed-decisions checkpoint.
     const MODEL_ID = 'm1rhan/laya-typed-decisions-ONNX';
-    const TOKENIZER_MODEL_ID = 'convaiinnovations/laya-typed-decisions';
+    const TOKENIZER_MODEL_ID = 'm1rhan/laya-typed-decisions-ONNX';
     const MODEL_URL = 'https://huggingface.co/m1rhan/laya-typed-decisions-ONNX/resolve/main/onnx/model_q4.onnx?download=true';
     const CONFIG_URL = 'https://huggingface.co/convaiinnovations/laya-typed-decisions/resolve/main/rl_agent_config.json?download=true';
 
@@ -223,7 +223,6 @@
 
             emit('Loading Laya tokenizer…');
             tokenizer = await hf.AutoTokenizer.from_pretrained(TOKENIZER_MODEL_ID, {
-                subfolder: 'tokenizer',
                 progress_callback: p => {
                     const pct = Number.isFinite(p?.progress) ? Math.round(p.progress) : null;
                     emit(pct == null ? 'Loading Laya tokenizer…' : `Loading tokenizer… ${pct}%`, pct);
