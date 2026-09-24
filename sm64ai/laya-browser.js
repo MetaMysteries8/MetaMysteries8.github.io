@@ -94,7 +94,7 @@
 
     async function buildSequence(state, question, options, maxLen = 384) {
         const sp = await resolveSpecialTokens();
-        const headMaxLen = Math.max(32, Math.min(Number(config?.head_max_len || 192), 192));
+        const headMaxLen = Math.max(32, Math.min(Number(config?.head_max_len || 256), 256));
         const trueMaxLen = Math.max(96, Math.min(Number(config?.max_len || 1024), maxLen));
 
         let headIds = await tokenize(`choice question: ${String(question).replaceAll(sp.maskText, ' ')}`);
