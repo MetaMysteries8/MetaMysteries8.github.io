@@ -31,8 +31,8 @@ const MODEL_STORAGE_KEY  = 'sm64_selected_model';
 const CONTROLS_CACHE_KEY = 'sm64_controls_guide';
 const DEFAULT_MODEL      = 'openai-large';
 
-const LOCAL_LAYA_STORAGE_KEY = 'sm64_local_laya_parent';
-let _localLaya = (() => { try { return localStorage.getItem(LOCAL_LAYA_STORAGE_KEY) === '1'; } catch { return false; } })();
+const LOCAL_LAYA_STORAGE_KEY = 'sm64_local_laya_parent'; // legacy key; mode selector is now source of truth
+let _localLaya = false;
 
 const LAYA_SM64_OPTIONS = [
     { value: 'start',         label: 'start',         description: 'press Start for title, demo, or menu' },
@@ -498,6 +498,7 @@ async function callChatAPI(messages, opts = {}) {
         if (res.status === 401) {
             clearStoredKey();
             pollinationsKey = null;
+            updateConnectionGates();
             document.getElementById('auth-overlay')?.classList.remove('hidden');
             throw new Error('401 Unauthorized — your Pollinations key expired. Please reconnect.');
         }
@@ -956,14 +957,70 @@ function grabKeyFromHash() {
     return key || null;
 }
 
+let _guestSession = false;
+const POLLINATIONS_ONLY_MODES = new Set(['ai', 'ai-teach', 'rtplay']);
+
+function _showPollinationsNag(reason = 'This feature needs Pollinations.') {
+    const overlay = document.getElementById('auth-overlay');
+    const status = document.getElementById('auth-status');
+    if (status) status.textContent = '🔒 ' + reason;
+    overlay?.classList.remove('hidden');
+}
+
+function updateConnectionGates() {
+    const connected = !!getActiveKey();
+    const app = document.getElementById('app');
+    app?.classList.toggle('limited-mode', !connected);
+
+    const lock = (id, disabled, title) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.disabled = !!disabled;
+        if (title) el.title = title;
+    };
+
+    lock('model-select', !connected, connected ? 'AI vision model to use' : 'Connect Pollinations to use cloud models');
+    lock('show-paid-toggle', !connected, connected ? 'Show paid-only models' : 'Connect Pollinations to browse cloud models');
+    lock('show-community-toggle', !connected, connected ? 'Show community models' : 'Connect Pollinations to browse cloud models');
+    lock('pregame-notes-btn', !connected, connected ? 'AI studies the SM64 guide' : 'Connect Pollinations to use Study');
+    lock('ai-buddy-btn', !connected, connected ? 'AI buddy coach' : 'Connect Pollinations to use Buddy');
+    lock('so-study-btn', !connected, connected ? 'AI studies the SM64 guide' : 'Connect Pollinations to use Study');
+    lock('so-buddy-btn', !connected, connected ? 'AI buddy coach' : 'Connect Pollinations to use Buddy');
+
+    const sel = document.getElementById('play-mode');
+    if (sel) {
+        for (const opt of sel.options) {
+            opt.disabled = !connected && POLLINATIONS_ONLY_MODES.has(opt.value);
+            if (!connected && POLLINATIONS_ONLY_MODES.has(opt.value)) {
+                opt.textContent = opt.textContent.replace(/\s*🔒$/, '') + ' 🔒';
+            } else {
+                opt.textContent = opt.textContent.replace(/\s*🔒$/, '');
+            }
+        }
+    }
+
+    const chip = document.getElementById('guest-connect-chip');
+    if (chip) chip.style.display = connected ? 'none' : '';
+
+    const dc = document.getElementById('disconnect-btn');
+    if (dc) dc.style.display = connected ? '' : 'none';
+
+    // A stale cloud-only saved mode should never strand a guest behind a disabled option.
+    if (!connected && typeof _playMode !== 'undefined' && POLLINATIONS_ONLY_MODES.has(_playMode)) {
+        setPlayMode('laya');
+    }
+}
+
 function _authSucceeded(key, authStatus, overlay) {
     storeKey(key);
     pollinationsKey = key;
     providerKeys.pollinations = key;
     if (authStatus) authStatus.textContent = '✅ Authorized! Loading game…';
     overlay?.classList.add('hidden');
+    _guestSession = false;
     const dc = document.getElementById('disconnect-btn');
     if (dc) dc.style.display = '';
+    updateConnectionGates();
     tts.interrupt('Connected! Your Pollinations account is linked. The game is ready.');
     // The PKCE exchange is async, so boot's initial balance fetch has already run
     // with no key by the time we get here — refresh it now.
@@ -997,11 +1054,25 @@ async function initAuth() {
         providerKeys.pollinations = stored;
         overlay.classList.add('hidden');
         document.getElementById('disconnect-btn').style.display = '';
+        updateConnectionGates();
         return;
     }
 
     overlay.classList.remove('hidden');
-    if (!cb) tts.speak('Welcome to SM64 AI Player! Connect your Pollinations account to get started.');
+    updateConnectionGates();
+    if (!cb) tts.speak('Welcome to SM64 AI Player! Connect Pollinations for cloud features, or continue with Local Laya.');
+
+    const guestBtn = document.getElementById('auth-guest-btn');
+    guestBtn?.addEventListener('click', () => {
+        _guestSession = true; // deliberately not persisted: the connection nag returns next visit
+        overlay.classList.add('hidden');
+        setPlayMode('laya');
+        updateConnectionGates();
+        updateAIStatus('🧠 Local-only session — Laya/RL/manual modes are available. Connect Pollinations for cloud features.');
+        if (window.LocalLayaSM64) {
+            window.LocalLayaSM64.preload({ onStatus: ({ message }) => updateAIStatus('🧠 ' + message) }).catch(() => {});
+        }
+    });
 
     authBtn.addEventListener('click', async () => {
         authStatus.textContent = '🔄 Redirecting to Pollinations…';
@@ -1174,6 +1245,7 @@ function populateModelDropdown() {
         statusSpan.textContent = bits.join(' · ');
     }
     updateModelVisionNotice();
+    updateConnectionGates();
 }
 
 function getSelectedModel() {
@@ -1264,16 +1336,9 @@ function buildProviderPanel() {
     intro.innerHTML = '🌸 <strong>Pollinations AI by default.</strong> Or enable Local Laya below for a fully in-browser decision parent using the existing text perception path.';
     panel.appendChild(intro);
 
-    const layaRow = document.createElement('label');
-    layaRow.className = 'provider-row';
-    layaRow.style.cursor = 'pointer';
-    layaRow.innerHTML = '<span class="provider-label">🧠 Local Laya parent (ONNX)<br><small>Experimental · first load downloads ~428 MB · WebGPU → WASM fallback · no API key</small></span>';
-    const layaChk = document.createElement('input');
-    layaChk.type = 'checkbox';
-    layaChk.checked = _localLaya;
-    layaChk.disabled = !window.LocalLayaSM64;
-    layaChk.addEventListener('change', () => setLocalLayaEnabled(layaChk.checked));
-    layaRow.appendChild(layaChk);
+    const layaRow = document.createElement('div');
+    layaRow.className = 'provider-bridge-note laya-mode-note';
+    layaRow.innerHTML = '🧠 <strong>Local Laya is now a play mode.</strong> Pick <b>Laya Mode</b> from the top Play selector. It runs the Q4 ONNX model locally (WebGPU → WASM fallback), needs no Pollinations key, and downloads ~428 MB the first time.';
     panel.appendChild(layaRow);
 
     // Connection status row
@@ -1484,6 +1549,7 @@ function closeProviderPanel() {
 }
 
 document.getElementById('provider-btn')?.addEventListener('click', openProviderPanel);
+document.getElementById('guest-connect-chip')?.addEventListener('click', () => _showPollinationsNag('Connect Pollinations to unlock cloud AI, Buddy, Study, and RT Realtime.'));
 document.getElementById('provider-backdrop')?.addEventListener('click', closeProviderPanel);
 document.getElementById('close-provider-btn')?.addEventListener('click', closeProviderPanel);
 
@@ -1599,7 +1665,7 @@ const TUTORIAL_STEPS = [
     },
     {
         icon: '🔑', title: 'Step 1 — Connect Your Account',
-        body: 'Click the green Connect button to link your Pollinations account via OAuth, then pick any vision model from the model dropdown. No other API keys needed.',
+        body: 'Pollinations is optional: connect it for cloud AI, Buddy, Study, and RT Realtime, or continue locally with Laya Mode / RL Play. Guest mode is offered again on every new visit.',
         narration: 'Connect your Pollinations account with the green button, then pick a vision model from the dropdown.',
     },
     {
@@ -1609,7 +1675,7 @@ const TUTORIAL_STEPS = [
     },
     {
         icon: '🤖', title: 'Step 3 — Pick a mode & Start',
-        body: 'Choose a mode in the dropdown (AI Play, RL Play, Player Teach, or AI Teach), then click Start. Share your screen when prompted so it can see the game. It analyzes each frame, decides what to do, and plays — narrating its thoughts out loud.',
+        body: 'Choose a mode in the dropdown. Laya Mode runs the local ONNX decision model continuously; AI Play / AI Teach / RT Realtime use Pollinations; RL Play is local. Then click Start.',
         narration: 'Pick a mode from the dropdown, then click Start. Share your screen so it can see the game. It will analyze each frame and play, narrating its thoughts out loud.',
     },
     {
@@ -1686,8 +1752,10 @@ document.getElementById('disconnect-btn').addEventListener('click', () => {
     stopAIPlayer();
     stopBuddy();
     document.getElementById('disconnect-btn').style.display = 'none';
+    setPlayMode('laya');
+    updateConnectionGates();
     document.getElementById('auth-overlay').classList.remove('hidden');
-    tts.interrupt('Disconnected. Connect your Pollinations account to continue.');
+    tts.interrupt('Disconnected. Local Laya is still available; connect Pollinations for cloud features.');
 });
 
 // ────────────────────────────────────────────────────────────
@@ -3202,14 +3270,16 @@ let _lastGradeTime = 0;
 //                  (clean demonstration signal).
 let _playMode = (() => { try { return localStorage.getItem('sm64_play_mode') || 'ai'; } catch { return 'ai'; } })();
 function _playModeLabel(m) {
-    return { ai: '🤖 AI Play', rl: '🧒 RL Play', 'player-teach': '🧓 Player Teach', 'ai-teach': '👨‍🏫 AI Teach', rtplay: '🎮 RT Realtime' }[m] || '🤖 AI Play';
+    return { ai: '🤖 AI Play', laya: '🧠 Laya Mode', rl: '🧒 RL Play', 'player-teach': '🧓 Player Teach', 'ai-teach': '👨‍🏫 AI Teach', rtplay: '🎮 RT Realtime' }[m] || '🤖 AI Play';
 }
 function setPlayMode(m) {
-    if (!['ai', 'rl', 'player-teach', 'ai-teach', 'rtplay'].includes(m)) m = 'ai';
+    if (!['ai', 'laya', 'rl', 'player-teach', 'ai-teach', 'rtplay'].includes(m)) m = 'ai';
     _playMode = m;
+    setLocalLayaEnabled(m === 'laya');
     try { localStorage.setItem('sm64_play_mode', m); } catch {}
     const sel = document.getElementById('play-mode'); if (sel) sel.value = m;
     if (!aiPlayerActive) { const b = document.getElementById('ai-player-btn'); if (b) b.textContent = '▶ Start'; }
+    updateConnectionGates();
     updateAIStatus(`Mode: ${_playModeLabel(m)} — press the play button to start`);
 }
 window.sm64Mode = (m) => { if (m) setPlayMode(m); return _playMode; };
@@ -4113,7 +4183,7 @@ async function aiThink() {
 
     // Throttle: enforce minimum interval (bypassed in turbo / rapid-fire)
     const now = Date.now();
-    const fastMode = _turboMode || _rapidFireActive;
+    const fastMode = _turboMode || _rapidFireActive || _playMode === 'laya';
     const minInterval = MIN_THINK_INTERVAL_MS * (1 + _consecutiveErrors * 0.5);
     if (!fastMode && now - _lastThinkTime < minInterval) {
         updateAIStatus(`⏳ Cooling down (${Math.ceil((minInterval - (now - _lastThinkTime)) / 1000)}s)…`);
@@ -4146,7 +4216,7 @@ async function aiThink() {
         // NOT skip "identical" frames. That idle-skip is exactly why multi-request
         // mode appeared to stall: it executes one tiny move, the frame barely
         // changes, and the very next think got skipped → no new request fired.
-        const skipIdentical = !(_turboMode && (_turboCfg.advanced || _turboCfg.multi));
+        const skipIdentical = _playMode !== 'laya' && !(_turboMode && (_turboCfg.advanced || _turboCfg.multi));
         if (skipIdentical && isFrameIdentical(screenshot)) {
             updateAIStatus('💤 Screen unchanged — skipping inference');
             _isThinking = false;
@@ -4952,8 +5022,10 @@ function exitRapidFire() {
 }
 
 function scheduleAILoop() {
-    if (_turboMode) { startTurboLoop(); return; }   // turbo replaces the normal loop
-    const cycle = Math.max(MIN_THINK_INTERVAL_MS, 8000 / gameSpeed);
+    if (_turboMode && _playMode !== 'laya') { startTurboLoop(); return; }   // Laya has its own realtime cadence
+    const cycle = _playMode === 'laya'
+        ? Math.max(90, 180 / Math.max(0.5, gameSpeed))
+        : Math.max(MIN_THINK_INTERVAL_MS, 8000 / gameSpeed);
     aiInterval  = setInterval(async () => {
         if (!aiPlayerActive || _isThinking || _rapidFireActive) return;
         await aiThinkAndAct();
@@ -4968,16 +5040,15 @@ async function toggleAIPlayer() {
         // Source of truth for the mode is the dropdown's CURRENT value at press time
         // (don't rely only on the change event having fired).
         const _modeSel = document.getElementById('play-mode');
-        if (_modeSel && ['ai', 'rl', 'player-teach', 'ai-teach', 'rtplay'].includes(_modeSel.value)) {
+        if (_modeSel && ['ai', 'laya', 'rl', 'player-teach', 'ai-teach', 'rtplay'].includes(_modeSel.value)) {
             _playMode = _modeSel.value;
             try { localStorage.setItem('sm64_play_mode', _playMode); } catch {}
         }
     }
 
-    // Every mode EXCEPT pure RL Play needs the Pollinations LLM (parent/grading).
-    const layaServesMode = _localLaya && (_playMode === 'ai' || _playMode === 'ai-teach');
-    if (_playMode !== 'rl' && !layaServesMode && !getActiveKey()) {
-        document.getElementById('auth-overlay').classList.remove('hidden');
+    // Local Laya, RL, and Player-Teach can run without a cloud account.
+    if (POLLINATIONS_ONLY_MODES.has(_playMode) && !getActiveKey()) {
+        _showPollinationsNag(`${_playModeLabel(_playMode)} requires a Pollinations account. Laya Mode and RL Play work locally.`);
         return;
     }
 
@@ -5040,6 +5111,15 @@ async function toggleAIPlayer() {
 function _startSelectedMode() {
     aiBtn.classList.add('active');
     aiBtn.textContent = '⏹ Stop';
+    if (_playMode === 'laya') {
+        setLocalLayaEnabled(true);
+        updateAIStatus('🧠 Laya Mode — local ONNX is playing continuously as fast as inference + movement allow.');
+        tts.speak('Laya mode active. Local model taking the controller.');
+        updateDebugHUD();
+        scheduleAILoop();
+        aiThinkAndAct();
+        return;
+    }
     if (_playMode === 'rl') {
         if (!_adaptiveBrain) setAdaptiveBrain(true);   // RL Play IS the learner — it must be on to learn
         updateAIStatus('🧒 RL Player — the child plays on its own (no LLM: free, fast, reactive)');
@@ -5057,6 +5137,7 @@ function _startSelectedMode() {
         return;
     }
     if (_playMode === 'player-teach') {
+        if (!getActiveKey() && _aiGrading) setAiGrading(false);
         // These two are REQUIRED for teaching to work, so force them on:
         // Agent-Only would block your keyboard; the learner must be enabled to grade.
         if (_agentOnly) setAgentOnly(false);
@@ -5158,7 +5239,16 @@ function stopAIPlayer() {
 }
 
 aiBtn.addEventListener('click', toggleAIPlayer);
-document.getElementById('play-mode')?.addEventListener('change', (e) => { if (aiPlayerActive) stopAIPlayer(); setPlayMode(e.target.value); if (e.target.value === 'rtplay') _showRtCostWarning(); });
+document.getElementById('play-mode')?.addEventListener('change', (e) => {
+    if (aiPlayerActive) stopAIPlayer();
+    if (!getActiveKey() && POLLINATIONS_ONLY_MODES.has(e.target.value)) {
+        _showPollinationsNag(`${_playModeLabel(e.target.value)} needs Pollinations. Laya Mode works without an account.`);
+        e.target.value = _playMode;
+        return;
+    }
+    setPlayMode(e.target.value);
+    if (e.target.value === 'rtplay') _showRtCostWarning();
+});
 setPlayMode(_playMode);   // sync the selector + button label to the saved mode
 document.getElementById('rf-exit-btn')?.addEventListener('click', exitRapidFire);
 

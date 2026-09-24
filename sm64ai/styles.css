@@ -1345,3 +1345,63 @@ body {
 .rt-dir-btn:hover { border-color: #3c4a6e; background: #1a2030; }
 .rt-dir-btn.active { border-color: #e0a317; background: #251d0b; }
 .rt-dir-btn.active span { color: #c9b07a; }
+
+
+/* ── Local/Laya guest-mode polish ───────────────────────── */
+#play-mode {
+    min-width: 154px;
+    max-width: 255px;
+}
+#play-mode option[value="laya"] {
+    color: #8ff0d8;
+    font-weight: 700;
+}
+.guest-connect-chip {
+    color: #8ff0d8 !important;
+    border-color: rgba(126,224,200,0.38) !important;
+    background: rgba(126,224,200,0.10) !important;
+}
+.guest-connect-chip:hover {
+    background: rgba(126,224,200,0.18) !important;
+}
+#app.limited-mode #model-select-wrap,
+#app.limited-mode .hud-toggle {
+    opacity: 0.48;
+}
+#app.limited-mode #pregame-notes-btn:disabled,
+#app.limited-mode #ai-buddy-btn:disabled {
+    opacity: 0.38;
+}
+#auth-panel {
+    max-height: min(90vh, 720px);
+    overflow-y: auto;
+}
+#auth-alt-row {
+    flex-wrap: wrap;
+}
+#auth-guest-btn {
+    background: rgba(126,224,200,0.10);
+    border: 1px solid rgba(126,224,200,0.34);
+    border-radius: 8px;
+    color: #a7f3df;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 8px 14px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+#auth-guest-btn:hover {
+    background: rgba(126,224,200,0.18);
+    border-color: rgba(126,224,200,0.62);
+    transform: translateY(-1px);
+}
+.laya-mode-note {
+    border: 1px solid rgba(126,224,200,0.22);
+    background: rgba(126,224,200,0.06);
+    border-radius: 9px;
+    padding: 10px 12px;
+}
+@media (max-width: 760px) {
+    #play-mode { min-width: 118px; max-width: 150px; }
+    .guest-connect-chip { display: none !important; }
+}
