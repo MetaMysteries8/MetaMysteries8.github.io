@@ -1104,6 +1104,27 @@ async function enterLocalLayaSession() {
 }
 window.sm64EnterLocalSession = enterLocalLayaSession;
 
+async function enterFlyBrainSession() {
+    const overlay = document.getElementById('auth-overlay');
+    const flyBtn = document.getElementById('auth-fly-btn');
+    _guestSession = true;
+    if (flyBtn) { flyBtn.disabled = true; flyBtn.textContent = '⏳ Loading Fly Brain…'; }
+    overlay?.classList.add('hidden');
+    setPlayMode('fly');
+    updateConnectionGates();
+    updateAIStatus('🪰 Local-only session — loading the MaleCNS connectome (~58 MB compressed).');
+    try {
+        if (!window.FlyMarioSM64) throw new Error('Fly runtime missing — reload the page.');
+        await window.FlyMarioSM64.ensureReady((s) => updateAIStatus(`🪰 ${s}`));
+        updateAIStatus('✅ Fly Brain loaded — select Fly Brain and press Start.');
+    } catch (err) {
+        updateAIStatus(`❌ Fly Brain could not load: ${err.message}`);
+    } finally {
+        if (flyBtn) { flyBtn.disabled = false; flyBtn.textContent = '🪰 Continue with Fly Brain'; }
+    }
+}
+window.sm64EnterFlySession = enterFlyBrainSession;
+
 async function initAuth() {
     const overlay    = document.getElementById('auth-overlay');
     const authBtn    = document.getElementById('auth-btn');
@@ -1137,10 +1158,12 @@ async function initAuth() {
 
     overlay.classList.remove('hidden');
     updateConnectionGates();
-    if (!cb) tts.speak('Welcome to SM64 AI Player! Connect Pollinations for cloud features, or continue with Local Laya.');
+    if (!cb) tts.speak('Welcome to SM64 AI Player! Connect Pollinations for cloud features, or continue with Local Laya or Fly Brain.');
 
     const guestBtn = document.getElementById('auth-guest-btn');
     if (guestBtn) guestBtn.onclick = () => enterLocalLayaSession();
+    const flyGuestBtn = document.getElementById('auth-fly-btn');
+    if (flyGuestBtn) flyGuestBtn.onclick = () => enterFlyBrainSession();
 
     // The auth HTML is visible before this large module finishes loading. If the
     // user clicked "Continue with Local Laya" early, index.html queues the intent
@@ -1148,6 +1171,10 @@ async function initAuth() {
     if (window.__sm64PendingLocalGuest) {
         window.__sm64PendingLocalGuest = false;
         enterLocalLayaSession();
+    }
+    if (window.__sm64PendingFlyGuest) {
+        window.__sm64PendingFlyGuest = false;
+        enterFlyBrainSession();
     }
 
     authBtn.addEventListener('click', async () => {
@@ -6209,8 +6236,8 @@ setInterval(refreshPollenBalance, 60000);
 // agent) so it can drive the app from spoken commands without reaching into internals.
 window.sm64Voice = {
     key: () => { try { return getActiveKey() || ''; } catch { return ''; } },
-    mode: (m) => { if (['ai', 'rl', 'player-teach', 'ai-teach'].includes(m)) setPlayMode(m); },
-    start: (m) => { if (m && ['ai', 'rl', 'player-teach', 'ai-teach'].includes(m)) setPlayMode(m); if (!aiPlayerActive) toggleAIPlayer(); },
+    mode: (m) => { if (['ai', 'laya', 'fly', 'rl', 'player-teach', 'ai-teach'].includes(m)) setPlayMode(m); },
+    start: (m) => { if (m && ['ai', 'laya', 'fly', 'rl', 'player-teach', 'ai-teach'].includes(m)) setPlayMode(m); if (!aiPlayerActive) toggleAIPlayer(); },
     stop: () => { if (aiPlayerActive) stopAIPlayer(); },
     cheater: (on) => { try { setCheater(!!on); } catch {} },
     deepTrain: (on) => { try { grindTrain(!!on); } catch {} },
