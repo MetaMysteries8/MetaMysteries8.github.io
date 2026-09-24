@@ -31,6 +31,53 @@ const MODEL_STORAGE_KEY  = 'sm64_selected_model';
 const CONTROLS_CACHE_KEY = 'sm64_controls_guide';
 const DEFAULT_MODEL      = 'openai-large';
 
+const LOCAL_LAYA_STORAGE_KEY = 'sm64_local_laya_parent';
+let _localLaya = (() => { try { return localStorage.getItem(LOCAL_LAYA_STORAGE_KEY) === '1'; } catch { return false; } })();
+
+const LAYA_SM64_OPTIONS = [
+    { value: 'start',         label: 'start',         description: 'press Start for title, demo, or menu' },
+    { value: 'forward',       label: 'forward',       description: 'move straight ahead' },
+    { value: 'backward',      label: 'backward',      description: 'back away from danger or a wall' },
+    { value: 'left',          label: 'left',          description: 'turn or steer left' },
+    { value: 'right',         label: 'right',         description: 'turn or steer right' },
+    { value: 'jump_forward',   label: 'jump-forward',  description: 'jump while moving forward' },
+    { value: 'jump',          label: 'jump',          description: 'jump or advance dialog' },
+    { value: 'action',        label: 'action',        description: 'punch, dive, grab, or interact' },
+    { value: 'crouch',        label: 'crouch',        description: 'crouch or ground-pound setup' },
+    { value: 'wait',          label: 'wait',          description: 'hold still and observe feedback' },
+    { value: 'run_jump',      label: 'run-jump',      description: 'build speed then jump' },
+    { value: 'long_jump',     label: 'long-jump',     description: 'fast long horizontal jump' },
+    { value: 'ground_pound',  label: 'ground-pound',  description: 'jump then slam downward' },
+    { value: 'wall_kick',     label: 'wall-kick',     description: 'jump at wall then kick off it' },
+    { value: 'triple_jump',   label: 'triple-jump',   description: 'chain three running jumps' },
+    { value: 'dive',          label: 'dive',          description: 'run then dive forward' },
+    { value: 'backflip',      label: 'backflip',      description: 'crouch then jump backward' },
+    { value: 'enter_painting',label: 'enter-painting',description: 'run and jump into a painting' },
+    { value: 'swim_up',       label: 'swim-up',       description: 'surface while in water' },
+];
+
+function setLocalLayaEnabled(on) {
+    _localLaya = !!on;
+    try { localStorage.setItem(LOCAL_LAYA_STORAGE_KEY, _localLaya ? '1' : '0'); } catch {}
+    if (typeof updateModelVisionNotice === 'function') updateModelVisionNotice();
+    if (_localLaya) {
+        if (!window.LocalLayaSM64) {
+            if (typeof updateAIStatus === 'function') updateAIStatus('❌ Local Laya runtime script is missing');
+            _localLaya = false;
+            try { localStorage.setItem(LOCAL_LAYA_STORAGE_KEY, '0'); } catch {}
+            return;
+        }
+        window.LocalLayaSM64.preload({
+            onStatus: ({ message }) => {
+                if (!aiPlayerActive && typeof updateAIStatus === 'function') updateAIStatus(`🧠 ${message}`);
+            },
+        }).catch(err => {
+            if (typeof updateAIStatus === 'function') updateAIStatus(`❌ Laya load failed: ${err.message}`);
+        });
+    }
+}
+window.sm64LocalLaya = setLocalLayaEnabled;
+
 // Minimum ms between AI inference calls (prevents runaway spending)
 const MIN_THINK_INTERVAL_MS = 5000;
 // How many identical frames before we skip an inference call
@@ -780,7 +827,7 @@ async function callChatWithTools(messages, opts = {}) {
 // Whether the model currently driving the game can actually be sent images.
 // First-party vision models: yes. Community models (alpha) are text-only today,
 // so this is false for them and callers must use the text-only fallback path.
-function providerHasVision() { return modelHasVision(); }
+function providerHasVision() { return _localLaya ? false : modelHasVision(); }
 
 // ────────────────────────────────────────────────────────────
 // 4. AUTH (Pollinations OAuth)
@@ -1161,6 +1208,12 @@ function updateModelVisionNotice() {
     const m    = modelInfo(name);
     const el   = document.getElementById('model-vision-notice');
     if (!el) return;
+    if (_localLaya) {
+        el.textContent = '🧠 local Laya';
+        el.title = 'Local Q4 Laya typed-decisions ONNX. Runs in this browser via WebGPU when available, otherwise WASM. No gameplay state is sent to Pollinations.';
+        el.style.display = '';
+        return;
+    }
     if (m && !modelEntryHasVision(m)) {
         el.textContent = '🚫 blind';
         el.title = `${name} does not accept images, so the AI plays from a text description of the frame (depth read, brightness grid, motion %) instead of seeing it. Expect much worse play. Pick a 👁 model for real vision.`;
@@ -1208,8 +1261,20 @@ function buildProviderPanel() {
     // This app is Pollinations-exclusive — Pollinations handles every model + API.
     const intro = document.createElement('p');
     intro.className = 'provider-bridge-note';
-    intro.innerHTML = '🌸 <strong>Powered by Pollinations AI.</strong> Pick any vision model from the model dropdown in the top bar — no other API keys needed.';
+    intro.innerHTML = '🌸 <strong>Pollinations AI by default.</strong> Or enable Local Laya below for a fully in-browser decision parent using the existing text perception path.';
     panel.appendChild(intro);
+
+    const layaRow = document.createElement('label');
+    layaRow.className = 'provider-row';
+    layaRow.style.cursor = 'pointer';
+    layaRow.innerHTML = '<span class="provider-label">🧠 Local Laya parent (ONNX)<br><small>Experimental · first load downloads ~428 MB · WebGPU → WASM fallback · no API key</small></span>';
+    const layaChk = document.createElement('input');
+    layaChk.type = 'checkbox';
+    layaChk.checked = _localLaya;
+    layaChk.disabled = !window.LocalLayaSM64;
+    layaChk.addEventListener('change', () => setLocalLayaEnabled(layaChk.checked));
+    layaRow.appendChild(layaChk);
+    panel.appendChild(layaRow);
 
     // Connection status row
     const connRow = document.createElement('div');
@@ -4393,12 +4458,58 @@ Valid keys (THESE ARE THE ONLY ONES — there is no camera key): ArrowUp(forward
         const maxTokens = _preplanMode
             ? Math.min(2000, 500 + (_preplanCap > 0 ? _preplanCap : 40) * 25)
             : 400;
-        const rawContent = await callChatWithTools([
-            buildSystemMessage(systemStatic, systemDynamic),
-            userMessage,
-        ], { json: _cmdFormat !== 'simple', max_tokens: maxTokens });
+        let response;
+        if (_localLaya) {
+            if (!window.LocalLayaSM64) throw new Error('Local Laya runtime not loaded');
 
-        const response = parseAIResponse(rawContent);
+            const layaState = [
+                'GAME: Super Mario 64. You control Mario with one bounded action at a time.',
+                `REGION: ${_region || 'unknown'}; region age: ${_regionAge} turns.`,
+                `GOAL: ${_aiGoal || userInstruction || 'make safe visible progress toward the next star'}`,
+                `LAST ACTION: ${_lastActionSummary || 'none yet'}`,
+                `VISUAL CHANGE: ${_lastVisualPct == null ? 'unknown' : _lastVisualPct + '%'}; stuck count: ${_stuckCount}; scene-cut count: ${_sceneCutCount}.`,
+                _progressLog.length ? `PROGRESS: ${_progressLog.slice(-6).join(' -> ')}` : 'PROGRESS: none recorded yet.',
+                gameState ? gameStateToText(gameState) : 'LIVE RAM: unavailable; rely on visual-derived text feedback.',
+                blindCtx || '',
+                depthCtx || '',
+                brainCtx || '',
+                rewardCtx || '',
+                motionCtx || '',
+                userInstruction ? `USER INSTRUCTION: ${userInstruction}` : '',
+                'RULE: if control is uncertain at the beginning, title/demo/menu is plausible; Start is the recovery action. If the last move barely changed the frame, do not blindly repeat it.',
+            ].filter(Boolean).join('\n');
+
+            const pick = await window.LocalLayaSM64.decide({
+                state: layaState,
+                question: "Choose Mario's single best next control action. Prefer safe progress toward the current goal; use feedback to escape failed moves.",
+                options: LAYA_SM64_OPTIONS,
+                maxLen: 384,
+                onStatus: ({ message }) => updateAIStatus(`🧠 ${message}`),
+            });
+
+            const confidence = Math.round((pick.probabilities[pick.index] || 0) * 100);
+            response = {
+                region: _region || 'unknown',
+                goal: _aiGoal || userInstruction || 'make progress toward the next star',
+                target: pick.label,
+                actions: [pick.choice],
+                thought: `Local Laya chose ${pick.label} at ${confidence}% (${pick.backend}, ${Math.round(pick.latencyMs)}ms, ${pick.sequenceLength} tokens).`,
+                speech: '',
+                done: null,
+                mistake: null,
+                notes: [],
+                child_trust: Math.round(_childTrust * 100),
+                preplan: false,
+                rapid_fire: false,
+                _localLaya: pick,
+            };
+        } else {
+            const rawContent = await callChatWithTools([
+                buildSystemMessage(systemStatic, systemDynamic),
+                userMessage,
+            ], { json: _cmdFormat !== 'simple', max_tokens: maxTokens });
+            response = parseAIResponse(rawContent);
+        }
 
         // 🤝 PARENT SETS THE CHILD'S TRUST. The parent (LLM) grades the apprentice
         // and decides how much to trust it (child_trust 0-100). Trust controls how
@@ -4488,7 +4599,7 @@ Valid keys (THESE ARE THE ONLY ONES — there is no camera key): ArrowUp(forward
         updateAIStatus(thoughtLine);
         logReasoning(response.thought, response.speech);   // feed the streamer thought-stream
         _consecutiveErrors = 0;
-        recordUsage();   // sample pollen spend for the energy bar / usage log
+        if (!_localLaya) recordUsage();   // local Laya never spends pollen
 
         // Remember this turn so the next one can sense movement/direction.
         _prevScreenshot = screenshot;       // null in memory-only mode (fine)
@@ -4864,7 +4975,8 @@ async function toggleAIPlayer() {
     }
 
     // Every mode EXCEPT pure RL Play needs the Pollinations LLM (parent/grading).
-    if (_playMode !== 'rl' && !getActiveKey()) {
+    const layaServesMode = _localLaya && (_playMode === 'ai' || _playMode === 'ai-teach');
+    if (_playMode !== 'rl' && !layaServesMode && !getActiveKey()) {
         document.getElementById('auth-overlay').classList.remove('hidden');
         return;
     }
@@ -4912,7 +5024,7 @@ async function toggleAIPlayer() {
 
         // Auto-study the guide before playing (once), in the background. RL Play uses
         // no LLM, so it skips this.
-        if (_playMode !== 'rl' && _playMode !== 'rtplay' && aiNotes.length === 0 && getActiveKey()) {
+        if (_playMode !== 'rl' && _playMode !== 'rtplay' && !_localLaya && aiNotes.length === 0 && getActiveKey()) {
             updateAIStatus('📚 Studying the guide before playing…');
             runStudy({ silent: true }).catch(() => {});
         }
