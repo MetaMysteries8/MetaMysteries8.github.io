@@ -4,9 +4,29 @@
 (() => {
     'use strict';
 
+    // Split assets deliberately:
+    // - Q4 ONNX graph comes from m1rhan's browser export.
+    // - tokenizer + calibrated decision config come from the upstream typed-decisions checkpoint.
     const MODEL_ID = 'm1rhan/laya-typed-decisions-ONNX';
+    const TOKENIZER_MODEL_ID = 'convaiinnovations/laya-typed-decisions';
     const MODEL_URL = 'https://huggingface.co/m1rhan/laya-typed-decisions-ONNX/resolve/main/onnx/model_q4.onnx?download=true';
-    const CONFIG_URL = 'https://huggingface.co/m1rhan/laya-typed-decisions-ONNX/resolve/main/rl_agent_config.json?download=true';
+    const CONFIG_URL = 'https://huggingface.co/convaiinnovations/laya-typed-decisions/resolve/main/rl_agent_config.json?download=true';
+
+    // Known-good upstream calibration. Network/config failure should degrade to
+    // these values, never prevent the 428 MB graph from loading.
+    const FALLBACK_CONFIG = Object.freeze({
+        max_len: 1024,
+        head_max_len: 256,
+        temperature: [1.0148024559020996, 1.0374259948730469, 1.0575125217437744],
+        temperature_by_options: {
+            'choice:2': 1.9063563346862793,
+            'choice:3-5': 1.7601518630981445,
+            'choice:6-10': 1.0000158548355103,
+            'choice:11+': 0.10058280825614929,
+            'score:3-5': 1.2514300346374512,
+            'noul:2': 1.983399510383606,
+        },
+    });
     const ORT_VERSION = '1.23.2';
     const ORT_WEBGPU_URL = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/ort.webgpu.min.mjs`;
     const HFJS_URL = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.2';
@@ -74,7 +94,7 @@
 
     async function buildSequence(state, question, options, maxLen = 384) {
         const sp = await resolveSpecialTokens();
-        const headMaxLen = Math.max(32, Math.min(Number(config?.head_max_len || 192), 192));
+        const headMaxLen = Math.max(32, Math.min(Number(config?.head_max_len || 256), 256));
         const trueMaxLen = Math.max(96, Math.min(Number(config?.max_len || 1024), maxLen));
 
         let headIds = await tokenize(`choice question: ${String(question).replaceAll(sp.maskText, ' ')}`);
@@ -135,6 +155,18 @@
         return BigInt64Array.from(values, v => BigInt(Math.trunc(Number(v))));
     }
 
+    async function loadAgentConfig() {
+        try {
+            const r = await fetch(CONFIG_URL, { cache: 'force-cache' });
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            return await r.json();
+        } catch (err) {
+            console.warn('[Laya] upstream rl_agent_config unavailable; using embedded calibration:', err);
+            emit('Laya config unavailable — using embedded calibration');
+            return { ...FALLBACK_CONFIG, temperature_by_options: { ...FALLBACK_CONFIG.temperature_by_options } };
+        }
+    }
+
     async function createSession() {
         const opts = { graphOptimizationLevel: 'all' };
         if (typeof navigator !== 'undefined' && navigator.gpu) {
@@ -171,10 +203,7 @@
             const [hf, ortMod, cfg] = await Promise.all([
                 import(HFJS_URL),
                 import(ORT_WEBGPU_URL),
-                fetch(CONFIG_URL).then(r => {
-                    if (!r.ok) throw new Error(`Laya config HTTP ${r.status}`);
-                    return r.json();
-                }),
+                loadAgentConfig(),
             ]);
 
             ort = ortMod;
@@ -193,7 +222,8 @@
             }
 
             emit('Loading Laya tokenizer…');
-            tokenizer = await hf.AutoTokenizer.from_pretrained(MODEL_ID, {
+            tokenizer = await hf.AutoTokenizer.from_pretrained(TOKENIZER_MODEL_ID, {
+                subfolder: 'tokenizer',
                 progress_callback: p => {
                     const pct = Number.isFinite(p?.progress) ? Math.round(p.progress) : null;
                     emit(pct == null ? 'Loading Laya tokenizer…' : `Loading tokenizer… ${pct}%`, pct);
@@ -276,6 +306,7 @@
         get lastDecision() { return lastDecision; },
         setStatusSink(fn) { statusSink = typeof fn === 'function' ? fn : null; },
         modelId: MODEL_ID,
+        tokenizerModelId: TOKENIZER_MODEL_ID,
     };
 
     window.LocalLayaSM64 = api;
