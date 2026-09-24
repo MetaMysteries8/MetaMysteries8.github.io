@@ -40,7 +40,7 @@ const LAYA_SM64_OPTIONS = [
     { value: 'backward',      label: 'backward',      description: 'back away from danger or a wall' },
     { value: 'left',          label: 'left',          description: 'turn or steer left' },
     { value: 'right',         label: 'right',         description: 'turn or steer right' },
-    { value: 'up+jump',       label: 'jump-forward',  description: 'jump while moving forward' },
+    { value: 'jump_forward',   label: 'jump-forward',  description: 'jump while moving forward' },
     { value: 'jump',          label: 'jump',          description: 'jump or advance dialog' },
     { value: 'action',        label: 'action',        description: 'punch, dive, grab, or interact' },
     { value: 'crouch',        label: 'crouch',        description: 'crouch or ground-pound setup' },
@@ -4975,7 +4975,8 @@ async function toggleAIPlayer() {
     }
 
     // Every mode EXCEPT pure RL Play needs the Pollinations LLM (parent/grading).
-    if (_playMode !== 'rl' && !_localLaya && !getActiveKey()) {
+    const layaServesMode = _localLaya && (_playMode === 'ai' || _playMode === 'ai-teach');
+    if (_playMode !== 'rl' && !layaServesMode && !getActiveKey()) {
         document.getElementById('auth-overlay').classList.remove('hidden');
         return;
     }
